@@ -1,0 +1,12 @@
+spring:
+  application:
+    name: demo
+  datasource:
+    url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:app}
+    username: ${DB_USER:app}
+    password: ${DB_PASSWORD:password}
+  jpa:
+    hibernate:
+      ddl-auto: update # 学習用。本格運用ではマイグレーションツールに移行
+server:
+  port: 8080

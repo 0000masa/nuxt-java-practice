@@ -38,10 +38,14 @@ flowchart LR
 
 Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docker/backend/`)、`docker-compose.yml` はリポジトリ直下に置く。開発用 Dockerfile は「実行環境(Node / JDK)だけ」を持ち、ソースコードは volumes でマウントする方式。本番用 Dockerfile は AWS 構築時に別途作成する。
 
-### 永続化と認証情報
+### 永続化と環境変数
 
 - MySQL(`mysql-data`)、MinIO(`minio-data`)、Gradle キャッシュ(`gradle-cache`)は named volume で永続化。`docker compose down` してもデータは残る
-- 接続情報(DB: `app`/`app`/`password`、MinIO: `minioadmin`/`minioadmin`)は**ローカル開発専用の値として docker-compose.yml に直書き**する方針。本番は ECS タスク定義側で別の値を注入する
+- 環境変数は**リポジトリ直下の `.env` で一元管理**する(`.env` は gitignore、テンプレートの `.env.example` をコミット)。1枚のファイルを二役で使う:
+  - **backend**: `env_file: .env` で全変数を丸ごと注入。**変数が増えても `.env` に追記するだけ**で compose の変更は不要
+  - **mysql / minio / minio-init**: 公式イメージが決めた変数名(`MYSQL_USER` など)しか受け取れないため、compose 内の `${...}` 展開で必要な値だけマッピング(compose はリポジトリ直下の `.env` を自動で読む)
+  - この構成により、backend と mysql が同じ DB 認証情報を参照するため値の食い違いが起きない
+- 本番は ECS タスク定義側で別の値を注入する
 
 ## 開発時のリクエストフロー
 
@@ -88,6 +92,7 @@ Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docke
 ## 起動方法
 
 ```bash
+cp .env.example .env        # 初回のみ: 環境変数ファイルを作成
 docker compose up -d        # 全コンテナ起動(初回はイメージビルドも走る)
 docker compose logs -f      # ログ確認
 docker compose down         # 停止(named volume のデータは残る)
