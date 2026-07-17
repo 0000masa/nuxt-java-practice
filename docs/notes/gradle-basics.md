@@ -6,13 +6,16 @@ Gradle という道具そのものについての学習メモ。`docker/backend/
 
 PHP / Node の世界では複数ツールに分かれている役割が、Java では Gradle 1 つに束ねられています。
 
-| 役割 | Node | Java（Gradle） |
-|---|---|---|
-| 依存ライブラリの管理 | npm + package.json | Gradle + build.gradle |
-| タスクの実行（dev 起動、テスト等） | npm scripts | Gradle タスク（`bootRun`、`test`...） |
-| 成果物のビルド | vite / webpack など | Gradle 自身（コンパイル〜Jar 作成） |
+| 役割 | Node | PHP（Composer） | Java（Gradle） |
+|---|---|---|---|
+| 依存ライブラリの管理 | npm + package.json | Composer + composer.json | Gradle + build.gradle |
+| タスクの実行（dev 起動、テスト等） | npm scripts | composer scripts（Laravel 実務では artisan が主役） | Gradle タスク（`bootRun`、`test`...） |
+| 成果物のビルド | vite / webpack など | **なし**（PHP はコンパイル不要でそのまま実行） | Gradle 自身（コンパイル〜Jar 作成） |
+| 依存の保存先 | node_modules（プロジェクト内） | vendor（プロジェクト内） | `~/.gradle/caches`（ホーム。全プロジェクト共有） |
 
-感覚としては `./gradlew bootRun` ≒ `npm run dev`、`./gradlew build` ≒ `npm run build` です。なお Java 界にはもう 1 つ **Maven** という老舗ビルドツールがあり、Gradle か Maven かの二択が npm か yarn かの選択に似た立ち位置です。Spring Initializr の最初の選択肢（`type=gradle-project`）はまさにこれを選んでいました（→ [spring-initializr.md](./spring-initializr.md)）。
+PHP 列の「ずれ」は、そのまま Java を理解するヒントになります。PHP はコンパイル不要なので、依存を入れる Composer とフレームワークの便利コマンド（artisan）があれば回りますが、Java は「コンパイル → jar に梱包」というビルド工程が**必須**——だからビルドツールが主役に座り、依存管理もタスク実行も 1 つに束ねる構図になります。保存先が Java だけプロジェクト外（ホーム共有）なのも思想の違いで、詳しくは後述の[「置き場所の思想」](#node_modules--vendor-との違い--置き場所の思想)を参照。
+
+感覚としては `./gradlew bootRun` ≒ `npm run dev` ≒ `php artisan serve`、`./gradlew build` ≒ `npm run build` です。なお Java 界にはもう 1 つ **Maven** という老舗ビルドツールがあり、Gradle か Maven かの二択が npm か yarn かの選択に似た立ち位置です。Spring Initializr の最初の選択肢（`type=gradle-project`）はまさにこれを選んでいました（→ [spring-initializr.md](./spring-initializr.md)）。
 
 ## Gradle Wrapper — 本体を自動調達する「案内人」
 
