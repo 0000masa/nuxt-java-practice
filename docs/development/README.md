@@ -33,9 +33,15 @@ flowchart LR
 | backend | Java 21(docker/ の Dockerfile) | 8080 | REST API | ECS Fargate |
 | mysql | mysql:8 | 3306 | データベース | RDS (MySQL) |
 | minio | minio/minio | 9000 (API) / 9001 (管理UI) | S3 互換の画像保存 | S3 + CloudFront |
+| minio-init | minio/mc | - | 起動時に `images` バケットを自動作成して終了する一発ジョブ(`--ignore-existing` で冪等) | - |
 | mailpit | axllent/mailpit | 1025 (SMTP) / 8025 (Web UI) | メールの受信・確認 | SES |
 
-Dockerfile は `docker/` ディレクトリに置き、`docker-compose.yml` はリポジトリ直下に置く。
+Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docker/backend/`)、`docker-compose.yml` はリポジトリ直下に置く。開発用 Dockerfile は「実行環境(Node / JDK)だけ」を持ち、ソースコードは volumes でマウントする方式。本番用 Dockerfile は AWS 構築時に別途作成する。
+
+### 永続化と認証情報
+
+- MySQL(`mysql-data`)、MinIO(`minio-data`)、Gradle キャッシュ(`gradle-cache`)は named volume で永続化。`docker compose down` してもデータは残る
+- 接続情報(DB: `app`/`app`/`password`、MinIO: `minioadmin`/`minioadmin`)は**ローカル開発専用の値として docker-compose.yml に直書き**する方針。本番は ECS タスク定義側で別の値を注入する
 
 ## 開発時のリクエストフロー
 
@@ -79,13 +85,17 @@ Dockerfile は `docker/` ディレクトリに置き、`docker-compose.yml` は�
 | S3 エンドポイント | `http://minio:9000` | (未指定 = 本物の S3) |
 | SMTP ホスト | `mailpit:1025` | SES |
 
-## 起動方法(実装後)
+## 起動方法
 
 ```bash
-docker compose up -d        # 全コンテナ起動
+docker compose up -d        # 全コンテナ起動(初回はイメージビルドも走る)
 docker compose logs -f      # ログ確認
-docker compose down         # 停止
+docker compose down         # 停止(named volume のデータは残る)
 ```
+
+- **初回起動は backend に数分かかる。** コンテナ内で `gradlew` が Gradle 本体と依存ライブラリをダウンロードするため。2回目以降は `gradle-cache` volume が効いて速くなる
+- **backend のコード変更の反映は `docker compose restart backend`。** Nuxt は HMR で即反映されるが、`gradlew bootRun` は起動時にコンパイルする方式のため(ホットリロードの本格構成は必要になったら検討)
+- 動作確認 URL: アプリ `http://localhost:3000`、API 直叩き `http://localhost:8080`、MinIO 管理画面 `http://localhost:9001`、メール確認 `http://localhost:8025`
 
 具体的な `docker-compose.yml` とアプリの初期構築手順は以下を参照:
 

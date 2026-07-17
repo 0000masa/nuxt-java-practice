@@ -1,0 +1,82 @@
+# 開発環境(設計は docs/development/README.md を参照)
+# 接続情報などの値はリポジトリ直下の .env で一元管理する(cp .env.example .env で作成)
+# - backend: env_file で .env を丸ごと注入
+# - mysql / minio / minio-init: 必要な値だけ ${...} で参照(compose が .env を自動で読む)
+# 本番は ECS タスク定義側で別の値を注入する
+services:
+  nuxt:
+    build: ./docker/frontend
+    volumes:
+      - ./frontend:/app
+    ports:
+      - "3000:3000" # Nuxt dev サーバー(開発時の入口)
+    depends_on:
+      - backend
+
+  backend:
+    build: ./docker/backend
+    volumes:
+      - ./backend:/app
+      - gradle-cache:/root/.gradle # Gradle 本体と依存ライブラリのキャッシュ(再ダウンロード防止)
+    ports:
+      - "8080:8080" # Spring Boot(/api)
+    env_file:
+      - .env # 変数が増えても .env に追記するだけでよい
+    depends_on:
+      mysql:
+        condition: service_healthy # MySQL が応答できるようになってから起動する
+
+  mysql:
+    image: mysql:8
+    environment:
+      # 公式イメージが決めた変数名しか受け取れないので、.env の値を個別にマッピングする
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    ports:
+      - "3306:3306" # ホストの GUI クライアント等から直接接続できるように公開
+    volumes:
+      - mysql-data:/var/lib/mysql # named volume で永続化(down してもデータが残る)
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      # backend が使う S3 用の認証情報(.env)と同じ値を MinIO 側にも設定する
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY}
+    ports:
+      - "9000:9000" # S3 互換 API
+      - "9001:9001" # 管理画面(ブラウザで http://localhost:9001)
+    volumes:
+      - minio-data:/data
+
+  # バケット自動作成の一発ジョブ: images バケットを作って終了する
+  # --ignore-existing により既にあれば何もしない(何度 up しても安全)
+  minio-init:
+    image: minio/mc
+    depends_on:
+      - minio
+    entrypoint: >
+      sh -c "
+      until mc alias set local http://minio:9000 ${S3_ACCESS_KEY} ${S3_SECRET_KEY}; do sleep 1; done;
+      mc mb --ignore-existing local/${S3_BUCKET};
+      "
+    restart: "no"
+
+  mailpit:
+    image: axllent/mailpit
+    ports:
+      - "1025:1025" # SMTP(アプリからの送信先)
+      - "8025:8025" # Web UI(ブラウザで http://localhost:8025)
+
+volumes:
+  mysql-data:
+  minio-data:
+  gradle-cache:
