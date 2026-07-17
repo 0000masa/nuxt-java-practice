@@ -78,3 +78,4 @@ dependencies {
 ## 関連
 
 - プロジェクト生成時に依存を指定する方法 → [spring-initializr.md](./spring-initializr.md)
+- Gradle そのもの・Wrapper・ダウンロードした依存の保存場所 → [gradle-basics.md](./gradle-basics.md)

@@ -65,7 +65,7 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 
 ## `bootRun` タスクと Gradle Wrapper
 
-- **`./gradlew`（Gradle Wrapper）** — Gradle 本体をインストールしていなくても、初回に正しいバージョンを自動ダウンロードして実行するスクリプト。ダウンロードした本体は docker-compose の `gradle-cache` ボリュームに保存され、コンテナを作り直しても再ダウンロードされない
+- **`./gradlew`（Gradle Wrapper）** — Gradle 本体をインストールしていなくても、初回に正しいバージョンを自動ダウンロードして実行するスクリプト。ダウンロードした本体は docker-compose の `gradle-cache` ボリュームに保存され、コンテナを作り直しても再ダウンロードされない（Gradle そのものと キャッシュの置き場所の詳細 → [gradle-basics.md](./gradle-basics.md)）
 - **`bootRun`** — Spring Boot の Gradle プラグインが提供するタスク。「コンパイル → 組み込み Tomcat ごとアプリを起動」まで一気にやる。ポート 8080 で待ち受け（EXPOSE 8080 / compose の `"8080:8080"`）
 - CMD の先頭に `sh` が付いている理由（実行権限の保険）は [docker-dev-containers.md](./docker-dev-containers.md) を参照
 
