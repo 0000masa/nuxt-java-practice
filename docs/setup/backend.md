@@ -1,6 +1,6 @@
 # Spring Boot 環境構築手順
 
-バックエンド(Spring Boot 3.x)の初期構築手順。プロジェクトは `backend/` に作成する。
+バックエンド(Spring Boot 4.x)の初期構築手順。プロジェクトは `backend/` に作成する。
 
 ## 前提ツール
 
@@ -17,7 +17,7 @@
 |---|---|
 | Project | Gradle - Groovy |
 | Language | Java |
-| Spring Boot | 3.x(最新安定版) |
+| Spring Boot | 4.x(最新安定版) |
 | Java | 21 |
 | Packaging | Jar |
 

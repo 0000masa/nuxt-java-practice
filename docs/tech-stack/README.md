@@ -7,7 +7,7 @@
 | レイヤー | 技術 | バージョン | 用途 |
 |---|---|---|---|
 | フロントエンド | Nuxt 3 (Vue 3) | Node 22 LTS / npm | SPA + SSG によるフロントエンド |
-| バックエンド | Spring Boot 3.x | Java 21 / Gradle | REST API(`/api/**`)+ 静的ファイル配信 |
+| バックエンド | Spring Boot 4.x | Java 21 / Gradle | REST API(`/api/**`)+ 静的ファイル配信 |
 | データベース | MySQL | 8.x | アプリケーションデータの永続化 |
 | 画像保存(開発) | MinIO | latest | S3 互換のオブジェクトストレージ |
 | 画像保存(本番) | Amazon S3 + CloudFront | - | アップロード画像の保存・配信 |

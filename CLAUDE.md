@@ -13,7 +13,7 @@ Nuxt 3 + Spring Boot のアプリケーションを docker-compose で開発し�
 ## 技術スタック
 
 - フロントエンド: Nuxt 3(**SSG モード** `nuxt generate`)、Node 22 LTS、npm
-- バックエンド: Java 21、Spring Boot 3.x、Gradle
+- バックエンド: Java 21、Spring Boot 4.x、Gradle
 - DB: MySQL 8(本番は RDS)
 - 画像保存: MinIO(開発)/ S3 + CloudFront(本番)
 - メール送信: Mailpit(開発)/ SES(本番)

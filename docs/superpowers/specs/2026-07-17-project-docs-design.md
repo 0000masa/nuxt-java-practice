@@ -13,7 +13,7 @@
 |---|---|
 | フロントエンド | Nuxt 3(SSGモード = `nuxt generate`)、Node 22 LTS、npm |
 | フロント配信方式 | SSGビルド成果物を Spring Boot の `static/` に配置。本番に Node.js コンテナは置かない |
-| バックエンド | Java 21 + Spring Boot 3.x + Gradle。組み込み Tomcat が直接 HTTP を受ける |
+| バックエンド | Java 21 + Spring Boot 4.x + Gradle。組み込み Tomcat が直接 HTTP を受ける |
 | Nginx | **使わない**(ALB が TLS 終端・負荷分散を担い役割が重複するため) |
 | 開発環境 | docker-compose で 5 コンテナ: Nuxt(dev)/ Spring Boot / MySQL 8 / MinIO / Mailpit |
 | AWS 構成 | 独自ドメイン(Route53 + ACM)、ALB → ECS Fargate → RDS(MySQL)、SES(ドメイン認証)、画像用 S3 + CloudFront、ECR |
