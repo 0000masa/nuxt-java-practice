@@ -61,18 +61,53 @@ Gradle は依存管理を**一機能として内蔵**しているだけで、本
 
 ## Gradle Wrapper — 本体を自動調達する「案内人」
 
-普通に考えると Gradle を使うには先に Gradle のインストールが必要ですが、プロジェクトに同梱された `gradlew` というスクリプト（**Gradle Wrapper**）がその世話を全部やります。
+### そもそもなぜ「Gradle のインストール」が必要なのか
 
-1. `backend/gradle/wrapper/gradle-wrapper.properties` に書かれた「このプロジェクトが使うべき Gradle のバージョン」（`distributionUrl`）を読む
-2. 手元になければ**そのバージョンの Gradle 本体をダウンロード**する
-3. それを使って指定タスクを実行する
+Node.js をインストールすると npm が付いてくるのは、**Node の公式インストーラが npm を同梱している**からです。ランタイムとパッケージマネージャーのセット販売という、実は例外的な親切です。
 
-利点は 2 つ:
+Java の JDK に入っているのは `java`（JVM）と `javac`（コンパイラ）などの基本工具だけで、**ビルドツールは入っていません**。理由は歴史と勢力図:
+
+- Java（1995 年）誕生時にビルドツールはまだ存在せず、Ant（2000）→ Maven（2004）→ Gradle（2008〜）と**後から民間で発展した**
+- Maven と Gradle が競合として並立しており、JDK がどちらかを標準採用する形になっていない
+
+つまり Gradle は「JVM の上で動く、ただの別ソフト」であり、素朴には brew や SDKMAN 等で自分でインストールして `gradle` コマンドを使える状態にする必要があります。実は **PHP がまさに同じ構図**（PHP 本体に Composer は同梱されず、別途インストールする）。Node が例外的にセットなだけで、「言語ランタイムと道具は別配布」のほうが普通です。
+
+### Wrapper の仕組み — 4 ファイルの受付係
+
+Wrapper は一言でいうと「**正しいバージョンの Gradle を、必要になった瞬間に自動で用意してから、本題のタスクに取り次ぐ受付係**」です。実体はリポジトリにコミットされた 4 ファイル（`gradlew` / `gradlew.bat` / `gradle-wrapper.jar` / `gradle-wrapper.properties` → [backend-project-files.md](./backend-project-files.md)）で、役割分担は:
+
+1. `gradlew`（シェルスクリプト）が JDK の `java` を探し、`gradle-wrapper.jar` を起動する
+2. jar が `gradle-wrapper.properties` の `distributionUrl`（= このプロジェクトは Gradle 9.5.1 を使え）を読む
+3. `~/.gradle/wrapper/dists/` にそのバージョンがあるか確認。**なければダウンロードして展開**
+4. その Gradle 本体に `bootRun` などの指定タスクを渡して実行させる
+
+これで解決するのは「インストールの手間」だけではなく、**バージョンのばらつき**という第二の敵も同時に倒しています:
 
 - **インストール不要** — backend コンテナに Gradle を入れていないのに動くのはこのため（イメージは JDK だけ）
-- **バージョン統一** — チーム・CI 全員が同じバージョンで揃い、「私の Gradle は古くて動かない」事故がなくなる
+- **バージョン統一** — 手動インストールだと人によって Gradle 8 だったり 9 だったりしてビルド結果が揺れる。Wrapper は properties に書かれた版を**プロジェクト側が強制**するので、チーム・CI・コンテナ全員が同じ版で揃う
 
-Node で例えるなら「リポジトリに小さな nvm + 実行スクリプトが同梱されている」ような状態です。
+Node で例えるなら「リポジトリに小さな nvm + 実行スクリプトが同梱されている」状態。より正確な対応物は **Corepack**（package.json の `packageManager` 欄で yarn / pnpm の版を固定し自動調達する仕組み）で、「全員に同じ道具の同じ版を使わせたい」という要求は言語を問わず存在する、ということです。
+
+### いつ実行されるのか — 毎回走るが、ダウンロードは初回だけ
+
+上の手順は「セットアップ時に一度だけ」ではなく、**`./gradlew` を打つたびに毎回**走ります。このリポジトリでは `docker compose up` のたびに CMD の `sh ./gradlew bootRun` が実行されるので、**コンテナ起動のたび**です。ただし各ステップの重さが違います:
+
+```
+docker compose up（毎回）
+ └─ sh ./gradlew bootRun
+     ├─ properties を読む ……………………… 毎回（一瞬）
+     ├─ ~/.gradle/wrapper/dists を確認 …… 毎回（一瞬）
+     ├─ Gradle 本体をダウンロード ………… ★無いときだけ（数十秒）
+     └─ Gradle を起動して bootRun ………… 毎回
+```
+
+「無いとき」が具体的にいつかというと、このリポジトリでは 3 パターン:
+
+- **本当の初回**（`gradle-cache` ボリュームが空の状態での最初の起動）
+- **`docker compose down -v` などでボリュームを消した後**（キャッシュごと消えるので再ダウンロード）
+- **gradle-wrapper.properties のバージョンを書き換えた後**（新しい版が手元に無いので取りに行く）
+
+逆に言えば、2 回目以降の `compose up` でダウンロードが走らないのは、named volume `gradle-cache:/root/.gradle` が `wrapper/dists/` ごと保存しているからです。「初回起動が遅い理由」（→ [java-build-and-run.md](./java-build-and-run.md)）と、この初回ダウンロードは同じ現象の別側面です。
 
 ## `./gradlew` はどこを指しているか
 
@@ -184,6 +219,8 @@ named volume が選ばれる理由:
 - **タスクグラフ** — タスク間の依存関係の地図。「正しい順序で一発実行」と「UP-TO-DATE スキップ」の土台
 - **Maven** — Gradle と並ぶもう 1 つの定番ビルドツール。二択の関係
 - **Gradle Wrapper（gradlew）** — プロジェクト指定バージョンの Gradle 本体を自動ダウンロードして実行する同梱スクリプト
+- **Corepack** — Node 側の類似機構。package.json の `packageManager` 欄で yarn / pnpm の版を固定し自動調達する
+- **SDKMAN** — JDK や Gradle など Java 界の道具を入れるバージョンマネージャ（brew の Java 特化版のような立ち位置）
 - **gradle-wrapper.properties** — Wrapper が読む「使うべき Gradle バージョン」の設定ファイル
 - **`./`** — 「現在のディレクトリ」を表すパス表記。PATH 検索ではなく場所の明示
 - **~/.gradle** — ユーザー単位の Gradle キャッシュ置き場（本体 + 依存 jar）。全プロジェクト共有
