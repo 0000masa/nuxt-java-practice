@@ -1,0 +1,7 @@
+{
+  "enabledPlugins": {
+    "deploy-on-aws@agent-plugins-for-aws": true,
+    "deploy-on-aws@claude-plugins-official": true,
+    "superpowers@claude-plugins-official": true
+  }
+}
