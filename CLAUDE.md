@@ -44,6 +44,7 @@ Nuxt 3 + Spring Boot のアプリケーションを docker-compose で開発し�
 - `docs/infrastructure/` — AWS 構成図、Terraform + GitHub Actions の運用フロー
 - `docs/development/` — docker-compose 開発環境の構成(5 コンテナ、ポート、環境変数方針)
 - `docs/setup/` — Nuxt / Spring Boot の環境構築手順
+- `docs/notes/` — 学習メモ(セッションで解説した内容の記録。1 トピック 1 ファイル)
 - `docs/superpowers/specs/` — 設計書(スペック)置き場
 
 設計に関わる変更をしたら、該当ドキュメントも更新すること。
