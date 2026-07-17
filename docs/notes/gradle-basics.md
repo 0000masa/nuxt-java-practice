@@ -77,6 +77,52 @@ named volume が選ばれる理由:
 
 つまり「**ホストと共有したいものはバインドマウント、コンテナだけの永続データは named volume**」という使い分けで、mysql-data / minio-data と同じ側に分類された、ということです。
 
+### では `./backend:/` にすれば `.gradle` もマウント圏内に入る?
+
+「`/root/.gradle` がマウントの外にあるなら、`./backend:/` とコンテナのルートごとマウントすれば圏内に入るのでは?」という発想は筋が良いのですが、**不可能です**。理由はマウントの性質にあります。
+
+マウントの動きは「フォルダの中身をコピーして混ぜる」ではなく、**「その場所の上にホストのフォルダを重ね掛けする」**です。重ねた下にあったものは消えはしませんが**見えなくなります**（布をかぶせるイメージ。**マスキング**と呼ばれる性質）。コンテナの `/` にはイメージの中身そのもの——OS のファイル一式（`/bin/sh` など）、JDK、`/root`——が広がっているので、仮に `/` へ重ねられたら:
+
+```
+/ に backend/ を重ね掛け
+→ /bin も /usr(JDK)も /root も全部 backend の中身で覆い隠される
+→ sh が見つからない、Java も無い → CMD の実行すら不可能
+```
+
+`.gradle` を圏内に入れるどころか、**gradlew を動かす道具一式を自分で隠してしまう**わけです。この事故が起きないよう、Docker はマウント先 `/` の指定自体をエラーにしています。
+
+そもそも `/` ごと包む必要はなく、マウントは**任意のパスに個別に差し込める**ので狙い撃ちすればよい（前述の手段 1 `./.gradle-cache:/root/.gradle` がそれ）。もう 1 つ、**キャッシュの側を引っ越させる**別解もあります:
+
+```yaml
+    environment:
+      GRADLE_USER_HOME: /app/.gradle-home   # ~/.gradle の代わりにここを使え、という指示
+```
+
+これでキャッシュが `/app` の中 = 既存マウントの圏内に生まれます。「node_modules がプロジェクトの中にあるから巻き込まれてマウントされる」構図を Gradle で人工的に再現するやり方です。（どの方法も技術的には可能で、それでも named volume が選ばれる理由は前述のとおり）
+
+なおマスキングは部分マウントでも起きます。イメージ内に `/app` へ COPY 済みのファイルがある状態で `./backend:/app` をマウントすると COPY した中身は隠れる——「Dockerfile で作ったはずのファイルが無い!」の定番原因です。`/` は拒否されますが `/usr` などの重要ディレクトリは拒否されないので、マウント先は「そこに何が既にあるか」を意識して選ぶこと。
+
+## 実際のプロジェクトではどうしているか — 「ホストに見せる」の実務調査
+
+.gradle / node_modules / vendor をホストから見えるようにするかは、エコシステムごとに定番が違います。
+
+| | ホストから見える? | 実務でよくある形 |
+|---|---|---|
+| **vendor（Laravel）** | **見えるのが主流** | Laravel 公式の Sail がプロジェクト丸ごとバインドマウント（vendor 込み） |
+| **node_modules** | **両方の流派がある** | コンテナ内開発の定番は「匿名ボリュームで隠す」。ホストでも npm を使う構成（このリポジトリ）も普通 |
+| **~/.gradle** | **見えないのが主流** | named volume（このリポジトリと同じ）が定番。ホストでも Gradle を使う人だけ共有マウントする流派がある |
+
+- **node_modules** — コンテナ内開発では[匿名ボリュームで隠すのが定番の推奨](https://medium.com/@duckdevv/docker-node-modules-management-why-anonymous-volume-is-the-right-answer-247fbc14c481)（`.:/app` + `/app/node_modules`）。理由はホストとコンテナの OS 差による native バイナリの不整合、Docker Desktop（Mac/Windows）での性能、権限問題。ただし隠すと**ホストの IDE が型定義を読めなくなる**ので、ホストでも npm install する構成も同じくらい見かける
+- **vendor（Laravel）** — [公式ツールの Sail](https://laravel.com/docs/13.x/sail) はプロジェクト丸ごとバインドマウントで vendor も**見える**。PHP の IDE は vendor 内のクラス定義を読んで補完するため、見えることに実益がある。一方 Mac/Windows では [vendor をコンテナ内ボリュームに移す高速化 Tips](https://dev.to/tylerlwsmith/speed-up-laravel-in-docker-by-moving-vendor-directory-19b9) が知られる程度に性能コストもある
+- **~/.gradle** — [Gradle 公式ドキュメントの Docker ガイド](https://docs.gradle.org/current/userguide/docker.html)自体が named volume 方式を案内。変種として[ホストの `~/.gradle` を共有マウントする流派](https://www.endoflineblog.com/optimizing-development-with-docker)もある（ホストでも Gradle / IDE ビルドを使う人には二重ダウンロードが消えて合理的）。Java の IDE は node_modules のようなプロジェクト内フォルダではなく**ホスト側の ~/.gradle と自前のインデックス**で補完を賄うため、コンテナのキャッシュを見せるメリットがない
+
+分かれ目はほぼ一点: **「ホスト側の道具（IDE やパッケージマネージャ）がそのフォルダを読むか?」**
+
+- 読む（vendor、node_modules と TypeScript 補完）→ 見せる価値がある。性能が問題になったら初めて隠す工夫をする
+- 読まない（~/.gradle）→ 隠す（named volume）が素直
+
+このリポジトリの現状（node_modules はホスト実体・.gradle は named volume）は、この基準に照らして両方とも実務の主流パターンに乗っています。
+
 ## 落とし穴
 
 - **`docker compose down -v` を気軽に打たない。** gradle-cache は再ダウンロードで済むが、**mysql-data も一緒に消えて DB の中身が飛ぶ**
@@ -93,6 +139,8 @@ named volume が選ばれる理由:
 - **~/.gradle** — ユーザー単位の Gradle キャッシュ置き場（本体 + 依存 jar）。全プロジェクト共有
 - **named volume** — Docker が管理する永続保存領域。コンテナを作り直しても残り、`down -v` で削除
 - **バインドマウント** — ホストのフォルダをコンテナに見せる方式。実体はホスト側にある
+- **マウントの重ね掛け（マスキング）** — マウント先に元からあったファイルは削除されず「見えなくなる」だけ、という性質
+- **GRADLE_USER_HOME** — `~/.gradle` の場所を変更する環境変数
 
 ## 関連
 
