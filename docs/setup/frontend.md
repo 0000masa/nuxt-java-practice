@@ -1,6 +1,8 @@
 # Nuxt 環境構築手順
 
-フロントエンド(Nuxt 3)の初期構築手順。プロジェクトは `frontend/` に作成する。
+フロントエンドの初期構築手順。プロジェクトは `frontend/` に作成する。
+
+> 補足: 現行の `nuxi`(3.37 時点)が生成するのは **Nuxt 4** ベースのプロジェクト。本リポジトリのドキュメントで「Nuxt 3」と書いていた箇所は Nuxt 4 に読み替える(SSG や devProxy などこのリポジトリの方針はどちらでも同じ)。
 
 ## 前提ツール
 
@@ -11,11 +13,39 @@
 
 ## プロジェクト作成
 
+通常のターミナル(対話式)で実行する:
+
 ```bash
 cd frontend
-npx nuxi@latest init . --package-manager npm
-npm install
+rm -f .gitkeep        # 空フォルダ維持用のファイル。プロジェクトを作るのでもう不要
+npx nuxi@latest init .
 ```
+
+※ 旧手順にあった `--package-manager npm` はフラグ名が誤り(正しくは `--packageManager`)。対話で選ぶ方が確実なので、フラグなしで実行して以下の質問に答える。
+
+### 対話で聞かれる項目と選択
+
+バージョンによって文言や順序は多少変わるが、聞かれる内容は次のとおり。
+
+| 質問 | 意味 | 選択 |
+|---|---|---|
+| テンプレート選択(content / minimal / module / ui / v5-nightly) | ひな形の種類。詳細は [docs/notes/nuxi-templates.md](../notes/nuxi-templates.md) | **minimal**(最小構成のアプリ。このリポジトリは API + 画面のシンプルな構成なので余計なものが入らないこれを選ぶ) |
+| パッケージマネージャー(npm / pnpm / yarn / bun / deno) | 依存ライブラリの管理ツール | **npm**(このリポジトリの方針) |
+| 依存関係をインストールするか | 生成直後に `npm install` 相当を実行するか | **Yes**(No にした場合はあとで `npm install` を手動実行) |
+| git リポジトリを初期化するか(Initialize git repository?) | `frontend/` 内に新しく `.git` を作るか | **No**(リポジトリ直下で既に git 管理しており、入れ子の git を作ると管理が壊れるため) |
+| 公式モジュールの追加(聞かれる場合のみ) | ESLint 等の公式モジュールを最初から入れるか | **何も選ばず Enter**(必要になったら後から追加できる) |
+
+### 非対話(CI やスクリプト)で実行する場合
+
+対話に答えられない環境では、すべてフラグで指定する:
+
+```bash
+npx nuxi@latest init . -t minimal --packageManager npm --no-gitInit -f
+```
+
+- `-t minimal` — テンプレート指定
+- `--no-gitInit` — git 初期化しない
+- `-f` — 既存ファイル(`.gitkeep` など)があっても続行
 
 ## SSG モードの設定
 
