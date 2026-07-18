@@ -78,6 +78,21 @@ distributionUrl=https\://services.gradle.org/distributions/gradle-9.5.1-bin.zip
 
 全部再生成できるので git には入れない(.gitignore 済み)。`rm -rf build` しても失うものはない。
 
+#### jar を実際に作るコマンド
+
+ホストに Java は入っていないので、JDK を持つ backend コンテナの中で実行する(リポジトリ直下で):
+
+```bash
+docker compose exec backend sh ./gradlew build          # コンパイル → テスト → jar 梱包
+docker compose exec backend sh ./gradlew build -x test  # テストを飛ばして jar だけ作る
+docker compose exec backend sh ./gradlew clean          # 片付け(build/ を丸ごと削除)
+```
+
+- `cd backend` は不要。Dockerfile の `WORKDIR /app` により、exec は最初からマウントされた `backend/` の中で実行される。成果物はホストの `backend/build/libs/` からそのまま見える(バインドマウントの恩恵)
+- `build` は `bootRun` の「コンパイルして**起動**」に対し、「コンパイル → **テスト** → **jar 梱包**」で終わる別コース。テスト(`@SpringBootTest`)はアプリを丸ごと起動して DB 接続まで本物として動くので、`.env` と mysql が見えるコンテナ内で実行することに意味がある
+- jar は 2 つできる: `demo-0.0.1-SNAPSHOT.jar`(依存ライブラリまで全部入りで単体起動できる **Boot jar**。AWS へ持っていくのはこちら)と `demo-0.0.1-SNAPSHOT-plain.jar`(自分のクラスだけの素の jar)
+- 「jar は zip」の答え合わせは `unzip -l backend/build/libs/demo-0.0.1-SNAPSHOT.jar` で
+
 ### `.gradle/` — Gradle の帳簿(ホームの `~/.gradle` とは別物)
 
 `fileHashes.bin` や `*.lock` が入っているが、これは**差分ビルドのための記録**。「前回ビルド時の各ファイルのハッシュ」を覚えておき、次回「変わっていないファイルはコンパイルし直さない」という高速化に使う。`.bin` は Gradle 専用のバイナリ帳簿、`.lock` は「いま別の Gradle プロセスが書き込み中」を示す鍵ファイルで、どちらも人間が開くものではない。
@@ -169,6 +184,10 @@ zip の中に詰まっているのは `.class`(元は **Java** で書かれた�
 - **コンパイル** — 人間用のソースコード(.java)を JVM 用のバイトコード(.class)に翻訳すること
 - **バイトコード** — JVM が直接実行できる中間言語。`.class` ファイルの中身
 - **jar(Java ARchive)** — .class 一式とリソースを 1 個に固めた zip。配布・実行の単位。「成果物の jar」と「道具としての jar(wrapper)」の二役がある
+- **build(タスク)** — コンパイル → テスト → jar 梱包までの一括タスク。bootRun の「起動」の代わりに「梱包」で終わる
+- **clean(タスク)** — `build/` を丸ごと削除する片付けタスク
+- **`-x <タスク>`** — 指定タスクを除外(exclude)する Gradle のオプション。`-x test` でテストを飛ばす
+- **Boot jar / plain jar** — 依存まで全部入りで単体起動できる jar と、自分のクラスだけの素の jar。`build` は両方作る
 - **バッチファイル(.bat)** — Windows のコマンドプロンプト用スクリプト。シェルスクリプトの Windows 版
 - **.properties** — `キー=値` を並べる Java 界の伝統的な設定ファイル形式
 - **標準レイアウト** — `src/main/java` / `src/test/java` という Gradle/Maven 共通のフォルダ規約。設定なしで認識される

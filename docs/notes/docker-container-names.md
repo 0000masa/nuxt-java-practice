@@ -25,6 +25,8 @@ docker compose exec backend bash                     # サービス名でよい(
 
 つまり `docker ps` で名前を確認する必要はそもそもなく、リポジトリ直下で `docker compose exec <サービス名> <コマンド>` と打てばよい。`exec` に限らず `docker compose logs backend` / `docker compose restart backend` も同様。唯一の条件は「docker-compose.yml があるディレクトリで実行する」ことだけ。
 
+なお、末尾に付ける `bash` や `sh` の意味(いつ必要で何をしているのか)、exec が両方ともコマンド指定必須であること、bash と sh の違いは、独立したトピックとして [docker-exec-and-shells.md](./docker-exec-and-shells.md) にまとめた。
+
 ## container_name を付けなかった理由
 
 `container_name: backend` と書けばコンテナ名を短く固定でき、素の `docker exec backend ...` が打てるようになる。しかし代償がある:
@@ -49,3 +51,4 @@ docker compose exec backend bash                     # サービス名でよい(
 ## 関連
 
 - サービス名がコンテナ間通信の宛先にもなる話(サービス名 DNS) → [docker-dev-containers.md](./docker-dev-containers.md)
+- exec の直接起動の仕組み、bash / sh がいつ必要か → [docker-exec-and-shells.md](./docker-exec-and-shells.md)
