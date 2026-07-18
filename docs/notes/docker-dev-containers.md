@@ -227,4 +227,5 @@ docker compose port backend 8080
 
 - backend の CMD が起動する `bootRun` の中身、JDK・コンパイルの話 → [java-build-and-run.md](./java-build-and-run.md)
 - サービス名とコンテナ名の違い、`container_name` を付けない理由 → [docker-container-names.md](./docker-container-names.md)
+- exec がシェルを介さず直接起動する仕組み、bash / sh がいつ必要か、bash と sh の違い → [docker-exec-and-shells.md](./docker-exec-and-shells.md)
 - `gradle-cache` ボリュームの中身、「バインドマウントではなく named volume」の理由、マウントの重ね掛け（マスキング）の性質、実務での「ホストに見せる/見せない」比較 → [gradle-basics.md](./gradle-basics.md)

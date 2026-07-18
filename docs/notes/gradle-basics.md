@@ -12,6 +12,7 @@ PHP / Node の世界では複数ツールに分かれている役割が、Java �
 | タスクの実行（dev 起動、テスト等） | npm scripts | composer scripts（Laravel 実務では artisan が主役） | Gradle タスク（`bootRun`、`test`...） |
 | 成果物のビルド | vite / webpack など | **なし**（PHP はコンパイル不要でそのまま実行） | Gradle 自身（コンパイル〜Jar 作成） |
 | 依存の保存先 | node_modules（プロジェクト内） | vendor（プロジェクト内） | `~/.gradle/caches`（ホーム。全プロジェクト共有） |
+| ツール自身の保存先 | **Node イメージに同梱**（`/usr/local` 内。nuxt コンテナで実測） | イメージに**別途インストール**するのが定番（PHP 本体に同梱されないため）。Dockerfile で `COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer` と入れ、`/usr/local/bin/composer` に置くのが典型（実体は PHAR という単一ファイル。PHP 版 jar のような自己完結アーカイブ） | **イメージに無い**。Wrapper が `~/.gradle/wrapper/dists` へ自動ダウンロード（→ [Wrapper の章](#gradle-wrapper--本体を自動調達する案内人)） |
 
 PHP 列の「ずれ」は、そのまま Java を理解するヒントになります。PHP はコンパイル不要なので、依存を入れる Composer とフレームワークの便利コマンド（artisan）があれば回りますが、Java は「コンパイル → jar に梱包」というビルド工程が**必須**——だからビルドツールが主役に座り、依存管理もタスク実行も 1 つに束ねる構図になります。保存先が Java だけプロジェクト外（ホーム共有）なのも思想の違いで、詳しくは後述の[「置き場所の思想」](#node_modules--vendor-との違い--置き場所の思想)を参照。
 
@@ -109,6 +110,56 @@ docker compose up（毎回）
 
 逆に言えば、2 回目以降の `compose up` でダウンロードが走らないのは、named volume `gradle-cache:/root/.gradle` が `wrapper/dists/` ごと保存しているからです。「初回起動が遅い理由」（→ [java-build-and-run.md](./java-build-and-run.md)）と、この初回ダウンロードは同じ現象の別側面です。
 
+なお「自動で用意」といっても **OS へのインストールは最後まで起きません**。`~/.gradle/wrapper/dists/` へのダウンロード & キャッシュであり、PATH 登録はされないので `gradle` コマンドは永遠に打てるようにならない——**常に `./gradlew` という受付係を経由**します。
+
+### Wrapper はどこから来たのか — Spring Initializr と `gradle wrapper` タスク
+
+あの 4 ファイル、自分で書いた覚えがないのにコミットされています。出どころは **Spring Initializr**（[start.spring.io](https://start.spring.io)）——Spring チームが運営する **Spring Boot プロジェクト専用の雛形生成サービス**で、「依存は Web と JPA、ビルドは Gradle、Java 21」と注文すると build.gradle・ソースの骨格・**Wrapper 一式**入りの zip をくれます（このリポジトリの backend もこれ → [spring-initializr.md](./spring-initializr.md)）。混同しやすい切り分け:
+
+- **Spring Initializr** = Spring 固有（Spring Boot の雛形しか作れない）
+- **同梱されてきた Wrapper** = Gradle 標準の機能（Spring とは無関係。どんな Gradle プロジェクトにもある）
+
+配達員（Initializr）は Spring の社員だが、荷物に入っていた道具（Wrapper）は Gradle 社の汎用品、という関係です。Node / PHP での該当物:
+
+| | 雛形生成 | 実行例 |
+|---|---|---|
+| Spring Boot | Spring Initializr | start.spring.io で選んで zip を受け取る |
+| Node（Nuxt） | create 系スキャフォールダ | `npm create nuxt@latest`（frontend もこれ → [nuxi-templates.md](./nuxi-templates.md)） |
+| PHP（Laravel） | composer create-project / Laravel installer | `composer create-project laravel/laravel` |
+
+役割は完全に同じで、違いは配達方法だけ（Initializr は **Web サービス**、Node / PHP はローカル CLI）。
+
+Wrapper 自体は Gradle 標準の **`wrapper` タスク**でいつでも生成できます。`gradle wrapper --gradle-version 9.5.1` と打つと、指定版を指す properties 込みで**あの 4 ファイルが生成される**——Initializr は裏でこれ相当の処理をして zip に同梱していたわけです。既に Wrapper があるプロジェクトなら `./gradlew wrapper --gradle-version 10.0` で**受付係自身に後任を用意させる**（自己更新）こともできます。
+
+ここに鶏と卵の関係があります。`gradle wrapper` は Gradle のタスクなので、実行には**インストール済みの Gradle 本体**（+ JVM で動くので JDK）が必要。「Wrapper を作るには一度は本物の Gradle が要る」わけです。実務での解決経路は 3 つ:
+
+1. **雛形サービスに作らせる** — Initializr が代わりに生成（このリポジトリの経路。手元に Gradle 不要）
+2. **一時的にインストールして生成** — brew や SDKMAN で入れて `gradle wrapper` を打ち、以後は `./gradlew` しか使わない
+3. **既存の Wrapper に更新させ続ける** — 最初の一度以外 Gradle 本体は不要
+
+つまりチーム開発では「`gradle` コマンドが要るのはプロジェクトを最初に作る 1 人だけ、Initializr を使えばその 1 人すら不要」という状態になります。
+
+### Gradle のバージョンは誰が決めるのか — Dockerfile ではなく properties の 1 行
+
+決定権はフレームワークでも Dockerfile でもなく、**リポジトリにコミットされたこの 1 行**にあります:
+
+```properties
+# backend/gradle/wrapper/gradle-wrapper.properties
+distributionUrl=https\://services.gradle.org/distributions/gradle-9.5.1-bin.zip
+```
+
+Initializr は雛形生成時に「その時点の推奨版」を**初期値として書いてくれただけ**で、以後この行の持ち主はプロジェクト側です。Spring Boot 本体は実行時にこの決定に関与しません。このリポジトリの「バージョンの決めごと」の置き場所を並べると:
+
+| 決めごと | 書いてある場所 | 誰の都合か |
+|---|---|---|
+| JDK のバージョン（21） | `docker/backend/Dockerfile` の `eclipse-temurin:21-jdk` | 実行環境の都合 |
+| Gradle のバージョン（9.5.1） | `gradle-wrapper.properties` | **プロジェクトの都合** |
+| 依存ライブラリのバージョン | `build.gradle` | プロジェクトの都合 |
+
+properties 側に置く利点は、**コンテナの外でも同じように効く**こと。コンテナ・ホスト直接・CI のどこで `./gradlew` を打っても、リポジトリの properties が唯一の正なので全員同じ版で揃います。Dockerfile に書くと「コンテナで動かしたときだけ有効な決め事」になってしまう。
+
+対照的な設計として、`FROM gradle:9.5-jdk21` のような **Gradle 入り公式イメージ**で Dockerfile 側が版を決める流儀も実在します。ただし実務の主流・公式推奨は Wrapper 側です。[Gradle 公式の Docker ガイド](https://docs.gradle.org/current/userguide/docker.html)自身が「[gradle イメージ](https://hub.docker.com/_/gradle)はちょっとした実験や、ソースを checkout しない CI 向け。**production build には使うべきでない**。Wrapper のあるプロジェクトは素の JDK イメージ（eclipse-temurin 等）+ `./gradlew` で十分」と明言しています。理由は、イメージに焼かれた Gradle と properties の指す Gradle の**二重管理 → 版ずれを構造的に防げる**こと、イメージを小さく保てること。このリポジトリの構成（JDK だけのイメージ + `sh ./gradlew`）は、まさにこの公式推奨形です。
+
 ## `./gradlew` はどこを指しているか
 
 `./gradlew` はディレクトリではなく**ファイルへのパス**です。`.` = 「現在のディレクトリ」なので、「**今いるディレクトリにある gradlew というファイル**」の意味。シェルは裸の名前（`gradlew`）だと PATH という登録済みの場所しか探さないため、「そこにあるこのファイルだよ」と `./` で明示します。
@@ -117,10 +168,42 @@ backend コンテナでは `WORKDIR /app` なので `./gradlew` = `/app/gradlew`
 
 ## `~/.gradle` キャッシュ — 何が、どこに貯まるのか
 
-Gradle は作業に必要なものを**ユーザーのホームディレクトリ配下の `.gradle`** に貯めます。中身は大きく 2 種類:
+Gradle は作業に必要なものを**ユーザーのホームディレクトリ配下の `.gradle`** に貯めます。backend コンテナの実物（named volume `gradle-cache` の中身）を覗いた構造がこうです:
 
-1. **Gradle 本体** — Wrapper がダウンロードしたもの（`wrapper/dists/`）
-2. **依存ライブラリの jar** — Maven Central から取得したもの（`caches/` 配下）
+```
+/root/.gradle（コンテナ内の ~/.gradle）
+├── wrapper/dists/gradle-9.5.1-bin/<ハッシュ>/  ← 【倉庫A】Gradle 本体。Wrapper（受付係）の管轄
+├── caches/
+│   ├── modules-2/files-2.1/                    ← 【倉庫B】借りてきた jar 全部。Gradle の管轄
+│   └── 9.5.1/  jars-9/  journal-1/             ← Gradle の内部帳簿（コンパイル済みスクリプト等）
+└── daemon/  native/  notifications/            ← 動作ログなどの雑務フォルダ
+```
+
+- **倉庫 A（`wrapper/dists/`）= Gradle 本体の置き場。** Wrapper がダウンロードした zip の展開物
+- **倉庫 B（`caches/modules-2/`）= パッケージの置き場。** Maven Central 等から取得した jar
+
+### 倉庫 B に入るのは build.gradle に書いた分だけではない（実測）
+
+build.gradle の `dependencies { }` は 9 行ですが、倉庫 B には**実測で 94 グループ**のライブラリが入っていました。内訳は 3 種類:
+
+1. **推移的依存** — `spring-boot-starter-webmvc` が連れてくる Tomcat・Jackson・ログライブラリなどの芋づる分
+2. **テストツール** — `org.junit` も実在。**JUnit は Gradle の付属品ではなく**、`testImplementation` / `testRuntimeOnly` が連れてくる「ただの依存パッケージ」なので他のライブラリと同格で並ぶ（Gradle の `test` タスクは JUnit を起動する係であって、JUnit そのものは Gradle の中に入っていない）
+3. **プラグイン** — `plugins { id 'org.springframework.boot' }` の実体 `spring-boot-gradle-plugin` も実在。プラグインも「プラグイン専用レジストリ（**Gradle Plugin Portal**）から借りてきた jar」なので同じ倉庫行き
+
+つまり倉庫 B の入場資格は「**ネットから借りてきた jar であること**」で、用途（アプリ用・テスト用・ビルド用）は問いません。唯一の例外が Gradle 本体——「借りてきた道具」ではなく「倉庫番自身」なので、雇い主の Wrapper が倉庫 A に住まわせている、という整理です。
+
+パッケージの実パスはこんな形です:
+
+```
+.../files-2.1/com.mysql/mysql-connector-j/9.7.0/4e6e3e...98cba/mysql-connector-j-9.7.0.jar
+      グループ ↑        名前 ↑            版 ↑   SHA1 ハッシュ ↑
+```
+
+バージョンがフォルダ名に入っているので**複数バージョンが並んで共存**できます（全プロジェクト共有が安全に成立する理由）。SHA1 ハッシュの階層はダウンロード物の改ざん・破損検出用で、人間が手で触る前提の構造ではありません。
+
+### 第 3 の倉庫 `~/.gradle/jdks` — コンパイラは Gradle の持ち物ではない
+
+Java コンパイラ（javac）は Gradle に入っておらず、**JDK のものを借りて**使います。build.gradle の `toolchain { languageVersion = 21 }` は「JDK 21 のコンパイラを使え」という指定で、このリポジトリではコンテナイメージ（`eclipse-temurin:21-jdk`）の JDK がそのまま使われます。もし手元に合う版の JDK が無い環境だと、Gradle は **JDK 自体を自動ダウンロード**することがあり、その置き場が第 3 の倉庫 `~/.gradle/jdks/` です（このリポジトリでは出番が無いので存在しません）。
 
 ### コンテナ内では「コンテナの ~/.gradle」に配置される
 
@@ -219,11 +302,18 @@ named volume が選ばれる理由:
 - **タスクグラフ** — タスク間の依存関係の地図。「正しい順序で一発実行」と「UP-TO-DATE スキップ」の土台
 - **Maven** — Gradle と並ぶもう 1 つの定番ビルドツール。二択の関係
 - **Gradle Wrapper（gradlew）** — プロジェクト指定バージョンの Gradle 本体を自動ダウンロードして実行する同梱スクリプト
+- **Spring Initializr** — Spring チーム運営の Spring Boot 専用雛形生成サービス（start.spring.io）。Wrapper 一式も同梱してくれる。Node の `npm create` 系、PHP の `composer create-project` に相当
+- **`wrapper` タスク** — Wrapper の 4 ファイルを生成・更新する Gradle 標準タスク。`./gradlew wrapper --gradle-version X` で自己更新できる
 - **Corepack** — Node 側の類似機構。package.json の `packageManager` 欄で yarn / pnpm の版を固定し自動調達する
 - **SDKMAN** — JDK や Gradle など Java 界の道具を入れるバージョンマネージャ（brew の Java 特化版のような立ち位置）
 - **gradle-wrapper.properties** — Wrapper が読む「使うべき Gradle バージョン」の設定ファイル
 - **`./`** — 「現在のディレクトリ」を表すパス表記。PATH 検索ではなく場所の明示
 - **~/.gradle** — ユーザー単位の Gradle キャッシュ置き場（本体 + 依存 jar）。全プロジェクト共有
+- **wrapper/dists（倉庫 A）** — Wrapper がダウンロードした Gradle 本体の置き場
+- **caches/modules-2（倉庫 B）** — 借りてきた jar 全部の置き場。依存・テストライブラリ・プラグインを区別しない
+- **Gradle Plugin Portal** — プラグイン専用のレジストリ（Maven Central のプラグイン版）
+- **ツールチェーン（toolchain）** — 「この版の JDK でコンパイルせよ」という指定。コンパイラは Gradle ではなく JDK の持ち物
+- **~/.gradle/jdks（第 3 の倉庫）** — ツールチェーンが JDK を自動ダウンロードしたときの置き場
 - **named volume** — Docker が管理する永続保存領域。コンテナを作り直しても残り、`down -v` で削除
 - **バインドマウント** — ホストのフォルダをコンテナに見せる方式。実体はホスト側にある
 - **マウントの重ね掛け（マスキング）** — マウント先に元からあったファイルは削除されず「見えなくなる」だけ、という性質
