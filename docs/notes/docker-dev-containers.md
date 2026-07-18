@@ -226,4 +226,5 @@ docker compose port backend 8080
 ## 関連
 
 - backend の CMD が起動する `bootRun` の中身、JDK・コンパイルの話 → [java-build-and-run.md](./java-build-and-run.md)
+- サービス名とコンテナ名の違い、`container_name` を付けない理由 → [docker-container-names.md](./docker-container-names.md)
 - `gradle-cache` ボリュームの中身、「バインドマウントではなく named volume」の理由、マウントの重ね掛け（マスキング）の性質、実務での「ホストに見せる/見せない」比較 → [gradle-basics.md](./gradle-basics.md)
