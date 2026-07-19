@@ -8,11 +8,11 @@
 
 ## プロジェクト概要
 
-Nuxt 3 + Spring Boot のアプリケーションを docker-compose で開発し、検証したいときだけ Terraform(GitHub Actions 経由)で AWS に環境を構築・撤収する。**常時公開はしない。**
+Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し、検証したいときだけ Terraform(GitHub Actions 経由)で AWS に環境を構築・撤収する。**常時公開はしない。**
 
 ## 技術スタック
 
-- フロントエンド: Nuxt 3(**SSG モード** `nuxt generate`)、Node 22 LTS、npm
+- フロントエンド: Nuxt 4(**SSG モード** `nuxt generate`)、Node 22 LTS、npm
 - バックエンド: Java 21、Spring Boot 4.x、Gradle
 - DB: MySQL 8(本番は RDS)
 - 画像保存: MinIO(開発)/ S3 + CloudFront(本番)
@@ -23,7 +23,7 @@ Nuxt 3 + Spring Boot のアプリケーションを docker-compose で開発し�
 ## フォルダ構成
 
 ```
-├── frontend/    Nuxt 3 プロジェクト
+├── frontend/    Nuxt 4 プロジェクト
 ├── backend/     Spring Boot プロジェクト
 ├── terraform/   Terraform コード
 ├── docker/      Dockerfile 置き場(docker-compose.yml はリポジトリ直下)
