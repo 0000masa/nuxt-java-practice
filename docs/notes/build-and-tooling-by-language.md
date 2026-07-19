@@ -32,6 +32,25 @@ JVM が実行できるのは**バイトコード(.class)だけ**で、ソース(
 
 つまり jar 化は実行のためではなく**運搬のための工程**。「開発 = ばらの .class を直接実行 / 本番 = 箱詰めして運んでから、中の .class を実行」という関係になる。
 
+#### 本番イメージの作り方 — 実務では jar を丸ごと COPY する
+
+では ECR に push する本番イメージはどう作るか。**.class や設定ファイルを 1 つずつ COPY する運用は実務に存在しない**。ファイル数が数百〜数千になり、抜け漏れや COPY の管理が破綻する — まさにそれをしないために jar という箱がある。定番は jar 1 個を COPY して exec 形式で起動するだけ:
+
+```dockerfile
+FROM eclipse-temurin:21-jre
+COPY <どこかで作った>/app.jar /app/app.jar
+CMD ["java", "-jar", "/app/app.jar"]
+```
+
+論点は「その jar を**どこで**作るか」で、実務では 2 流派ある:
+
+- **CI で作って COPY する派** — GitHub Actions 等で `./gradlew build` してから、できた jar を Dockerfile が COPY する。CI はテストの時点でコンパイル済みなので二度手間がなく、CI のキャッシュも素直に効く。ただし「イメージの中身の一部が CI の手順に依存する」ため、Dockerfile だけ見てもイメージの作り方が完結しない
+- **マルチステージビルド派** — Dockerfile 内のビルド用ステージ(JDK)で `./gradlew build` し、実行用ステージ(JRE)には jar だけをコピーする。`docker build` 一発で誰の環境でも同じイメージが再現でき、**Docker 公式・Spring 公式ドキュメントが示す現在の標準形**。ビルドの二度手間は BuildKit のキャッシュマウントで緩和できる
+
+発展形として、Spring Boot の **layered jar**(箱を「依存ライブラリ層 / 自分のコード層」に開け直して COPY し、変更のない依存層を Docker レイヤーキャッシュに乗せて push/pull を速くする)や、Dockerfile 自体を書かない **Buildpacks**(`./gradlew bootBuildImage`)・**Jib** という流儀もある。
+
+**このリポジトリの方針は「全工程マルチステージ」**。「ECR に push するイメージが何でできているかは Dockerfile を見れば全部わかる」ことを優先し、Nuxt の SSG ビルドまで含めて Dockerfile 内で完結させる(ステージ構成 → [setup/backend.md](../setup/backend.md))。
+
 ### まとめ表
 
 | | PHP | Node.js(TypeScript) | Java |
@@ -74,6 +93,9 @@ JVM が実行できるのは**バイトコード(.class)だけ**で、ソース(
 - **インタープリタ** — ソースコードを直接読んで実行するプログラム(PHP の実行系)
 - **バイトコード** — コンパイル結果の中間形式。JVM が実行する(PHP の opcache が内部で作るものも同名)
 - **jar** — 大量の .class と設定ファイルを 1 つにまとめた zip 形式の箱。配布のための形式で、実行されるのは中のバイトコード
+- **マルチステージビルド** — 1 つの Dockerfile 内で「ビルド用ステージ(JDK)」と「実行用ステージ(JRE)」を分け、成果物だけを後段に渡す書き方。本番イメージ作りの標準形
+- **layered jar** — jar を「依存ライブラリ層 / 自分のコード層」に分けて Docker レイヤーキャッシュを効かせる Spring Boot の仕組み
+- **Buildpacks / Jib** — Dockerfile を書かずにコンテナイメージを作る流儀(Spring Boot 公式 / Google 製)
 - **SWC** — Next.js が使う Rust 製の高速 TypeScript/JavaScript 変換系
 - **Electron** — Chromium + Node.js を内蔵したデスクトップアプリ基盤。VS Code の土台で、「VS Code 同梱の Node」の正体
 - **VS Code Server** — WSL・コンテナ側で動く VS Code の裏方。自分用の Node.js を持ち込むため接続先に Node のインストールは不要
