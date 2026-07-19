@@ -106,6 +106,21 @@ compose で動かすのは MySQL / MinIO などミドルウェアだけにして
 - **同じファイルを両方のウィンドウで開いて編集しない。** VS Code は外部変更を検知して追従するが、両方に未保存の編集があると上書きの衝突が起きる。分業を守っていれば起きない
 - ホスト側で Java を触ってしまった・git 操作でソースが変わった等、反映が怪しいときは `docker compose restart backend` で確実に反映できる(手法 1 への安全なフォールバック)
 
+### Claude Code に Java を編集させたとき — 手動で①を務める
+
+Claude Code(claude CLI)は**ホスト(WSL)側で動くツール**なので、その編集はコンテナ内から見ると「外部変更」。①コンパイル係(Dev Container 内の VS Code)は自分のウィンドウの保存イベントにしか反応しないため、**Claude Code の編集は保存だけでは反映されない**。編集が終わったら、リポジトリ直下(`docker-compose.yml` がある場所)でどちらかを実行する:
+
+```bash
+docker compose exec backend sh ./gradlew classes   # 軽い: コンパイルだけ → devtools が拾って高速再起動
+docker compose restart backend                     # 重い: コンテナごと再起動(依存変更時・反映が怪しいとき)
+```
+
+`exec` の方の仕組み:
+
+- `docker compose exec backend ...` は「動いている backend コンテナの中でコマンドを 1 回実行する」。コンテナの WORKDIR が `/app`(= `backend/`)なので `./gradlew` がそのまま見つかる。`sh` を挟むのは CMD と同じ実行権限の保険
+- `classes` はコンパイル(+リソース処理)だけを行うタスク。`build/classes` の .class が更新されれば、あとは常駐している devtools(②)が普段どおり検知してアプリだけを再起動する。**アプリを止めないので restart より速い**(アプリ稼働中の実行で完走を確認済み。変更がなければ `UP-TO-DATE` と表示されて何もしないので、何度実行しても安全)
+- つまりこれは「①コンパイル係を、その場で 1 回だけ人力(または Claude Code 自身)が務める」操作。Claude Code に編集させるときは、このコマンドの実行までセットで頼めば「編集 → 反映 → 動作確認」が一連で完結する(CLAUDE.md にも記載)
+
 ## トレードオフ(把握したうえで受け入れたもの)
 
 - **初回の「Reopen in Container」は重い。** コンテナ内に VS Code Server と拡張一式をダウンロードするため数分かかる。2 回目以降は速い
@@ -122,7 +137,7 @@ compose で動かすのは MySQL / MinIO などミドルウェアだけにして
 - **restart / hot swap** — devtools の「Spring ごと組み立て直す」再起動と、JRebel 等の「実行中コードを書き換える」ホットスワップは別物
 - **保存イベント** — エディタが「保存された」ことを拡張機能に通知する仕組み。自動コンパイル(①)の引き金
 - **外部変更** — その VS Code ウィンドウの外で行われたファイル書き換え。検知はされるが、保存イベントとは扱いが別
-- **リモートインジケータ** — VS Code ウィンドウ左下の緑色の表示。今どの環境(WSL / Dev Container)に接続しているかを示す
+- **リモートインジケータ** — VS Code ウィンドウ左下の青色の表示。今どの環境(WSL / Dev Container)に接続しているかを示す
 - **`RemoteSpringApplication`** — devtools のリモート更新用クライアント
 
 ## 関連

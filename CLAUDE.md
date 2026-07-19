@@ -57,3 +57,4 @@ Nuxt 3 + Spring Boot のアプリケーションを docker-compose で開発し�
 - フロント: `cd frontend && npm run dev` / SSG ビルドは `npm run generate`
 - バックエンド: `cd backend && ./gradlew bootRun` / ビルドは `./gradlew build`
 - バックエンドの Java 開発は **VS Code の Dev Container**(`.devcontainer/`)で backend コンテナに入って行う(保存で自動コンパイル + devtools 再起動。ホストに JDK 不要)。依存(`build.gradle`)変更時は `docker compose restart backend`。詳細 → `docs/notes/java-dev-env-comparison.md`
+- **Claude が backend の Java を編集したら、編集後にリポジトリ直下で `docker compose exec backend sh ./gradlew classes` を実行して反映すること**(ホスト側からの編集は自動コンパイルされない。devtools がコンパイル結果を拾って再起動する。依存変更時は `docker compose restart backend`)
