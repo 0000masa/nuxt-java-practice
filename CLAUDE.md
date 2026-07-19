@@ -56,3 +56,4 @@ Nuxt 3 + Spring Boot のアプリケーションを docker-compose で開発し�
 - 開発環境: `docker compose up -d`
 - フロント: `cd frontend && npm run dev` / SSG ビルドは `npm run generate`
 - バックエンド: `cd backend && ./gradlew bootRun` / ビルドは `./gradlew build`
+- バックエンドの Java 開発は **VS Code の Dev Container**(`.devcontainer/`)で backend コンテナに入って行う(保存で自動コンパイル + devtools 再起動。ホストに JDK 不要)。依存(`build.gradle`)変更時は `docker compose restart backend`。詳細 → `docs/notes/java-dev-env-comparison.md`
