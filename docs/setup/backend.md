@@ -76,8 +76,28 @@ server:
 2. MySQL(docker-compose の mysql コンテナ)に接続できること
 3. `./gradlew build` で実行可能 Jar(`build/libs/*.jar`)が生成されること
 
-## 本番イメージのビルドの流れ(CI)
+## 日常の開発 — Dev Container で backend コンテナに入る
 
-1. `frontend/` で `npm run generate` → `.output/public/` を `backend/src/main/resources/static/` にコピー
-2. `./gradlew build` で Jar を作成
-3. `docker/` の Dockerfile でイメージ化し、ECR に push
+Java のコードは、VS Code の Dev Container で backend コンテナの**中に入って**書く。コンパイルも補完もコンテナ内の JDK で行われるため、**ホスト(WSL)に JDK は不要**(採用理由と仕組み → [手法比較メモ](../notes/java-dev-env-comparison.md))。
+
+1. ホスト側の VS Code に拡張機能「**Dev Containers**」(`ms-vscode-remote.remote-containers`)をインストールする(初回のみ)
+2. `docker compose up -d` で環境を起動する
+3. リポジトリを開いた VS Code でコマンドパレット → 「**Dev Containers: Reopen in Container**」を実行する。`.devcontainer/devcontainer.json` が読まれ、backend コンテナに接続した新しいウィンドウが開く(初回はコンテナ内に VS Code Server と Java 拡張をダウンロードするため数分かかる)
+4. 動作確認: `.java` を編集して保存 → 自動コンパイルが走り、backend のログ(`docker compose logs -f backend`)に devtools の再起動(`Restarting due to ...`)が出て、変更が反映される
+
+補足:
+
+- ワークスペースはマウント先の `/app`(= `backend/`)のみ。**docs や frontend の編集はホスト側の VS Code ウィンドウで行う**(2 ウィンドウ運用)
+- Dev Container のウィンドウを閉じても compose は止まらない(`shutdownAction: "none"`)。VS Code を開いていない間の変更反映は `docker compose restart backend`
+- `build.gradle` の依存を追加・変更したときは保存では反映されない。`docker compose restart backend` する
+- Spring 用の補完・ダッシュボードが欲しければ「Spring Boot Extension Pack」をコンテナ側に追加してもよい(任意)
+
+## 本番イメージのビルドの流れ
+
+本番イメージ(ECR に push するもの)は**全工程をマルチステージ Dockerfile で完結**させる方針。「イメージが何でできているかは Dockerfile 1 枚を見ればわかる」「`docker build` 一発でどこでも同じイメージが再現できる」ことを優先し、GitHub Actions 側は `docker build` → ECR push だけを担う(方式比較 → [build-and-tooling-by-language.md](../notes/build-and-tooling-by-language.md))。
+
+ステージ構成(本番用 Dockerfile は AWS 構築時に `docker/` 配下へ作成する):
+
+1. **frontend ビルド用ステージ(Node)** — `npm ci && npm run generate` で SSG 出力(`.output/public/`)を作る
+2. **backend ビルド用ステージ(JDK)** — ステージ 1 の出力を `src/main/resources/static/` に取り込み、`./gradlew build` で実行可能 jar を作る
+3. **実行用ステージ(JRE)** — jar 1 個だけを COPY し、`CMD ["java", "-jar", ...]` で起動する。コンパイラが不要になるので軽量な JRE イメージで足りる

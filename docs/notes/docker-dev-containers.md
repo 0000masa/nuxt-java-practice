@@ -2,6 +2,8 @@
 
 `docker/frontend/Dockerfile` と `docker/backend/Dockerfile` の読み解き。2 つは**同じ設計パターンの Node 版 / Java 版**である、という話。
 
+> **紛らわしい用語に注意**: このメモの「開発用コンテナ」は「実行環境だけのイメージ + ソースはマウント」という**このリポジトリの設計パターン**の呼び名。世の中で **Dev Container** と呼ばれるもの(`.devcontainer/devcontainer.json`)は「コンテナの中にエディタごと入って開発する」ための**別の公開仕様**で、このリポジトリでは backend の Java 開発に併用している(→ [java-dev-env-comparison.md](./java-dev-env-comparison.md))。名前は似ているが別概念。
+
 ## 共通の設計パターン
 
 どちらの Dockerfile にも `COPY` や `npm install` / ビルド手順がありません。イメージが持つのは**実行環境（Node / JDK）だけ**で、ソースコードは `docker-compose.yml` の `volumes:` でホストのフォルダをそのままマウントします。

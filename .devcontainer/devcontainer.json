@@ -1,0 +1,21 @@
+// backend コンテナを VS Code の Dev Container として開くための定義
+// 仕組み・採用理由 → docs/notes/java-dev-env-comparison.md、手順 → docs/setup/backend.md
+{
+	"name": "backend (Spring Boot)",
+	// 既存の compose をそのまま使い、backend サービスのコンテナに入る
+	"dockerComposeFile": "../docker-compose.yml",
+	"service": "backend",
+	// ./backend:/app のマウント先 = ワークスペースは backend のみ(docs/frontend はホスト側ウィンドウで編集)
+	"workspaceFolder": "/app",
+	// ウィンドウを閉じても compose を止めない(frontend や mysql は VS Code と無関係に動き続ける)
+	"shutdownAction": "none",
+	"customizations": {
+		"vscode": {
+			// コンテナ内にインストールされる拡張。JDK はコンテナ(eclipse-temurin)のものを使うのでホストに JDK は不要
+			"extensions": [
+				"vscjava.vscode-java-pack", // Java 基本セット(言語サーバー = 保存時の自動コンパイル込み)
+				"vscjava.vscode-gradle" // Gradle 連携。Build Server がビルドを Gradle に委譲し build/classes へ出力する
+			]
+		}
+	}
+}
