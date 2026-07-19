@@ -63,6 +63,10 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 
 まとめ: 「ビルドは必要。マウントが運ぶのはソースだけ。反映には『コンパイルする係』を誰かが務める必要があり、それが再起動か、継続ビルドか、IDE か、の違い」。
 
+### このリポジトリの採用構成 — ①を Dev Container 内の VS Code が務める
+
+このリポジトリは **Dev Container 方式**を採用した。VS Code で backend コンテナの中に入って開発すると(`.devcontainer/devcontainer.json`)、コンテナ内の Java 拡張が保存時に自動コンパイルして①を務め、devtools(②)がそれを拾って再起動する。CMD は `sh ./gradlew bootRun` のままなので、VS Code を開いていないときは方法 1(restart)に自然に戻るだけで壊れない。候補に挙がった他の手法(継続ビルド常駐・ホスト IDE など)との比較と選定理由は [java-dev-env-comparison.md](./java-dev-env-comparison.md) を参照。
+
 ## `bootRun` タスクと Gradle Wrapper
 
 - **`./gradlew`（Gradle Wrapper）** — Gradle 本体をインストールしていなくても、初回に正しいバージョンを自動ダウンロードして実行するスクリプト。ダウンロードした本体は docker-compose の `gradle-cache` ボリュームに保存され、コンテナを作り直しても再ダウンロードされない（Gradle そのものと キャッシュの置き場所の詳細 → [gradle-basics.md](./gradle-basics.md)）
@@ -94,3 +98,5 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 
 - Dockerfile・CMD・マウントの設計 → [docker-dev-containers.md](./docker-dev-containers.md)
 - build.gradle と依存管理・スコープ → [gradle-dependencies.md](./gradle-dependencies.md)
+- ①コンパイル係を誰に任せるかの手法比較と Dev Container 採用理由 → [java-dev-env-comparison.md](./java-dev-env-comparison.md)
+- 言語でビルドの要否・補完の仕組みが変わる理由(PHP / Node との比較の続き) → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)
