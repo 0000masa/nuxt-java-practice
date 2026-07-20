@@ -82,7 +82,7 @@ Java のコードは、VS Code の Dev Container で backend コンテナの**�
 
 1. ホスト側の VS Code に拡張機能「**Dev Containers**」(`ms-vscode-remote.remote-containers`)をインストールする(初回のみ)
 2. `docker compose up -d` で環境を起動する
-3. リポジトリを開いた VS Code でコマンドパレット → 「**Dev Containers: Reopen in Container**」を実行する。`.devcontainer/devcontainer.json` が読まれ、backend コンテナに接続した新しいウィンドウが開く(初回はコンテナ内に VS Code Server と Java 拡張をダウンロードするため数分かかる)
+3. リポジトリを開いた VS Code でコマンドパレット → 「**Dev Containers: Reopen in Container**」を実行する。`.devcontainer/devcontainer.json` が読まれ、**今のウィンドウが開き直って** backend コンテナに接続される(初回はコンテナ内に VS Code Server と Java 拡張をダウンロードするため数分かかる)。今のウィンドウをホスト側のまま残したい場合は、「WSL: New WSL Window」で開いた別ウィンドウから「Dev Containers: Open Folder in Container...」でリポジトリ直下を選ぶ(詳細 → [手法比較メモ](../notes/java-dev-env-comparison.md)の「既存ウィンドウを開いたまま、別ウィンドウでコンテナに入る方法」)
 4. 動作確認: `.java` を編集して保存 → 自動コンパイルが走り、backend のログ(`docker compose logs -f backend`)に devtools の再起動(`Restarting due to ...`)が出て、変更が反映される
 
 補足:

@@ -86,11 +86,21 @@ compose で動かすのは MySQL / MinIO などミドルウェアだけにして
 
 1. ホスト側の VS Code に拡張機能「Dev Containers」(`ms-vscode-remote.remote-containers`)を入れておく(初回のみ)
 2. `docker compose up -d` で環境を起動する
-3. コマンドパレット(Ctrl+Shift+P)→ **「Dev Containers: Reopen in Container」**。ウィンドウが開き直り、`.devcontainer/devcontainer.json` が読まれて backend コンテナに接続される(初回はコンテナ内への VS Code Server + 拡張のインストールで数分待つ)
+3. コマンドパレット(Ctrl+Shift+P)→ **「Dev Containers: Reopen in Container」**。**今のウィンドウ**が開き直り、`.devcontainer/devcontainer.json` が読まれて backend コンテナに接続される(初回はコンテナ内への VS Code Server + 拡張のインストールで数分待つ)。「閉じた」ように見えるが実際は同じウィンドウが接続先を切り替えてリロードしただけで、未保存の編集も hot exit(未保存内容の自動退避)で引き継がれる。ホスト側の作業ウィンドウが必要なら、このあと「WSL: New WSL Window」でもう 1 枚開いてリポジトリを開き直せばよい
 4. **今どちらに居るかはウィンドウ左下の青色のリモートインジケータで見分ける。** 「Dev Container: backend (Spring Boot)」ならコンテナ内、「WSL: ...」ならホスト側
 5. ホスト側に戻るときはコマンドパレット → **「Dev Containers: Reopen Folder Locally」**。`shutdownAction: "none"` なのでウィンドウをただ閉じてもコンテナ・compose は止まらない
 
 手順だけの最小セットは [setup/backend.md](../setup/backend.md) にもある。
+
+### 既存ウィンドウを開いたまま、別ウィンドウでコンテナに入る方法
+
+「Reopen in Container」は名前のとおり「今のウィンドウを開き直す」コマンドなので、これを使う限り既存ウィンドウは必ずコンテナ用に切り替わる(挙動を変える設定はない)。今開いているホスト側ウィンドウに触れずにコンテナ用ウィンドウを**増やしたい**ときは、こうする:
+
+1. コマンドパレット → **「WSL: New WSL Window」** で、WSL に接続された空ウィンドウをもう 1 枚開く
+2. その新しいウィンドウでコマンドパレット → **「Dev Containers: Open Folder in Container...」**
+3. フォルダ選択でリポジトリ直下(`.devcontainer/` がある場所)を選ぶ。新ウィンドウだけが backend コンテナに接続され、元のウィンドウは WSL 接続のまま残る
+
+なお「先にホスト用の 2 枚目を開いておいて、片方だけ Reopen する」という順番は上手くいかない。VS Code は**同じ接続先の同じフォルダを 2 枚のウィンドウで開けない**(既存ウィンドウにフォーカスが移るだけ)ため。上の手順や、「Reopen in Container してからホスト用ウィンドウを開き直す」順番なら、コンテナ側ウィンドウのフォルダは `/app`(接続先も別)なのでこの制約に当たらない。
 
 ### どちらのウィンドウで編集しても「ファイルは」変わる。それでも Java はコンテナ側で編集する
 
