@@ -1,6 +1,33 @@
-# 環境変数の基礎 — .env は誰が読むのか、Docker なしではどう渡すのか
+# 環境変数と設定ファイルの基礎 — .env は誰が読むのか、Docker なしではどう渡すのか
 
-`application.yml` の `${DB_USER:app}` はどこから値を得るのか。「そもそも環境変数とは何か」「.env ファイルとの関係」「Docker(compose / ECS)を使わない構成ではどう渡すのか」をまとめた学習メモ。このリポジトリでの**方針**(.env で一元管理・本番は ECS 注入)は [development/README.md](../development/README.md) の「環境変数の方針」を参照。ここでは**仕組み**を扱う。
+`application.yml` の `${DB_USER:app}` はどこから値を得るのか。「設定ファイルにはビルド時用と実行時用がある」「そもそも環境変数とは何か」「.env ファイルとの関係」「Docker(compose / ECS)を使わない構成ではどう渡すのか」をまとめた学習メモ。このリポジトリでの**方針**(.env で一元管理・本番は ECS 注入)は [development/README.md](../development/README.md) の「環境変数の方針」を参照。ここでは**仕組み**を扱う。
+
+## 前提: 設定ファイルは 2 種類 — ビルド時(Gradle)と実行時(Spring Boot)
+
+backend には「設定ファイル」と呼べるものが 3 つあるが、**読む人と読まれるタイミング**で 2 グループに分かれる。読まれる順番に並べると:
+
+```
+【ビルド時】Gradle(ビルドツール)が読む —「アプリを作る工程」への指示
+  1. settings.gradle   このビルドの名前は?(どのプロジェクトが参加する?)
+  2. build.gradle      どう作る? — Java 21 で、これらの依存ライブラリを使って…
+        ↓ コンパイル・jar 詰め
+【実行時】Spring Boot(アプリ本体)が読む —「アプリが動くとき」への指示
+  3. application.yml   どう動く? — この DB に繋いで、8080 番で待ち受けて…
+```
+
+両者の決定的な差は **jar の中に入るかどうか**:
+
+- `application.yml` は `src/main/resources/` にあり、ビルド時に **jar へ同梱され、アプリと一緒に本番環境まで配布される**(だから実行時に読める)
+- `settings.gradle` / `build.gradle` は jar に**入らない**。ビルド環境でだけ使われるファイルで、本番コンテナに Gradle も build.gradle も存在しないのはこのため
+
+Laravel でいうと `build.gradle` ≈ `composer.json`(依存ツールが読む)、`application.yml` ≈ `config/` 一式(アプリが実行時に読む)。settings.gradle に当たるものは PHP にはほぼ無い(ビルド工程自体が無いから)。
+
+紛らわしい点を 2 つ:
+
+- `settings.gradle` の `rootProject.name = 'app'` と `application.yml` の `spring.application.name: app` は、偶然同じ `app` だが**別物**。前者は**ビルド成果物の名前**(jar が `app-0.0.1-SNAPSHOT.jar` になる)、後者は Spring が実行時にログ等で名乗るアプリ名
+- **変更の反映方法も別**。`application.yml` はアプリの再起動(devtools の高速 restart)で反映されるが、`.gradle` 側は**ビルドのやり直し**が必要(このリポジトリでは `docker compose restart backend`)
+
+そして本題との接続: **環境変数で外から値を差し替えられるのは「実行時」側だけ。** `${DB_HOST:localhost}` の穴が開いているのは application.yml であって、build.gradle に DB 接続情報を書きたくなったら領分違い(ビルド作業への指示ではなく、実行時の動作設定)を疑う。以降はこの「実行時側」の話。
 
 ## 環境変数の正体 — プロセス起動時に親から手渡される key=value の表
 
@@ -106,6 +133,9 @@ Spring Boot はこれらを**プロパティソース**(設定値の供給源)�
 
 ## 用語集
 
+- **ビルド時設定 / 実行時設定** — 「アプリを作る工程」への指示(.gradle、Gradle が読む)と「アプリが動くとき」への指示(application.yml、Spring Boot が読む)。後者だけが jar に同梱される
+- **settings.gradle** — Gradle が最初に読む「ビルドの入口」。プロジェクト名(= jar のファイル名の前半)を決める
+- **rootProject.name / spring.application.name** — ビルド成果物の名前(ビルド時)と、Spring が名乗るアプリ名(実行時)。別物
 - **環境変数** — プロセス起動時に親プロセスからコピーして手渡される key=value の表。プロセスごとに独立し、変更の反映には再起動が要る
 - **.env ファイル** — KEY=VALUE を並べただけのテキストファイル。それ自体は環境変数ではなく、誰かが読んで変換する必要がある
 - **phpdotenv / dotenv** — .env を読んで環境変数相当にするライブラリ(Laravel / Node)。Spring Boot に相当品は同梱されていない
@@ -121,3 +151,4 @@ Spring Boot はこれらを**プロパティソース**(設定値の供給源)�
 - このリポジトリの環境変数の**方針**(.env 一元管理・二役の使い分け・本番 ECS 注入) → [development/README.md](../development/README.md)
 - 言語ごとにビルド・補完の仕組みが違う話(今回の「.env を読む文化の違い」と同じ構図) → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)
 - `.env` を読む compose の記述そのもの → リポジトリ直下 `docker-compose.yml`(冒頭コメントと backend / mysql の違い)
+- backend 配下の各ファイル(settings.gradle / build.gradle / application.yml 含む)が「何者で誰が作るか」の図鑑 → [backend-project-files.md](./backend-project-files.md)
