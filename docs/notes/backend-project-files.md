@@ -35,7 +35,7 @@ Spring Boot が起動時に読む設定ファイル。拡張子 `.yml`(YAML)は 
 
 ### `build.gradle` / `settings.gradle` — ビルドの設計図
 
-拡張子 `.gradle` は「Gradle に読ませる台本」で、中身は Groovy という言語のコード。役割は package.json に近い(依存ライブラリの宣言など → [gradle-dependencies.md](./gradle-dependencies.md))。`settings.gradle` は今のところ `rootProject.name = 'demo'` の 1 行だけで、プロジェクト名を決めている——この名前が後述の成果物 jar のファイル名になる。
+拡張子 `.gradle` は「Gradle に読ませる台本」で、中身は Groovy という言語のコード。役割は package.json に近い(依存ライブラリの宣言など → [gradle-dependencies.md](./gradle-dependencies.md))。`settings.gradle` は今のところ `rootProject.name = 'app'` の 1 行だけで、プロジェクト名を決めている——この名前が後述の成果物 jar のファイル名になる。
 
 ## ② 同梱された道具 — Gradle Wrapper 一式
 
@@ -70,7 +70,7 @@ distributionUrl=https\://services.gradle.org/distributions/gradle-9.5.1-bin.zip
 - `resolvedMainClassName` — 「起動すべき main クラスはこれ」と Gradle がメモした 1 行テキスト
 - `tmp/` — コンパイルの途中経過(差分ビルド用のデータなど)
 
-**`.jar` の正体はここで説明できる。** jar(Java ARchive)は「`.class` 一式 + 設定ファイルを 1 個に固めた zip」で、配布・実行の単位。`./gradlew build` を実行すると `build/libs/demo-0.0.1-SNAPSHOT.jar` が生まれる(`demo` は settings.gradle の名前)——**今はまだ `bootRun` しかしていないので存在しない**。本番 AWS へ持っていくのはこの成果物 jar であり、②の wrapper jar とは役割がまったく違う。
+**`.jar` の正体はここで説明できる。** jar(Java ARchive)は「`.class` 一式 + 設定ファイルを 1 個に固めた zip」で、配布・実行の単位。`./gradlew build` を実行すると `build/libs/app-0.0.1-SNAPSHOT.jar` が生まれる(`app` は settings.gradle の名前)——**今はまだ `bootRun` しかしていないので存在しない**。本番 AWS へ持っていくのはこの成果物 jar であり、②の wrapper jar とは役割がまったく違う。
 
 ```
 .java(自分が書く)──コンパイル──▶ .class(build/ に生成)──梱包──▶ .jar(build/libs/ に生成)
@@ -90,8 +90,8 @@ docker compose exec backend sh ./gradlew clean          # 片付け(build/ を�
 
 - `cd backend` は不要。Dockerfile の `WORKDIR /app` により、exec は最初からマウントされた `backend/` の中で実行される。成果物はホストの `backend/build/libs/` からそのまま見える(バインドマウントの恩恵)
 - `build` は `bootRun` の「コンパイルして**起動**」に対し、「コンパイル → **テスト** → **jar 梱包**」で終わる別コース。テスト(`@SpringBootTest`)はアプリを丸ごと起動して DB 接続まで本物として動くので、`.env` と mysql が見えるコンテナ内で実行することに意味がある
-- jar は 2 つできる: `demo-0.0.1-SNAPSHOT.jar`(依存ライブラリまで全部入りで単体起動できる **Boot jar**。AWS へ持っていくのはこちら)と `demo-0.0.1-SNAPSHOT-plain.jar`(自分のクラスだけの素の jar)
-- 「jar は zip」の答え合わせは `unzip -l backend/build/libs/demo-0.0.1-SNAPSHOT.jar` で
+- jar は 2 つできる: `app-0.0.1-SNAPSHOT.jar`(依存ライブラリまで全部入りで単体起動できる **Boot jar**。AWS へ持っていくのはこちら)と `app-0.0.1-SNAPSHOT-plain.jar`(自分のクラスだけの素の jar)
+- 「jar は zip」の答え合わせは `unzip -l backend/build/libs/app-0.0.1-SNAPSHOT.jar` で
 
 ### `.gradle/` — Gradle の帳簿(ホームの `~/.gradle` とは別物)
 
