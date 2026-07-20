@@ -27,7 +27,7 @@
 
 人間が読み書きする Java のプログラム本文。ただしコンピュータはこのままでは実行できず、**コンパイルして `.class` に変換してから**動かす(→ ③、詳細は [java-build-and-run.md](./java-build-and-run.md))。フロントの `.ts` / `.vue` に相当する立ち位置。
 
-`src/main/java/` が本体、`src/test/java/` がテストという配置は Gradle/Maven 界の標準レイアウトで、設定しなくても Gradle がこの場所を探しに来る。
+`src/main/java/` が本体、`src/test/java/` がテストという配置は Gradle/Maven 界の標準レイアウトで、設定しなくても Gradle がこの場所を探しに来る。パッケージ名(`com.example.app`)がこの階層を含まないのは、一致ルールの基準点がリポジトリ root ではなく「ソースルート」だから → [java-package-basics.md](./java-package-basics.md)。
 
 ### `application.yml` — アプリの設定
 
