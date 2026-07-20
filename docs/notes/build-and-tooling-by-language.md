@@ -117,4 +117,5 @@ CMD ["java", "-jar", "/app/app.jar"]
 
 - Java の「①コンパイル係 / ②再起動係」モデルと bootRun の性質 → [java-build-and-run.md](./java-build-and-run.md)
 - ①を誰に任せるかの手法比較と Dev Container 採用理由 → [java-dev-env-comparison.md](./java-dev-env-comparison.md)
+- 環境変数の読み込みも「言語ごとに文化が違う」同じ構図(.env を誰が読むか) → [env-vars-basics.md](./env-vars-basics.md)
 - パッケージ名とフォルダの一致が「ソースルート」基準で決まる話(コンパイル後に `src/main/java` が消える理由) → [java-package-basics.md](./java-package-basics.md)

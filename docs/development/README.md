@@ -89,6 +89,8 @@ Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docke
 | S3 エンドポイント | `http://minio:9000` | (未指定 = 本物の S3) |
 | SMTP ホスト | `mailpit:1025` | SES |
 
+仕組みの解説(そもそも環境変数とは・`.env` を誰が読むか・Docker なし / EC2 での渡し方)→ [notes/env-vars-basics.md](../notes/env-vars-basics.md)
+
 ## 起動方法
 
 ```bash
