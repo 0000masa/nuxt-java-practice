@@ -1,6 +1,6 @@
 # Java のパッケージの基礎 — 逆ドメインの命名と「ソースルート」から数える配置
 
-`package com.example.app;` という 1 行に詰まっている 2 つの疑問 — 「なぜ `com` から始まる?」「なぜ `backend/src/main/java` はパッケージ名に含まれない?」 — の答えをまとめた学習メモ。前半が**命名**(名前をどう付けるか)、後半が**配置**(名前とファイルの場所がどう結びつくか)の話。
+`package com.example.app;` という 1 行に詰まっている 2 つの疑問 — 「なぜ `com` から始まる?」「なぜ `backend/src/main/java` はパッケージ名に含まれない?」 — の答えをまとめた学習メモ。前半が**命名**(名前をどう付けるか)、後半が**配置**(名前とファイルの場所がどう結びつくか)、終盤が **main と test の関係**(なぜテストも同じパッケージ名なのか)の話。
 
 ## パッケージとは — クラスの「完全な住所」
 
@@ -73,11 +73,65 @@ Laravel の `namespace App\Http\Controllers;` が `app/Http/Controllers/` に対
 | Laravel(PSR-4) | `composer.json` に明示(`"App\\": "app/"`) | 書く |
 | Java(Gradle) | 規約で暗黙(`src/main/java`) | 書かない(`java` プラグインの既定) |
 
+## main と test — 同じ住所を持つ別の敷地
+
+`src/test/java` のテストコード(`ApplicationTests`)も同じ `package com.example.app;` を名乗っている。main と test は別物なのか同じなのか — 答えは「**層によって使い分けられている**」。ファイル・ビルドの層では完全に別物、パッケージの層では同じ仲間になる。
+
+### ビルドの層では別物 — ソースセット
+
+Gradle は `src/main/java` と `src/test/java` を**ソースセット(source set)**という別々の単位で管理する。コンパイル出力も別フォルダに出る(このプロジェクトの実物):
+
+```
+src/main/java/com/example/app/Application.java
+  → build/classes/java/main/com/example/app/Application.class
+
+src/test/java/com/example/app/ApplicationTests.java
+  → build/classes/java/test/com/example/app/ApplicationTests.class
+```
+
+2 つの敷地の関係は**一方通行**:
+
+- **test → main は見える。** テストのクラスパスには「main の出力 + テスト用ライブラリ(`build.gradle` の `testImplementation` で宣言した JUnit など)」が積まれる
+- **main → test は見えない。** 逆方向は積まれないので、本体からテストクラスは参照できない(本体がテスト用ライブラリにうっかり依存する事故を防ぐ)
+- **jar に入るのは main だけ。** テストの .class もテスト用ライブラリも本番へは運ばれない
+
+### パッケージの層では同じ — 同じ住所を名乗ると「家族扱い」
+
+別の敷地なのにわざわざ同じパッケージ名にするのは偶然ではなく意図的な慣習で、狙いは Java の**第 4 の可視性**にある。Java のアクセス修飾子(クラス・メソッド・フィールドの公開範囲を決めるキーワード)は 4 段階:
+
+| 修飾子 | そのメソッド・フィールドに触れる範囲 |
+|---|---|
+| `public` | どこからでも |
+| `protected` | 同一パッケージ + 継承先クラス |
+| **何も書かない(= package-private)** | **同一パッケージだけ** |
+| `private` | 同じクラスの中だけ |
+
+「何も書かない」が独立した意味(**同一パッケージにだけ見せる**)を持つのが Java の特徴。テストが本体と同じ住所を名乗っていれば、`public` にするほどではないメソッドやフィールドもテストから直接呼べる。テストは別の敷地(test)に住んでいても、**住所が同じだから家族として玄関を通れる**、という関係。おまけとして import も不要になる(`ApplicationTests` が `Application` を import していないのはこのため)。
+
+### PHP(Laravel)には「同一名前空間の特典」がない
+
+では Laravel でテストの名前空間を `Tests\` と本体(`App\`)から分けると、テストから触れなくなるものがあるのか? — **何もない**。PHP のアクセス制御は**クラス単位**で完結していて、名前空間は可視性に一切関与しないから:
+
+| | Java | PHP |
+|---|---|---|
+| クラス自体の可視性 | `public` / package-private を選べる | 選べない(オートロードできるクラスは常にどこからでも `new` できる) |
+| メソッド・プロパティの可視性 | 4 段階(package-private がある) | 3 段階(`public` / `protected` / `private`) |
+| パッケージ・名前空間の役割 | 名前の整理 + **可視性の境界** | 名前の整理だけ |
+
+- テストコードは名前空間がどこであれ、本体クラスの **public なメソッド・プロパティには普通に触れる**。`Tests\` と `App\` が別なことによる不利益はない
+- **`private` / `protected` なメソッド・プロパティには直接触れない。** これは名前空間が同じでも別でも変わらない(Java でも `private` は同一パッケージからでも触れない — package-private とは別の段)
+- **mock はアクセス制御の回避手段ではない。** mock(テスト用の偽物オブジェクト)は「テスト対象が**依存している相手**を差し替える」道具であって、テスト対象の private メソッドの中身に触るためのものではない。PHPUnit / Mockery で mock を作れるのは public / protected なメソッドの振る舞いまで
+- どうしても private に触りたいときは **Reflection**(実行時にアクセス制限をこじ開ける仕組み。PHP にも Java にもある)という最終手段があるが、「private を直接テストしたくなったら、public な入口経由でテストするか、クラスを分けるサイン」というのが両言語共通の定石
+
+まとめると: **Java には package-private という中間の段があるから、テストが本体と同じ住所を名乗る意味がある。PHP にはその段がないから、`Tests\` を分けても失うものがない。**
+
 ## つまずきポイント
 
 - **VS Code で新規パッケージを作る起点。** エクスプローラーで `src/main/java` を右クリックして作れば正しく `com.example.xxx` になるが、`src` や `main` の下に直接フォルダを掘ると言語サーバーに「宣言されたパッケージと一致しません」と怒られる。エラーの意味はこのメモの一致ルールそのもの
 - **`src/main/resources` はもう一つの「ルート」。** `application.yml` や Flyway の `db/migration/` はこちらが基準点で、中身はコンパイルされずそのまま出力・jar に同梱される(→ [flyway-basics.md](./flyway-basics.md))
-- **`src/test/java` は別のソースルート。** `ApplicationTests` のパッケージも同じ `com.example.app` — main と test は「同じ住所を持つ別の敷地」。だからテストから本体のクラスが import なしで見える(同一パッケージ扱い)
+- **テストのパッケージを本体とずらすと特典が消える。** テストを `com.example.app.tests` に置くとコンパイルは通るが、package-private なメソッド・フィールドに触れなくなる。「同じ住所」は 1 文字でも違えば他人(→ 上の「main と test」の節)
+- **`@SpringBootTest` の設定クラス探索も住所頼み。** このアノテーションは `@SpringBootApplication` の付いたクラスを**テスト自身のパッケージから上へ遡って**探す。テストが `com.example.app` にいるから `Application` が自動で見つかる
+- **`src/test/resources` というテスト専用のリソースルートもある**(このプロジェクトにはまだ無い)。テスト実行時だけ有効な `application.yml` を置き、本番設定を汚さずテスト用の設定に差し替える、といった使い方が定番
 
 ## 用語集
 
@@ -92,6 +146,13 @@ Laravel の `namespace App\Http\Controllers;` が `app/Http/Controllers/` に対
 - **Convention over Configuration(設定より規約)** — 規約どおりなら設定を書かなくてよいという思想。ソースルートにパス設定が不要な理由
 - **sourceSets** — ソースルートの場所を明示的に変えるときの Gradle 設定(このプロジェクトは未使用・規約どおり)
 - **PSR-4** — PHP の「名前空間 ↔ フォルダ」対応規約。`composer.json` の対応表が Java のソースルートに相当
+- **ソースセット(source set)** — Gradle がソースを管理する単位。main(本体)と test(テスト)は別のソースセットで、出力先も jar への梱包も別
+- **アクセス修飾子** — クラス・メソッド・フィールドの公開範囲を決めるキーワード(`public` / `protected` / 無記述 / `private`)
+- **package-private** — アクセス修飾子を何も書かないときの可視性。「同一パッケージにだけ見せる」。PHP には無い段
+- **フィールド / プロパティ** — クラスが持つ変数のこと。Java では「フィールド」、PHP では「プロパティ」と呼ぶ(同じ概念の呼び名違い)
+- **メンバー** — メソッドとフィールドの総称(クラス自体は含まない)。世間の Java 記事で頻出するのでここに載せておくが、このメモでは使わず具体的に書く
+- **mock(モック)** — テスト対象が依存する相手を差し替えるテスト用の偽物オブジェクト。アクセス制御の回避手段ではない
+- **Reflection** — 実行時にクラスの構造を調べたりアクセス制限をこじ開けたりする仕組み。private のテストに使えるが最終手段
 
 ## 関連
 
