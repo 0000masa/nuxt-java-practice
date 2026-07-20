@@ -76,23 +76,30 @@ CMD ["java", "-jar", "/app/app.jar"]
 - **PHP** — 定番の Intelephense も VS Code 同梱の Node で動き、標準ライブラリの定義(スタブ)を同梱しているので、**PHP 本体がインストールされていなくても補完できる**
 - **Java** — 言語サーバー(Eclipse JDT Language Server)は **JVM の上で動く Java プログラム**で、さらにプロジェクトのクラスパス解決に Gradle を使う。つまり**補完のためだけに JDK 一式が必要**。実行だけでなくツーリングまで JDK を要求するのが Node / PHP との決定的な違いで、「エディタごとコンテナに入る Dev Container」が Java で特に効く理由がここにある
 
+### 定義ジャンプの「飛び先」も同じ対応関係
+
+自分が書いていないライブラリのクラスへ定義ジャンプするには、言語サーバーが参照できる「定義の実体」がファイルとして手元に要る。TS / Vue なら `node_modules` 内の型定義・ソース(`npm install` で取得)、PHP なら Intelephense 同梱のスタブ(取得作業すら不要)、Java なら Gradle キャッシュ内の jar・**ソース jar**(ライブラリの元ソースを収めた jar。Gradle が取得)がそれにあたる。
+
+つまり「ランタイム不要」の TS / PHP でも、ライブラリへ飛ぶための**依存の取得**は必要で、TS の `node_modules` と Java の Gradle キャッシュは「飛び先の材料置き場」として同じ役割。違いは、その材料を読んで飛び先を答える言語サーバー自身が VS Code 同梱の Node で動くか、**別途 JDK を要求するか**。定義ジャンプが Dev Container ウィンドウでしか効かない実際の症状と注意点 → [java-dev-env-comparison.md](./java-dev-env-comparison.md) の「定義ジャンプが Dev Container ウィンドウでしか効かない理由」の節
+
 ### 「VS Code 同梱の Node」とは — Node.js とは別物?
 
 別物ではなく、**Node.js 本体のコピーを VS Code が自分の中に抱えている**という意味。VS Code は Electron(Chromium + Node.js を内蔵した、Web 技術でデスクトップアプリを作る基盤)でできており、拡張機能や言語サーバーはこの**内蔵 Node.js** の上で動く。WSL やコンテナ側に置かれる VS Code Server も、自分用の Node.js を一式持ち込む。
 
 つまり「システムに `node` をインストールしたか」と「VS Code の拡張機能が動くか」は無関係で、tsserver / Volar / Intelephense が追加インストールなしで動くのはこのため。逆に言うと、内蔵 Node.js は VS Code 専用で、ターミナルで `node` や `npm` を打っても使えない — アプリを動かすための Node.js は別途必要(このリポジトリでは frontend コンテナが担っている)。
 
-| | 言語サーバー | 動かすのに必要なもの | 補完の材料 |
-|---|---|---|---|
-| TypeScript / Vue | tsserver / Volar | VS Code 同梱の Node | `node_modules` の型定義 |
-| PHP | Intelephense | VS Code 同梱の Node | 同梱スタブ + ソース |
-| Java | Eclipse JDT LS | **JDK(JVM + Gradle 連携)** | クラスパス上の .class / jar |
+| | 言語サーバー | 動かすのに必要なもの | 補完の材料 | 定義ジャンプの飛び先 |
+|---|---|---|---|---|
+| TypeScript / Vue | tsserver / Volar | VS Code 同梱の Node | `node_modules` の型定義 | `node_modules` 内の型定義・ソース |
+| PHP | Intelephense | VS Code 同梱の Node | 同梱スタブ + ソース | 同梱スタブ + プロジェクトのソース |
+| Java | Eclipse JDT LS | **JDK(JVM + Gradle 連携)** | クラスパス上の .class / jar | Gradle キャッシュの jar(ソース jar) |
 
 ## 用語集
 
 - **インタープリタ** — ソースコードを直接読んで実行するプログラム(PHP の実行系)
 - **バイトコード** — コンパイル結果の中間形式。JVM が実行する(PHP の opcache が内部で作るものも同名)
 - **jar** — 大量の .class と設定ファイルを 1 つにまとめた zip 形式の箱。配布のための形式で、実行されるのは中のバイトコード
+- **ソース jar** — .class ではなくライブラリの元ソースコードを収めた jar。定義ジャンプの飛び先として人間が読めるコードを提供する
 - **マルチステージビルド** — 1 つの Dockerfile 内で「ビルド用ステージ(JDK)」と「実行用ステージ(JRE)」を分け、成果物だけを後段に渡す書き方。本番イメージ作りの標準形
 - **layered jar** — jar を「依存ライブラリ層 / 自分のコード層」に分けて Docker レイヤーキャッシュを効かせる Spring Boot の仕組み
 - **Buildpacks / Jib** — Dockerfile を書かずにコンテナイメージを作る流儀(Spring Boot 公式 / Google 製)
