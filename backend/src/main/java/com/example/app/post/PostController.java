@@ -59,6 +59,10 @@ public class PostController {
 	private final PostService postService;
 
 	// コンストラクタ = クラスから実体を作るとき、最初に1回だけ呼ばれる初期化メソッド。
+	// Java は「クラス名と完全に同じ名前」かつ「戻り値の型を書かない(void すら書かない)」メソッドを
+	//   コンストラクタとみなす。うっかり public void PostController(...) と void を付けると、
+	//   名前が同じでもコンストラクタではない「ただのメソッド」になり、new のとき呼ばれない(落とし穴)。
+	//   ※PHP の __construct() のような固定名ではなく、Java は「名前 = クラス名」で見分ける方式。
 	// カッコの中の「PostService postService」は引数(パラメータ)の宣言。上のフィールドとは別物で、
 	//   コンストラクタ実行中だけ生きる一時的な変数。外(Spring)から渡された実体をここで受け取る。
 	// 注目: コード上どこにも new PostService() と書いていないのに、postService には実体が入る。
