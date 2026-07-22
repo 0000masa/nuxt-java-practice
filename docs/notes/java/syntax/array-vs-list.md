@@ -101,3 +101,4 @@ str.length()   // String(文字列)… メソッド。カッコあり
 ## 関連
 
 - 変数宣言の型明示と型推論(`var`)、`List<Post> fetched` の型の書き方 → [type-declaration-and-var.md](./type-declaration-and-var.md)
+- コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)
