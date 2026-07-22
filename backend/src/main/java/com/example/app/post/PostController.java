@@ -1,36 +1,75 @@
 package com.example.app.post;
 
-import org.springframework.http.HttpStatus;
-import org.springframework.validation.annotation.Validated;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.ResponseStatus;
-import org.springframework.web.bind.annotation.RestController;
+// ↓ ここから import 群。import は「このファイルで使う道具を、別の住所(パッケージ)から持ち込む宣言」。
+//   使う前に「どこの誰か」をはっきりさせる Java のルール。各アノテーションが具体的に何をするかは、
+//   実際にそれが付くクラス宣言・メソッドの箇所で解説する。
+import org.springframework.http.HttpStatus; // 201 CREATED などのステータスコード定数の置き場
+import org.springframework.validation.annotation.Validated; // クラスに付けてバリデーションを有効化する目印
+import org.springframework.web.bind.annotation.DeleteMapping; // HTTP DELETE とメソッドを結ぶ
+import org.springframework.web.bind.annotation.GetMapping; // HTTP GET とメソッドを結ぶ
+import org.springframework.web.bind.annotation.PathVariable; // URL パスの一部(/{id} の id)を受け取る
+import org.springframework.web.bind.annotation.PostMapping; // HTTP POST とメソッドを結ぶ
+import org.springframework.web.bind.annotation.RequestBody; // リクエスト本文(JSON)を受け取る
+import org.springframework.web.bind.annotation.RequestMapping; // クラス全体の URL の土台を決める
+import org.springframework.web.bind.annotation.RequestParam; // URL の ? の後ろ(クエリパラメータ)を受け取る
+import org.springframework.web.bind.annotation.ResponseStatus; // 返す HTTP ステータスコードを指定する
+import org.springframework.web.bind.annotation.RestController; // このクラスが REST API コントローラーだと宣言する
 
-import com.example.app.post.dto.CreatePostRequest;
-import com.example.app.post.dto.PostResponse;
-import com.example.app.post.dto.TimelineResponse;
+import com.example.app.post.dto.CreatePostRequest; // 投稿作成時に「受け取る」データの入れ物(DTO)
+import com.example.app.post.dto.PostResponse; // 投稿1件を「返す」ときのデータの入れ物(DTO)
+import com.example.app.post.dto.TimelineResponse; // タイムライン一覧を「返す」ときのデータの入れ物(DTO)
 
-import jakarta.validation.Valid;
-import jakarta.validation.constraints.Max;
-import jakarta.validation.constraints.Min;
+import jakarta.validation.Valid; // 受け取ったデータの中身をまとめて検証する指示
+import jakarta.validation.constraints.Max; // 数値の最大値の制約
+import jakarta.validation.constraints.Min; // 数値の最小値の制約
 
+/**
+ * 投稿(Post)に関する API リクエストの入口(コントローラー)。
+ *
+ * <p>コントローラーとは、ブラウザ(フロントの Nuxt)から届く HTTP リクエストを最初に受け取り、
+ * 担当の処理へ振り分ける「受付係」。実際の処理はこのクラスには書かず、すべて PostService に委譲する。
+ *
+ * <pre>
+ * ブラウザ → [PostController] → PostService → PostRepository → DB
+ *            (受付・入口)         (処理の中身)   (DB とのやりとり)
+ * </pre>
+ *
+ * <p>このクラス自身は「投稿を作る/消す」といった具体的な仕事を持たず、
+ * 「受け取る → Service に渡す → 結果を返す」だけの薄い作りにしているのが設計上のポイント。
+ */
+// @RestController … このクラスは REST API のコントローラー、という宣言。
+//   これが付くと、メソッドの戻り値(PostResponse など)を Spring が自動で JSON に変換して返してくれる。
+// @RequestMapping("/api/posts") … このクラスが担当する URL の「土台」。
+//   以降の各メソッドの URL は、すべてこの /api/posts を先頭に付けた形になる。
+// @Validated … クラスに付けてバリデーションを有効化する目印。
+//   特に timeline() の引数に直接付けた @Min/@Max を効かせるために必要。
 @RestController
 @RequestMapping("/api/posts")
 @Validated
 public class PostController {
 
+	// ↓ DI(依存性注入)の置き場。このクラスは処理を任せる相手 PostService を1つ持つ。
+	//   final = 一度セットしたら差し替えない。private = このクラスの中だけで使う。
 	private final PostService postService;
 
+	// コンストラクタ = クラスから実体を作るとき、最初に1回だけ呼ばれる初期化メソッド。
+	// 注目: コード上どこにも new PostService() と書いていないのに、postService には実体が入る。
+	//   Spring が起動時に PostService の実体を用意し、この引数へ「注入(inject)」してくれる。これが DI。
+	//   おかげでコントローラーは「Service をどう作るか」を気にせず、渡されたものを使うことに集中できる。
 	public PostController(PostService postService) {
 		this.postService = postService;
 	}
 
+	// 【一覧取得】GET /api/posts … タイムライン(投稿の新しい順の一覧)を返す。
+	// @GetMapping(URL 指定なし) … クラスの土台 /api/posts に何も足さないので GET /api/posts に対応。
+	// 引数はすべて @RequestParam = URL の ? の後ろ(例: ?cursor=10&limit=20)から値を受け取る。
+	//   - cursor    : どこから先を読むかの目印。required=false なので無指定なら null になる
+	//   - categoryId: カテゴリーでの絞り込み用。同じく任意
+	//   - limit     : 取得件数。defaultValue="20" で無指定なら 20。@Min(1)@Max(50) により
+	//                 1〜50 の範囲外(例: 100)は Service に届く前に Spring が弾く
+	// 型の使い分け: cursor/categoryId は「無指定=null」を許したいので、null になれる Long(オブジェクト型)。
+	//   limit は必ず値が決まるので、null になれない int(基本型)を使う。
+	// 本体は、受け取った3つをそのまま postService.getTimeline に渡し、戻り値をそのまま返すだけ。
 	@GetMapping
 	public TimelineResponse timeline(
 			@RequestParam(required = false) Long cursor,
@@ -39,17 +78,33 @@ public class PostController {
 		return postService.getTimeline(cursor, categoryId, limit);
 	}
 
+	// 【1件取得】GET /api/posts/{id} … URL に含まれる id の投稿を1件返す。
+	// @GetMapping("/{id}") … URL は /api/posts/{id}。{id} は「変わる値」のプレースホルダ。
+	//   例: GET /api/posts/5 なら id に 5 が入る。
+	// @PathVariable Long id … URL パスそのものの一部({id})を取り出して引数に入れる指示。
+	//   timeline() の @RequestParam(? の後ろ)との違いに注目。こちらは「パスの一部」を取り出す。
 	@GetMapping("/{id}")
 	public PostResponse get(@PathVariable Long id) {
 		return postService.getPost(id);
 	}
 
+	// 【作成】POST /api/posts … 新しい投稿を作る。POST は「新規作成」を表す HTTP メソッド。
+	// @ResponseStatus(HttpStatus.CREATED) … 成功時に返すステータスを 201(CREATED=作成された)に指定。
+	//   指定しない既定は 200 OK だが、新規作成には 201 を返すのが REST の作法。
+	// @RequestBody CreatePostRequest request … リクエストの本文(JSON)を CreatePostRequest に変換して受け取る。
+	//   ブラウザが送る {"body":.., "categoryId":..} が自動で Java オブジェクトに詰め替えられる(JSON→オブジェクト)。
+	// @Valid … request の中身を、CreatePostRequest に書かれた制約に従ってチェック。違反なら Service に渡る前にエラー。
 	@PostMapping
 	@ResponseStatus(HttpStatus.CREATED)
 	public PostResponse create(@Valid @RequestBody CreatePostRequest request) {
 		return postService.create(request);
 	}
 
+	// 【削除】DELETE /api/posts/{id} … URL の id の投稿を削除する。DELETE は「削除」を表す HTTP メソッド。
+	// @ResponseStatus(HttpStatus.NO_CONTENT) … 成功時のステータスを 204(NO_CONTENT=返す中身なし)に指定。
+	//   削除は返すデータがないため 204 が定番。戻り値の型が void(何も返さない)なのもこれと対応している。
+	// 認可(=自分の投稿か?)のチェックはここではなく PostService.delete 側にある。
+	//   他人の投稿を消そうとすると Service が例外(ForbiddenOperationException)を投げる。
 	@DeleteMapping("/{id}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
 	public void delete(@PathVariable Long id) {
