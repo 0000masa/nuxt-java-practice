@@ -49,14 +49,25 @@ import jakarta.validation.constraints.Min; // 数値の最小値の制約
 public class PostController {
 
 	// ↓ DI(依存性注入)の置き場。このクラスは処理を任せる相手 PostService を1つ持つ。
+	//   これは「PostService 型の値が入る postService というフィールド」の宣言(PHP や JS でいうプロパティに相当)。
+	//   フィールド = オブジェクトが生きている間ずっと保持される箱。
+	//   この行の時点では箱を用意しただけで中身(実体)はまだ空。箱を埋めるのは下のコンストラクタ。
 	//   final = 一度セットしたら差し替えない。private = このクラスの中だけで使う。
+	// import 不要の理由: PostService は PostController と同じパッケージ(com.example.app.post)にあるため、
+	//   名前だけで呼べる(import は「別パッケージのクラス」を持ち込むときだけ必要)。
+	//   ファイル冒頭で import している DTO は post.dto という別パッケージなので import が要る。
 	private final PostService postService;
 
 	// コンストラクタ = クラスから実体を作るとき、最初に1回だけ呼ばれる初期化メソッド。
+	// カッコの中の「PostService postService」は引数(パラメータ)の宣言。上のフィールドとは別物で、
+	//   コンストラクタ実行中だけ生きる一時的な変数。外(Spring)から渡された実体をここで受け取る。
 	// 注目: コード上どこにも new PostService() と書いていないのに、postService には実体が入る。
 	//   Spring が起動時に PostService の実体を用意し、この引数へ「注入(inject)」してくれる。これが DI。
 	//   おかげでコントローラーは「Service をどう作るか」を気にせず、渡されたものを使うことに集中できる。
 	public PostController(PostService postService) {
+		// 右辺 postService = 引数(一時的に受け取ったもの)、左辺 this.postService = 上のフィールド(長生きの箱)。
+		// this. は「このオブジェクト自身の」の意味で、名前が同じ引数とフィールドを区別するために付ける。
+		// これを書かず postService = postService とすると両方とも引数扱いになり、フィールドは空のままになる。
 		this.postService = postService;
 	}
 
