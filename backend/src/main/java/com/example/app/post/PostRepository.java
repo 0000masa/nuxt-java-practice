@@ -12,6 +12,9 @@ import org.springframework.data.repository.query.Param; // JPQL の :名前 と�
 // 起動時に自動生成する。JpaRepository<Post, Long> を継承するだけで、save(保存)/
 // findById(id で1件)/findAll(全件)/delete(削除)/count(件数)などの定番 CRUD メソッドが
 // 1行も書かずに使えるようになる。<Post, Long> は「Post を扱い、その主キー(id)の型は Long」の意味。
+// 主キーが long でなく Long(オブジェクト型)なのは、(1) ジェネリクスの型引数にプリミティブ型は書けない
+//   (2) 保存前は id が未採番=null で、long だと 0 になり「まだ id が無い」を表せないため。
+//   DB 列は NOT NULL だが、それは保存後の話。詳細 → docs/notes/java/spring/repository-and-entity-vs-laravel-model.md
 public interface PostRepository extends JpaRepository<Post, Long> {
 
 	/**
