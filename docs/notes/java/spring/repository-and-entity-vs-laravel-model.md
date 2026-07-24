@@ -134,7 +134,7 @@ List<Category> findAllByOrderByDisplayOrderAsc();
 この違いには設計パターンの正式名がある。他の言語・FW を触るときにも効く知識なので押さえておくとよい。
 
 - **Active Record(Laravel Eloquent / Ruby on Rails)** — **1 つのオブジェクトがデータとDB操作を兼ねる**。`$post->save()` のように「レコード自身が能動的(active)に自分を保存する」。手軽で書きやすいのが長所。
-- **Data Mapper(Spring Data JPA / Hibernate / Doctrine(PHP))** — **データ(Entity)と、DB との写像を担う層(Repository / EntityManager)を分離する**。エンティティは DB を意識しない純粋なデータでいられ、テストや保守で両者を巻き込みにくいのが長所。分けるぶんクラス数は増える。
+- **Data Mapper(Spring Data JPA / Hibernate / Doctrine(PHP))** — **データ(Entity)と、DB との対応づけ(データの出し入れ)を担う層(Repository / EntityManager)を分離する**。エンティティは DB を意識しない純粋なデータでいられ、テストや保守で両者を巻き込みにくいのが長所。分けるぶんクラス数は増える。
 
 | | Active Record | Data Mapper |
 |---|---|---|
@@ -170,7 +170,7 @@ List<Category> findAllByOrderByDisplayOrderAsc();
 - **JPQL** — テーブル名でなくクラス名で書く JPA 専用の問い合わせ言語。`@Query` で指定する
 - **`EntityManager`** — JPA の最下層 API。Repository を使わず直接 DB を叩くこともできるが、通常は Repository 越しに使う
 - **Active Record** — 1 オブジェクトがデータと DB 操作を兼ねる設計パターン。Laravel Eloquent / Rails が代表
-- **Data Mapper** — データ(Entity)と DB 写像層(Repository)を分離する設計パターン。Spring Data JPA / Hibernate / Doctrine が代表
+- **Data Mapper** — データ(Entity)と、DB との対応づけを担う層(Repository)を分離する設計パターン。Spring Data JPA / Hibernate / Doctrine が代表
 - **Eloquent** — Laravel の ORM。Active Record 方式のモデルを提供する
 
 ## 関連
