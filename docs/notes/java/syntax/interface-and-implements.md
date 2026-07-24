@@ -239,6 +239,7 @@ class Dog extends AbstractAnimal {              // 継承は extends(implements 
 
 ## 関連
 
+- TypeScript 側の深掘り(interface vs type・クラスの型・instanceof) → [../../typescript/syntax/interface-vs-type.md](../../typescript/syntax/interface-vs-type.md)
 - 今回のきっかけになった Spring の interface → `backend/.../user/UserRepository.java` と [PostRepository.java](../../../../backend/src/main/java/com/example/app/post/PostRepository.java)
 - コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)
 - 型の明示と型推論(`var`)、静的型付けの話 → [type-declaration-and-var.md](./type-declaration-and-var.md)
