@@ -33,6 +33,12 @@ public class Post {
 	// @ManyToOne = 多対一(多くの投稿が 1 人の User に属する)。LAZY は「必要になるまで読み込まない」
 	//   (一覧で毎回 user まで取ると無駄なため。まとめ取りは Repository の join fetch が担当)。
 	// @JoinColumn = DB 側の外部キー列 user_id で結ぶ。Java 側では User オブジェクトを丸ごと持つ形になる。
+	// optional=false と nullable=false はどちらも「必須(null 禁止)」だが効く層が違う:
+	//   optional(@ManyToOne)= JPA/オブジェクト層の宣言。「関連は必ず存在」を Hibernate に伝え、取得時の
+	//     JOIN 最適化(必ず居るので INNER JOIN でよい)などに効く。
+	//   nullable(@JoinColumn)= DB 列側の NOT NULL 指定。ただし本プロジェクトのスキーマは Flyway 管理
+	//     (ddl-auto=validate)なので、実際の NOT NULL 制約は V1 マイグレーションの SQL が定義しており、
+	//     ここの nullable=false は主に意図の明示と検証用ヒント(スキーマ管理の役割分担 → docs/notes/flyway-basics.md)。
 	@ManyToOne(fetch = FetchType.LAZY, optional = false)
 	@JoinColumn(name = "user_id", nullable = false)
 	private User user;
