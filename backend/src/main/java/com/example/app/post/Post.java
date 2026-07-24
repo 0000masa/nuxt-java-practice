@@ -1,20 +1,20 @@
 package com.example.app.post;
 
-import java.time.LocalDateTime;
+import java.time.LocalDateTime; // 日付+時刻を表す Java 標準の型(作成日時に使う)
 
-import com.example.app.category.Category;
-import com.example.app.user.User;
+import com.example.app.category.Category; // カテゴリーのエンティティ(この投稿が属するカテゴリー)
+import com.example.app.user.User; // ユーザーのエンティティ(この投稿の投稿者)
 
-import jakarta.persistence.Column;
-import jakarta.persistence.Entity;
-import jakarta.persistence.FetchType;
-import jakarta.persistence.GeneratedValue;
-import jakarta.persistence.GenerationType;
-import jakarta.persistence.Id;
-import jakarta.persistence.JoinColumn;
-import jakarta.persistence.ManyToOne;
-import jakarta.persistence.PrePersist;
-import jakarta.persistence.Table;
+import jakarta.persistence.Column; // 列とのひも付け・制約(nullable/length など)を指定するアノテーション
+import jakarta.persistence.Entity; // このクラスを DB テーブルに対応するエンティティだと示すアノテーション
+import jakarta.persistence.FetchType; // 関連データの読み込みタイミング(LAZY/EAGER)を表す列挙
+import jakarta.persistence.GeneratedValue; // 主キーの採番方法を指定するアノテーション
+import jakarta.persistence.GenerationType; // 採番戦略(IDENTITY など)を表す列挙
+import jakarta.persistence.Id; // 主キーのフィールドに付けるアノテーション
+import jakarta.persistence.JoinColumn; // 関連を結ぶ外部キー列(user_id など)を指定するアノテーション
+import jakarta.persistence.ManyToOne; // 多対一の関連を表すアノテーション
+import jakarta.persistence.PrePersist; // INSERT 直前に自動実行するメソッドに付けるアノテーション
+import jakarta.persistence.Table; // 対応するテーブル名を明示するアノテーション
 
 /**
  * 投稿を表すエンティティ(DB の posts テーブルの 1 行 = この Post オブジェクト 1 個)。
