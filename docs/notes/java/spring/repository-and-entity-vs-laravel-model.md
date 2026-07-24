@@ -4,6 +4,22 @@
 
 対象ファイル: [PostRepository.java](../../../../backend/src/main/java/com/example/app/post/PostRepository.java) / [Post.java](../../../../backend/src/main/java/com/example/app/post/Post.java)
 
+## JPA とは — Java の ORM の「標準仕様」であって実装ではない
+
+このメモに何度も出てくる **JPA(Jakarta Persistence API、旧 Java Persistence API)** は、「Java でオブジェクトと DB テーブルを対応づける(= ORM する)なら、こういうアノテーションや API を用意しましょう」という**標準仕様(spec)**の名前。**仕様 = ルールブックであって、動く製品(実装)ではない**のがポイント。`@Entity` / `@Id` / `EntityManager` といった顔ぶれ(`jakarta.persistence.*`)はすべて JPA が定めたもの。
+
+「仕様だけでは動かないのでは?」— そのとおりで、実際に DB とやり取りする**エンジン(実装)は別にある**。このプロジェクトを含む多くの Spring Boot アプリでは **Hibernate** がその実装を担う。さらにその上に、Repository を interface で書くだけにしてくれる便利層 **Spring Data JPA** が乗る。3 層の重なりで捉えるとよい:
+
+| 層 | 正体 | このプロジェクトでの担い手 | たとえ |
+|---|---|---|---|
+| **JPA** | ORM の標準仕様(アノテーション・API の取り決め) | `jakarta.persistence.*`(`@Entity` 等) | コンセントの規格(形状のルール) |
+| **Hibernate** | JPA を実装した ORM エンジン。実際に SQL を発行する。**Java 製**のライブラリ(Java で書かれ、Java アプリから使う) | 依存に含まれ裏で動く | 規格に合った実際の家電 |
+| **Spring Data JPA** | Repository を interface だけで書けるようにする便利層 | `JpaRepository` / `@Query` | 家電をさらに使いやすくするリモコン |
+
+「規格(JPA)に沿って作ってあるので、エンジンを Hibernate から別実装(EclipseLink など)に替えてもアプリのコードはほぼそのまま動く」— これが標準仕様のうれしさ。Laravel でいえば Eloquent が「仕様も実装も兼ねた 1 つの製品」なのに対し、Java は「仕様(JPA)と実装(Hibernate)を分けている」構図。
+
+> 豆知識: 昔は `javax.persistence.*` という名前だった。**Java EE(Java Platform, Enterprise Edition)** — 標準の Java SE にサーバー向け・企業システム用の機能(Servlet / JSP / JPA など)を足した**仕様の集まり**。その JPA は Java EE の一部だった — が Oracle から Eclipse Foundation に移管され、**Jakarta EE** に改称された。この際「Java」という商標が使えず、パッケージ接頭辞も `javax` → `jakarta` に変わったため、`javax.persistence.*` が今の `jakarta.persistence.*` になった。中身・意味は同じ。
+
 ## まず結論(3 行)
 
 1. **エンティティ単体では DB を検索・保存できない。** `Post` は「データの入れ物」であって、DB を叩くメソッドを 1 つも持っていない。
@@ -44,6 +60,12 @@ public interface PostRepository extends JpaRepository<Post, Long> {
 ```
 
 `extends JpaRepository<Post, Long>` は「`Post` を扱い、主キーの型は `Long` の Repository ですよ」という宣言。Spring Data JPA が**起動時にこの interface の実装クラスを自動生成**し、`save` などの中身をそこに用意する。だから自分では 1 行も書いていない `save` が呼べる(→ 名前解決や interface の仕組みは [java-package-basics.md](../../java-package-basics.md) も参照)。
+
+> **なぜ主キーの型が `Long`(小文字の `long` ではない)?** 主キーは DB では NOT NULL なのに、なぜ null を許す `Long` を使うのか — 理由は 2 つ。
+> 1. **ジェネリクスの型引数にはプリミティブ型を書けない。** `JpaRepository<Post, long>` は Java の文法上アウトで、型引数にはオブジェクト型(`long` を包んだ箱である `Long`)しか渡せない。この一点だけでも `long` は選べない。
+> 2. **保存前は id が未採番 = `null` だから。** id は `@GeneratedValue` で DB の AUTO_INCREMENT に採番を任せているので、`new Post(...)` した直後・`save()` する前は id が決まっていない。プリミティブの `long` は初期値 0 が入ってしまい「まだ id が無い」を表せないが、`Long` なら `null` で表せる。Hibernate はこの `id == null` を見て「これは新規レコードだ(INSERT すべき)」と判断する。
+>
+> 「主キーは NOT NULL では?」という疑問はもっともで、それは**保存後の DB 列の制約**の話。一方**Java オブジェクトの一生**で見ると、生成〜保存の間に id が null の瞬間があり、その状態を表すために nullable な `Long` を使う。DB 側(NOT NULL)と Java オブジェクト側(一時的に null あり)は別レイヤーの話、と分けて考えるとよい。
 
 ### 手書き SQL が無いなら「空の interface」が正解
 
@@ -134,6 +156,12 @@ List<Category> findAllByOrderByDisplayOrderAsc();
 
 ## 用語集
 
+- **JPA(Jakarta Persistence API、旧 Java Persistence API)** — Java で ORM を行うための標準仕様。`@Entity` などの `jakarta.persistence.*` を定める。仕様であって実装ではない
+- **Hibernate** — JPA を実装した ORM エンジン。実際に SQL を発行する。Spring Boot の既定実装
+- **Spring Data JPA** — Hibernate の上に乗り、Repository を interface だけで書けるようにする便利層。`JpaRepository` を提供する
+- **Java SE / Java EE** — Java SE(Standard Edition)は Java の標準機能一式。Java EE(Enterprise Edition)はそれにサーバー向け・企業システム用の仕様(Servlet / JSP / JPA など)を足した仕様の集まり
+- **Jakarta EE** — Java EE が Oracle から Eclipse Foundation に移管された後の名称。商標の都合でパッケージ接頭辞が `javax` → `jakarta` に変わった(`jakarta.persistence.*` はこの流れ)
+- **プリミティブ型 / ラッパー型** — `long`(プリミティブ)は値そのもので null 不可・初期値 0。`Long`(ラッパー)は long を包んだオブジェクト型で null を持てる。ジェネリクスの型引数や「未設定」を表したい場面ではラッパー型を使う
 - **エンティティ(Entity)** — DB テーブルの 1 行に対応する「データの入れ物」クラス。DB 操作メソッドは持たない受け身の存在
 - **リポジトリ(Repository)** — エンティティを DB と出し入れする窓口。Spring Data JPA では interface として書く
 - **`JpaRepository<T, ID>`** — 継承するだけで標準 CRUD(save/findById/findAll/delete/count 等)を提供する Spring Data の基底 interface。`T` は扱うエンティティ、`ID` は主キーの型
