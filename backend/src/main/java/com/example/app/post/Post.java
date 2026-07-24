@@ -17,17 +17,22 @@ import jakarta.persistence.PrePersist;
 import jakarta.persistence.Table;
 
 /**
- * 投稿。編集不可のため updated_at を持たず、削除は物理削除。
+ * 投稿を表すエンティティ(DB の posts テーブルの 1 行 = この Post オブジェクト 1 個)。
+ * 編集不可のため updated_at を持たず、削除は物理削除。
  * id(AUTO_INCREMENT)はカーソルページネーションのカーソルを兼ねる。
+ * setter を置かず getter だけにして「作成後は書き換えない(編集不可)」を構造で守っている。
  */
-@Entity
-@Table(name = "posts")
+@Entity // このクラスを DB テーブルと対応する入れ物(エンティティ)として JPA に管理させる目印
+@Table(name = "posts") // 対応するテーブル名を明示
 public class Post {
 
-	@Id
-	@GeneratedValue(strategy = GenerationType.IDENTITY)
+	@Id // 主キー(1 行を一意に識別する値)
+	@GeneratedValue(strategy = GenerationType.IDENTITY) // 採番は DB の AUTO_INCREMENT 任せ(save 後に id が入る)
 	private Long id;
 
+	// @ManyToOne = 多対一(多くの投稿が 1 人の User に属する)。LAZY は「必要になるまで読み込まない」
+	//   (一覧で毎回 user まで取ると無駄なため。まとめ取りは Repository の join fetch が担当)。
+	// @JoinColumn = DB 側の外部キー列 user_id で結ぶ。Java 側では User オブジェクトを丸ごと持つ形になる。
 	@ManyToOne(fetch = FetchType.LAZY, optional = false)
 	@JoinColumn(name = "user_id", nullable = false)
 	private User user;
@@ -36,27 +41,34 @@ public class Post {
 	@JoinColumn(name = "category_id", nullable = false)
 	private Category category;
 
-	@Column(nullable = false, length = 280)
+	@Column(nullable = false, length = 280) // 必須・最大 280 文字
 	private String body;
 
+	// updatable = false … 一度入れたら UPDATE 対象にしない(作成日時は後から書き換えないため)
 	@Column(name = "created_at", nullable = false, updatable = false)
 	private LocalDateTime createdAt;
 
+	// JPA 専用の引数なしコンストラクタ。JPA は「空の器を作って値を後から差し込む」ため必須。
+	// protected にして、アプリ側から中身の無い中途半端な Post を作れないようにしている。
 	protected Post() {
 		// JPA 用
 	}
 
+	// アプリが使う正規の入り口。投稿者・カテゴリ・本文がそろって初めて Post を作れる。
+	// createdAt は引数に取らず、保存直前に onCreate で自動セットする。
 	public Post(User user, Category category, String body) {
 		this.user = user;
 		this.category = category;
 		this.body = body;
 	}
 
+	// @PrePersist … INSERT の直前に JPA が自動で呼ぶメソッド。作成日時のセット忘れを防ぐ。
 	@PrePersist
 	void onCreate() {
 		createdAt = LocalDateTime.now();
 	}
 
+	// 以下は値を外から読むための getter 群。setter は置かず読み取り専用にしている(上記「編集不可」)。
 	public Long getId() {
 		return id;
 	}
