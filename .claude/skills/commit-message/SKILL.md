@@ -2,6 +2,7 @@
 name: commit-message
 description: git add 済みの差分を読み、既存のコミットスタイルに合わせたコミットメッセージを生成して出力する。コミットはせず、/copy で使えるよう最後に単独のコードブロックで出す。「コミットメッセージ作って」などと言われたときにも使う。
 disable-model-invocation: true
+model: sonnet
 ---
 
 # commit-message
