@@ -62,6 +62,146 @@ UserSummary u = new UserSummary(1L, "taro", "太郎");
 public record TimelineResponse(List<PostResponse> posts, Long nextCursor) {}
 ```
 
+### `record` が無かったら — 手書きの長さを見る
+
+`record UserSummary(...) {}` の 1 行は、TS のオブジェクトリテラルとほぼ同じ短さに見える。だがこれは **Java 16(2021)で正式導入された比較的新しい仕組み**で、それ以前は全部手で書く必要があった。どれだけ違うのか、実際に並べてみる。
+
+まず比較の基準。TS はこれだけで済む。
+
+```typescript
+// TypeScript — 型の定義と値、これで全部
+interface UserSummary { id: number; username: string; displayName: string }
+const u: UserSummary = { id: 1, username: "taro", displayName: "太郎" }
+```
+
+`record` を使った Java も、ほぼ同じ短さになる。
+
+```java
+// Java(record あり)
+record UserSummary(Long id, String username, String displayName) {}
+UserSummary u = new UserSummary(1L, "taro", "太郎");
+```
+
+#### ① 最低限の手書き — コンストラクタとゲッターだけ
+
+まず「値を入れて、取り出せる」だけの最小構成を手で書くとこうなる。
+
+```java
+public final class UserSummary {
+
+    private final Long id;
+    private final String username;
+    private final String displayName;
+
+    public UserSummary(Long id, String username, String displayName) {
+        this.id = id;
+        this.username = username;
+        this.displayName = displayName;
+    }
+
+    public Long getId() { return id; }
+    public String getUsername() { return username; }
+    public String getDisplayName() { return displayName; }
+}
+```
+
+**これで約 16 行。** 注目したいのは、`id` というたった 1 つの項目のために **4 か所**(フィールド宣言・コンストラクタの引数・代入・ゲッター)書いていること。項目を 1 つ増やすたびに 4 か所足し、名前を変えるときも 4 か所直す必要がある。この「機械的に同じことを繰り返し書く」コードを **ボイラープレート(定型コード)** と呼ぶ。
+
+#### ② `record` と同等にする — equals / hashCode / toString も要る
+
+実は①では `record` と対等ではない。`record` は上記に加えて **`equals` / `hashCode` / `toString`** も自動生成している。これらは何のためにあるのか。
+
+- **`equals`** — 「**中身が同じなら等しい**」と判定させるため。これが無いと、同じ内容の 2 つのオブジェクトが「別物」と判定される(テストで結果を検証するときに困る)
+- **`hashCode`** — `Set` に入れたり `Map` のキーにするときに必要。`equals` を書くなら必ずセットで実装するのが Java の規約
+- **`toString`** — ログやデバッグで中身が見えるようにするため。無いと `UserSummary@1b6d3586` のような内部の住所だけが出力される
+
+これらを手で書き足すとこうなる。
+
+```java
+import java.util.Objects;
+
+public final class UserSummary {
+
+    private final Long id;
+    private final String username;
+    private final String displayName;
+
+    public UserSummary(Long id, String username, String displayName) {
+        this.id = id;
+        this.username = username;
+        this.displayName = displayName;
+    }
+
+    public Long getId() { return id; }
+    public String getUsername() { return username; }
+    public String getDisplayName() { return displayName; }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof UserSummary other)) return false;
+        return Objects.equals(id, other.id)
+                && Objects.equals(username, other.username)
+                && Objects.equals(displayName, other.displayName);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(id, username, displayName);
+    }
+
+    @Override
+    public String toString() {
+        return "UserSummary[id=" + id + ", username=" + username
+                + ", displayName=" + displayName + "]";
+    }
+}
+```
+
+**約 38 行。** `record UserSummary(Long id, String username, String displayName) {}` という **1 行**が、これとまったく同じ働きをしている。
+
+(`equals` の中の `o instanceof UserSummary other` は、判定と同時に変数へ取り出す Java 16+ の書き方 → [interface-and-implements.md の 5 章](./java/syntax/interface-and-implements.md))
+
+#### 行数の比較
+
+| | 書き方 | 行数の目安 |
+|---|---|---|
+| **TypeScript** | `interface` + オブジェクトリテラル | **2 行**(型を付けないなら 1 行) |
+| **Java(`record`)** | `record UserSummary(...) {}` | **1 行** |
+| **Java(手書き・最低限)** | フィールド + コンストラクタ + ゲッター | 約 16 行 |
+| **Java(手書き・`record` 相当)** | 上記 + equals / hashCode / toString | **約 38 行** |
+| **PHP(プロパティ昇格)** | `__construct(public int $id, ...)` | 約 3 行 |
+
+項目が増えれば差はさらに開く。**同じ「3 つの値を持ち運ぶ入れ物」を作るのに、TS は 2 行、Java は(`record` 前は)38 行。** これが長く「Java は冗長」と言われてきた最大の理由で、`record` はまさにこの苦痛を解消するために導入された。
+
+> PHP も昔は Java と似た長さだった。`public function __construct(public int $id)` のようにコンストラクタの引数でプロパティを同時に宣言できる「**コンストラクタのプロパティ昇格**」は PHP 8.0(2020)の機能で、それ以前はフィールド宣言と代入を別々に書く必要があった。**「データの入れ物を短く書きたい」という要求は、Java も PHP もごく最近になって解決した**ということ。
+
+#### `record` が来る前 — Lombok で凌いでいた
+
+「Java 開発者はこの 38 行をずっと手で書いていたのか?」というと、そうではない。`record` より前は **Lombok** というライブラリが定番の回避策だった。アノテーションを 1 つ付けると、コンパイル時に定型コードを生成してくれる。
+
+```java
+@Value   // フィールド + コンストラクタ + ゲッター + equals/hashCode/toString を自動生成
+public class UserSummary {
+    Long id;
+    String username;
+    String displayName;
+}
+```
+
+**このプロジェクトは Lombok を使っていない**(`record` で足りるため、`build.gradle` にも入っていない)。ただし既存の Java コードでは今も広く使われているので、**「ゲッターが書かれていないのに `getId()` が呼べるコード」を見かけたら Lombok を疑う**とよい。
+
+#### アクセサ名の違いに注意
+
+実用的な注意点をひとつ。手書きのクラスや Lombok は `getId()` という名前になるが、**`record` のアクセサは `get` が付かず項目名そのまま**になる。
+
+```java
+u.getId()   // 手書きクラス / Lombok
+u.id()      // record
+```
+
+このプロジェクトの実コードでも `request.categoryId()`(`PostService.java`)のように `get` 無しで呼んでいる。`record` の文法そのもの(コンポーネント・レコードヘッダーなど)は `backend/.../post/dto/PostResponse.java` のコメントに詳しく書いてある。
+
 ### Java にはもう一つ強い制約がある — 関数をクラスの外に置けない
 
 ここが「Java がクラスだらけに見える」大きな理由。**Java ではメソッド(関数)を単体で書けず、必ずどこかのクラスの中に置かないといけない。** プログラムの入口である `main` すらクラスの中にある。
@@ -382,6 +522,8 @@ try {
 - **「オブジェクトはクラスの一部」ではない。** クラスは設計図、オブジェクトはそこから生まれた実体。包含ではなく生成の関係。
 - **インスタンスとオブジェクトはほぼ同義。** 「インスタンス」は「クラスから作られた」ことを強調した言い方。
 - **Java で「関数だけ書きたい」はできない。** `static` メソッドとしてクラスに置くのが定石(`DateUtils.formatDate(...)` のような形)。
+- **`record` のアクセサに `get` は付かない。** 手書きクラスや Lombok は `getId()`、`record` は `id()`。混同するとコンパイルエラーになる。
+- **`record` は Java 16 以降の機能。** 古い Java のコードでは 38 行の手書きか Lombok になっている。「Java は冗長」という評判はこの時代のもの。
 - **TS の `class` は「飾り」ではない。** 糖衣構文とはいえ実行時に本物として残る。interface(消える)とは別物なので、`instanceof` したいならクラス。
 - **PHP の連想配列は型で守られない。** `$user['nmae']` の打ち間違いに気づけない。規模が大きくなるなら PHPDoc の array shape か DTO クラスへ。
 - **「PHP も関数を書けるから TS 風にすればいい」とは言えない。** 関数にすると①オートロードが効かない②型の守りが無い③DI に乗れない、の 3 つを同時に失う。TS はこれらを失わずに済むから関数中心でいられる。
@@ -408,6 +550,9 @@ try {
 - **ヘルパー関数(Laravel)** — `route()` / `dd()` など、クラスに属さないグローバル関数。Composer の `files` で毎リクエスト読み込まれる。
 - **クロージャ** — 関数が、自分の外側の変数を覚えたまま持ち歩く仕組み。TS でクラスの代わりに「状態＋振る舞い」を作れる理由(→ [functions-as-values.md](./functions-as-values.md))。
 - **DTO** — データを運ぶためだけの入れ物(Data Transfer Object)。TS では interface、Java では `record` で表す。
+- **record(Java)** — データを運ぶだけのクラスを 1 行で書ける Java 16+ の仕組み。コンストラクタ・アクセサ・equals・hashCode・toString を自動生成する。手書きなら約 38 行かかる(2 章)。
+- **ボイラープレート(定型コード)** — 機械的に同じことを繰り返し書く必要のあるコード。`record` や Lombok はこれを削るための道具。
+- **Lombok** — アノテーションで定型コードを自動生成する Java のライブラリ。`record` 登場以前の定番。このプロジェクトでは未使用。
 
 ## 関連
 
