@@ -67,6 +67,8 @@ list.stream().map(PostResponse::from).toList();
 
 `add` / `size` / `subList` などは `List` に直接付いているが、`map` / `filter` 系の変換は `stream()` 経由、という住み分け。`stream()` は配列側からも `Arrays.stream(arr)` で使えるので、「変換・集計は Stream API に任せる」という点は配列でも List でも共通。
 
+なぜ `stream()` と `toList()` の 2 つを挟む必要があるのか、TS / PHP との書き味の違いも含めた詳細 → [stream-map-tolist.md](./stream-map-tolist.md)
+
 ## 個数の数え方が 3 種類ある — 混同注意
 
 要素数や長さの取り方が、入れ物によって書き方が違う。初学者がよく間違えるところ。
@@ -100,5 +102,6 @@ str.length()   // String(文字列)… メソッド。カッコあり
 
 ## 関連
 
+- `.stream().map().toList()` が何をしているか、なぜ 3 つ必要か → [stream-map-tolist.md](./stream-map-tolist.md)
 - 変数宣言の型明示と型推論(`var`)、`List<Post> fetched` の型の書き方 → [type-declaration-and-var.md](./type-declaration-and-var.md)
 - コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)
