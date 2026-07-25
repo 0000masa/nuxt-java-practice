@@ -41,7 +41,7 @@ import jakarta.validation.constraints.Size; // 文字数などの大きさの上
 // ② バリデーション: PostController.create の引数に付いた @Valid が引き金となり、
 //    下に並ぶ @NotBlank / @Size / @NotNull を照合する(PostController.java:114)。
 //    違反があれば PostService には一切届かず、共通の GlobalExceptionHandler.handleValidation が
-//    HTTP 400 + フィールド別メッセージに変換して返す(GlobalExceptionHandler.java:38)。
+//    HTTP 400 + フィールド別メッセージに変換して返す(GlobalExceptionHandler.handleValidation)。
 //    → 裏を返すと、@Valid を書き忘れると下の制約は「書いてあるだけで発動しない」。ここが落とし穴。
 public record CreatePostRequest(
 		// 【本文】投稿の中身となる短文。

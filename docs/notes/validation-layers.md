@@ -66,7 +66,7 @@ PostController.create(@Valid @RequestBody CreatePostRequest request)   … @Vali
    ↓ @Size(max=280) 違反
 MethodArgumentNotValidException が投げられる(PostService には到達しない)
    ↓
-GlobalExceptionHandler.handleValidation() が捕捉      … GlobalExceptionHandler.java:36
+GlobalExceptionHandler.handleValidation() が捕捉      … GlobalExceptionHandler.java
    ↓
 HTTP 400 + {"message":"入力内容に誤りがあります","fieldErrors":{"body":"本文は280文字以内で入力してください"}}
 ```
@@ -75,7 +75,7 @@ HTTP 400 + {"message":"入力内容に誤りがあります","fieldErrors":{"bod
 - 弾かれた本文は `PostService.create`(`PostService.java:84`)にすら渡らない。だから DB アクセスは一切発生しない = ① が「無駄な DB アクセスを防ぐ」と言えるのはこのため。
 - 変換は各 Controller ではなく共通の `GlobalExceptionHandler`(`@RestControllerAdvice`)が一手に引き受ける。`@Size` の `message` に書いた文字列がそのままフィールド別エラーになる。
 
-なお同じ発想で、クエリパラメータ側にも `@Min(1) @Max(50)`(`PostController` の `timeline` の `limit`)というアプリ側バリデーションがあり、こちらは `ConstraintViolationException` として `GlobalExceptionHandler.java:46` が 400 に変換する。
+なお同じ発想で、クエリパラメータ側にも `@Min(1) @Max(50)`(`PostController` の `timeline` の `limit`)というアプリ側バリデーションがあり、こちらは `ConstraintViolationException` として `GlobalExceptionHandler.handleConstraintViolation` が 400 に変換する。
 
 ## 上限を変えるとき、何箇所直すのか — DRY 違反ではない
 
