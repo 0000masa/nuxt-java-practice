@@ -123,7 +123,7 @@ Laravel で `collect()` と `->all()` を書いている人にとって、Java �
 ただし**決定的な違いが 2 つ**ある。
 
 - **Laravel の Collection は即座に処理する(eager)が、Java の Stream は終端操作まで待つ(lazy)**(→ 6 章)
-- **Collection は何度でも使い回せるが、Stream は 1 回使うと終わり**(→ つまずきポイント)
+- **Collection は何度でも使い回せるが、Stream は 1 回使うと終わり**(→ 8 章)
 
 ### PHP の素の関数はクセがある
 
@@ -192,7 +192,148 @@ result.add(new CategoryResponse(999L, "追加分"));  // ← 実行時に例外
 
 このプロジェクトは Java 21(`backend/build.gradle:12` の `JavaLanguageVersion.of(21)`)なので、短い `.toList()` が使える。API のレスポンスは組み立てたら返すだけなので、変更不可で困らない。
 
-## 8. `map` / `filter` / `forEach` の使い分け
+## 8. Stream は使い捨て — Collection / 配列との決定的な違い
+
+TS の配列も Laravel の Collection も「**入れ物**」なので、同じ変数を何度でも加工できる。
+
+```ts
+// TypeScript — 同じ配列から何度でも取り出せる
+const names = categories.map(c => c.name)
+const ids   = categories.map(c => c.id)     // 2 回目も問題なし
+```
+
+```php
+// Laravel — 同じ Collection から何度でも取り出せる
+$categories = collect($rows);
+$names = $categories->map(fn($c) => $c->name)->all();  // 1 回目
+$ids   = $categories->map(fn($c) => $c->id)->all();    // 2 回目も問題なし
+$count = $categories->count();                         // 3 回目も問題なし
+```
+
+`->map()` は元の Collection を変えず、新しい Collection を返すだけなので、元はいつまでも残っている。
+
+ところが Java の `Stream` は「入れ物」ではなく「**流れ**」なので、**一度使うと二度と使えない**。
+
+```java
+Stream<Category> stream = categories.stream();
+
+List<String> names = stream.map(Category::getName).toList();  // 1 回目 … OK
+List<Long>   ids   = stream.map(Category::getId).toList();    // 2 回目 … 実行時に落ちる
+// java.lang.IllegalStateException: stream has already been operated upon or closed
+```
+
+ベルトコンベアに例えると分かりやすい。**一度流し切った部品は、もうコンベアの上に無い。** もう一度加工したければ、部品の箱からもう一度載せ直すしかない。コンパイルは通ってしまい、実行して初めて落ちる点に注意。
+
+### 中間操作だけでも「使用済み」になる
+
+ここが一番の落とし穴。6 章のとおり `filter` などの中間操作だけでは**1 件も処理されない**のに、**Stream 自体は「使用済み」の印が付く**。
+
+```java
+Stream<Category> stream = categories.stream();
+stream.filter(category -> category.isPublic());  // 何も処理されない … が、stream は使用済みになる
+stream.toList();                                 // ← ここで IllegalStateException
+```
+
+「まだ 1 件も処理していないのだから再利用できるはず」という推測は通用しない。中間操作を呼んだ時点でその Stream は閉じられる。
+
+### 正しい書き方 — 元の `List` から呼び直す
+
+```java
+List<String> names = categories.stream().map(Category::getName).toList();  // OK
+List<Long>   ids   = categories.stream().map(Category::getId).toList();    // OK
+```
+
+`.stream()` は呼ぶたびに**新しい流れ**を作る。**元の `List` は無傷**なので何度でも呼べる。使い回せないのは「Stream という流れ」だけで、データそのものではない。
+
+だからこのプロジェクトでも、`CategoryService.java:58-60` のように **取得 → 変換 → `toList()` を 1 つの式で書き切る**形になっている。Stream を変数やフィールドに入れて持ち回すのは、`List` と同じ感覚で扱ってしまう典型的な誤りで、**Stream は「その場で作って、その場で使い切る」**のが原則。
+
+| | 正体 | 使い回し | 元のデータ |
+|---|---|---|---|
+| **TS の配列** | 入れ物 | 何度でも | 変わらない |
+| **Laravel の Collection** | 入れ物 | 何度でも | 変わらない |
+| **Java の Stream** | 流れ(使い捨て) | **1 回だけ** | 変わらない |
+
+「元のデータは変わらない(非破壊)」は 3 つとも共通。違うのは **Stream 自体を再利用できない**点だけ。
+
+### 仕組み — 内部の「使用済みフラグ」
+
+どうやって 2 回目を検出しているのか。JDK 21 の実装クラスを覗くと、こうなっている。
+
+```
+$ javap -p java.util.stream.AbstractPipeline
+
+private boolean linkedOrConsumed;                    ← 使用済みフラグ
+private static final java.lang.String MSG_STREAM_LINKED;
+private static final java.lang.String MSG_CONSUMED;
+```
+
+`boolean` のフィールドを 1 つ持っていて、これが `true` になった Stream は以後使えない。名前が `consumed`(消費済み)だけでなく **`linkedOrConsumed`** となっているのがポイントで、
+
+- **linked** … 中間操作(`map` / `filter`)が繋がれた
+- **consumed** … 終端操作(`toList` など)で消費された
+
+の**どちらか一方でもフラグが立つ**。これが「中間操作だけでも使用済みになる」挙動の正体。フラグが見ているのは「実行したか」ではなく「**繋いだか、または消費したか**」。
+
+なお「Stream オブジェクト自身はこのフラグを書き換えるのだからミュータブルだ」とは言える。ただしそれは**2 回使わせないための仕掛け**であって、**2 回使えない理由ではない**。理由は次で見る設計判断のほうにある。
+
+### なぜ設計者はこの制限を課したのか
+
+まず、ありがちな誤解から潰しておく。
+
+> ❌「使い回しを許すと、元のデータとごっちゃになってコードが煩雑になるから制限した」
+
+これは**当たっていない**。Stream は元データを一切変更しないので、そもそも混ざりようがない。[Java 公式ドキュメント](https://docs.oracle.com/en/java/javase/21/docs/api/java.base/java/util/stream/package-summary.html)も明言している。
+
+> **Functional in nature.** An operation on a stream produces a result, but does not modify its source.
+> (Stream の操作は結果を生むが、**ソースを変更しない**)
+
+本当の理由は、公式が挙げる「Stream と Collection の違い」のうち 3 つに現れている。
+
+**理由 1 — 要素を保存しないと決めたから(No storage)**
+
+> **No storage.** A stream is not a data structure that stores elements; instead, it conveys elements from a source ... through a pipeline of computational operations.
+> (Stream は要素を格納するデータ構造ではなく、ソースから要素を**運ぶ**もの)
+
+もし使い回せるようにするなら、途中結果をどこかに**貯めておく**必要がある。しかし貯めた瞬間、それはもう `List` と同じもの。**「使い回せる入れ物」はすでに `List` があるので、Stream まで同じにする意味がない。**
+
+「ごっちゃになる」という直感が当たっているのは、実はここ。ただし混ざるのは**データ**ではなく、**`List` と Stream の役割分担**のほう。
+
+**理由 2 — 巻き戻せないデータ源も同じ書き方で扱うため(Possibly unbounded)**
+
+> **Possibly unbounded.** While collections have a finite size, streams need not.
+> (Collection は有限だが、Stream は有限とは限らない)
+
+```java
+Files.lines(path)              // ファイルを1行ずつ読む … 読み進んだら戻れない
+Stream.generate(Math::random)  // 無限に値を生み続ける … 「全部」が原理的に存在しない
+```
+
+無限ストリームは「全部を貯める」ことが不可能。ここで「`List` 由来のときだけ 2 回使える」という例外を作ると、**ソースによって挙動が変わり**、書く側が毎回気にしなければならなくなる。だから全体を「1 回だけ」に統一した。
+
+**理由 3 — 保存しないから打ち切れる(Laziness-seeking)**
+
+> **Laziness-seeking.** ... For example, "find the first `String` with three consecutive vowels" need not examine all the input strings.
+> (「母音が 3 つ連続する最初の文字列を探す」なら、全部を調べる必要はない)
+
+100 万件から条件に合う最初の 1 件を探すとき、Stream は見つかった時点で**残りを一切計算しない**。これができるのは「全部を貯めない」前提があるから。使い回しを許すと、「あとでまた使うかもしれない」ので全件を計算して保存せざるを得ず、この最適化が成立しなくなる。
+
+| もし Stream が使い回せたら | 実際の Stream |
+|---|---|
+| 要素をすべて保存する必要がある | 保存しない(No storage) |
+| 無限ストリームを扱えない | 扱える(Possibly unbounded) |
+| 途中で打ち切る最適化ができない | できる(Laziness-seeking) |
+| **= それはもう `List`** | `List` とは別の道具として成立する |
+
+### 「制限」ではなく「性質」
+
+公式は Stream のこの性質を **Consumable(消費されるもの)** と呼び、`Iterator` の仲間として位置づけている。
+
+> **Consumable.** The elements of a stream are only visited once during the life of a stream. Like an `Iterator`, a new stream must be generated to revisit the same elements of the source.
+> (Stream の要素は生涯に一度しか訪問されない。`Iterator` と同じく、同じ要素をもう一度見るには**新しい Stream を作る**必要がある)
+
+つまり「`List` に後から付けられた不便な制限」ではなく、「**そもそも `Iterator` と同じ、一度きり読み進む道具**」。「なぜ 2 回使えないのか」と考えるより、「本を最後まで読んだら、もう一度読むには最初のページに戻る(= `.stream()` を呼び直す)必要がある」と捉えるほうが実態に合っている。
+
+## 9. `map` / `filter` / `forEach` の使い分け
 
 | メソッド | 件数 | 返すもの | 使いどころ |
 |---|---|---|---|
@@ -239,10 +380,11 @@ categories.stream()
 
 - **`.map()` だけ書いて動かない。** 終端操作(`toList` など)が無いと 1 件も処理されない。しかもエラーにならないので気づきにくい(→ 6 章)
 - **`.toList()` の結果に `add` して落ちる。** 変更不可の List が返る。可変が要るなら `new ArrayList<>(result)` で包み直す(→ 7 章)
-- **Stream は 1 回使うと終わり。** 変数に入れた Stream を 2 回使うと `IllegalStateException: stream has already been operated upon or closed` になる。Laravel の Collection や TS の配列のように使い回せない。必要なら元の `List` から `.stream()` を呼び直す
+- **Stream は 1 回使うと終わり。** 変数に入れた Stream を 2 回使うと `IllegalStateException: stream has already been operated upon or closed` になる。しかも**中間操作だけでも使用済みになる**。Laravel の Collection や TS の配列のように使い回せない。必要なら元の `List` から `.stream()` を呼び直す(→ 8 章)
 - **`Collectors.toList()` と `toList()` を混同する。** 古い記事のコピーで可変・不変が変わる。Java 16 以降なら短い `.toList()` でよい
 - **`map` で件数を変えようとする。** `map` は必ず N → N。減らしたいなら `filter`
 - **元の List が変わると思い込む。** Stream は非破壊で、元の `List` には一切手を触れない。結果は必ず戻り値で受け取る
+- **使い捨ての理由を「元データと混ざるから」と考える。** Stream はソースを変更しないので混ざりようがない。理由は「要素を保存しない設計にしたから」で、保存する設計にした瞬間それは `List` と同じものになる(→ 8 章)
 
 ## 用語集
 
@@ -259,6 +401,11 @@ categories.stream()
 - **写像(map の語源)** — あるものを別のものに対応付けること。「地図」の意味ではない
 - **命令型 / 宣言型** — 「どう処理するか」を書くのが命令型(`for` 文)、「何が欲しいか」を書くのが宣言型(Stream)
 - **Collection(Laravel)** — PHP の配列をメソッドチェーン可能にする Laravel のクラス。Java の Stream に近いが即時評価で使い回せる
+- **Consumable** — 「要素は生涯に一度しか訪問されない」という Stream の性質を表す公式の用語。`Iterator` と同じ系譜
+- **No storage** — 「Stream は要素を格納しない」という公式の設計方針。使い捨てである根本理由
+- **`linkedOrConsumed`** — Stream 実装(`AbstractPipeline`)が内部に持つ使用済みフラグ。中間操作を繋いだ(linked)か終端操作で消費した(consumed)かで `true` になる
+- **`Iterator`** — 要素を先頭から 1 件ずつ取り出す仕組み。Stream と同じく巻き戻せない
+- **ミュータブル / イミュータブル** — オブジェクトの中身を後から変更できるか否かの性質。**メソッドに対しては使わない**言葉。元を書き換えるメソッドは「破壊的メソッド」と呼ぶ
 
 ## 関連
 
