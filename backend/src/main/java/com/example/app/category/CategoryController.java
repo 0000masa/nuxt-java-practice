@@ -12,16 +12,15 @@ import com.example.app.category.dto.CategoryResponse;
 @RequestMapping("/api/categories")
 public class CategoryController {
 
-	private final CategoryRepository categoryRepository;
+	// 処理は自分で行わず CategoryService に任せる(Controller は薄く保つ)。
+	private final CategoryService categoryService;
 
-	public CategoryController(CategoryRepository categoryRepository) {
-		this.categoryRepository = categoryRepository;
+	public CategoryController(CategoryService categoryService) {
+		this.categoryService = categoryService;
 	}
 
 	@GetMapping
 	public List<CategoryResponse> list() {
-		return categoryRepository.findAllByOrderByDisplayOrderAsc().stream()
-				.map(CategoryResponse::from)
-				.toList();
+		return categoryService.getCategories();
 	}
 }
