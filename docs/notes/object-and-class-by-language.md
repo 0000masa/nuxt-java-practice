@@ -236,6 +236,8 @@ public PostController(PostService postService) {   // Spring が PostService を
 | アロー関数 `fn()` | 7.4(2019) | ES2015(2015) |
 | ファーストクラス callable `strlen(...)` | 8.1(2021) | 最初から |
 
+(この 3 つの用語がそれぞれ何なのかは → [functions-as-values.md](./functions-as-values.md))
+
 JS は誕生時から関数を値として自由に扱えたので、**エコシステム全体が関数を組み合わせる文化で育った**。PHP でそれが現実的になったのはここ数年で、その頃にはすでにクラス中心の作法が定着していた。
 
 つまり、**ご指摘の「抜け道」(単体の関数 + 連想配列)は、PHP が意識的に離れてきた古いスタイルでもある**。「できる」が「戻りたくない」というのが実情に近い。
@@ -337,7 +339,7 @@ export function usePosts() {
 
 ### TS でクラスが少ない理由(5 つ)
 
-1. **オブジェクトと関数で足りる。** 上の `usePosts()` のように、関数の中に変数を閉じ込めてオブジェクトで返せば、クラスの「状態＋メソッド」と同じことができる(クロージャという仕組み)。
+1. **オブジェクトと関数で足りる。** 上の `usePosts()` のように、関数の中に変数を閉じ込めてオブジェクトで返せば、クラスの「状態＋メソッド」と同じことができる(**クロージャ**という仕組み。詳細 → [functions-as-values.md](./functions-as-values.md))。なお**この手は Java では使えない** — Java のラムダは書き換えない変数しか捕まえられないため。
 2. **フレームワークが関数前提の設計。** Nuxt / Vue の Composition API(や React の hooks)は関数を組み合わせる思想で作られている。クラスで書く方が逆に不自然。
 3. **API から来るデータが素の JSON オブジェクト。** サーバから届くのは `{ id: 1, body: "..." }` という素のオブジェクト。TS は構造的型付けなので **interface を貼るだけでそのまま型安全に扱える**。クラスに詰め替える必然性が薄い(Java は逆に、JSON を受け取るのに `record`/クラスが必要)。
 4. **モジュールが「置き場所」の役割を果たす。** Java ではクラスがコードの置き場も兼ねるが、TS ではファイル(モジュール)から関数を直接 `export` できる。**クラスを容れ物として使う必要がない。**
@@ -404,7 +406,7 @@ try {
 - **DI(依存性注入)** — 必要な部品を自分で `new` せず、外から渡してもらう設計。Laravel も Spring もこれを採用している。
 - **サービスコンテナ** — DI を担う仕組み。コンストラクタの**型ヒント**を見て部品を用意して渡す。型で解決するため、部品はクラス / interface である必要がある。
 - **ヘルパー関数(Laravel)** — `route()` / `dd()` など、クラスに属さないグローバル関数。Composer の `files` で毎リクエスト読み込まれる。
-- **クロージャ** — 関数が、自分の外側の変数を覚えたまま持ち歩く仕組み。TS でクラスの代わりに「状態＋振る舞い」を作れる理由。
+- **クロージャ** — 関数が、自分の外側の変数を覚えたまま持ち歩く仕組み。TS でクラスの代わりに「状態＋振る舞い」を作れる理由(→ [functions-as-values.md](./functions-as-values.md))。
 - **DTO** — データを運ぶためだけの入れ物(Data Transfer Object)。TS では interface、Java では `record` で表す。
 
 ## 関連
@@ -412,4 +414,5 @@ try {
 - TS の interface と type、「Java の interface ではデータの形を書けない」話 → [typescript/syntax/interface-vs-type.md](./typescript/syntax/interface-vs-type.md)
 - interface と implements、抽象クラス、`super`、`instanceof`(Java 中心) → [java/syntax/interface-and-implements.md](./java/syntax/interface-and-implements.md)
 - コンストラクタの見分け方(`new` で何が呼ばれるか) → [java/syntax/constructor-declaration.md](./java/syntax/constructor-declaration.md)
+- クロージャ / アロー関数 / ファーストクラス callable(関数を値として扱う) → [functions-as-values.md](./functions-as-values.md)
 - 言語ごとのビルド・ツールの違い → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)
