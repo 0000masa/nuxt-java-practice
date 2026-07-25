@@ -5,6 +5,7 @@
 - TS の **interface は「オブジェクト(や関数・クラス)の形に名前を付けて使い回す」道具**。変数・配列・オブジェクトの型宣言はできるが、それは `type` でもできる。
 - **interface と type はほぼ同じことができる。** 差は「interface はオブジェクトの形専門で、拡張・マージが得意」「type は union / プリミティブ / タプルなど、オブジェクト以外にも名前を付けられる」。迷ったら **オブジェクトの形は interface、それ以外は type**。
 - **`instanceof` は「実行時に、この値がこのクラスから作られたか?」を調べる演算子**。型(interface/type)ではなく**クラス**に対して使う。interface には使えない(実行時に消えるから)。
+- **Java / PHP の interface では「データの形」は書けない**(メソッドの約束専用)。同じ役割は Java では `record` / クラスの DTO が担う。同じ `interface` でも受け持つ範囲が違う(5 章)。
 
 前回の [Java 側の interface メモ](../../java/syntax/interface-and-implements.md)は「クラスが `implements` する契約」の話が中心だった。TS では使われ方の重心が違うので、そこも対比しながら見ていく。
 
@@ -148,7 +149,84 @@ const d: Animal = new Dog()   // Dog のインスタンスを Animal 型の変�
 
 つまり「クラスの型定義もできるか?」の答えは **できる**。`implements` でクラス側に契約を課すことも、interface をクラスインスタンスの型として使うこともできる。ただし TS での interface の主役はあくまで「2 章のオブジェクトの形」で、クラス絡みはその応用、という温度感。
 
-## 5. instanceof とは
+## 5. Java / PHP の interface は「データの形」を書けない — record との対比
+
+ここで 3 言語を比べると、**同じ `interface` というキーワードなのに受け持つ範囲が違う**ことが分かる。「TS の interface はクラスだけでなくオブジェクトの型宣言もできるのか? Java/PHP はできないのか?」への答えがこれ。
+
+まず「型宣言」を 2 つに分けて考えると整理できる。
+
+| | **Java / PHP の interface** | **TS の interface** |
+|---|---|---|
+| **(a) 変数の型として使う** | ✅ できる(`Animal a = new Dog();`) | ✅ できる |
+| **(b) データの形(プロパティの集まり)を定義する** | ❌ **できない** | ✅ **これが主戦場** |
+
+「オブジェクトの型宣言」は **(b)** のこと。ここは **Java も PHP もできない**。ただし (a)(変数の型として使う)は Java の interface でもできるので、「型宣言が一切できない」わけではない。
+
+### 理由 1 — Java / PHP の interface はメソッドしか宣言できない
+
+ここが決定的。TS の interface は、中身が**プロパティ(データ)**の並びになっている。
+
+```typescript
+interface UserSummary {
+  id: number          // ← プロパティ(データ)
+  username: string
+  displayName: string
+}
+```
+
+ところが **Java の interface に書けるのはメソッドと定数だけ**で、インスタンスのフィールド(プロパティ)は宣言できない。
+
+```java
+interface UserSummary {
+    Long id;          // ❌ コンパイルエラー。interface にフィールドは書けない
+    Long getId();     // ✅ メソッドならOK
+}
+```
+
+つまり **TS の interface =「データの形」を書く道具、Java / PHP の interface =「メソッドの約束」を書く道具**。同じ名前でも、書ける中身が違う。
+
+> PHP も interface に書けるのは基本メソッドのみ。(PHP 8.4 のプロパティフックで `public string $name { get; }` のようなプロパティ要求も書けるようになったが、これも「クラスが実装する約束」であって、TS のようにデータの形として単体で使うものではない。)
+
+### 理由 2 — Java / PHP には「オブジェクトリテラル」が無い
+
+TS / JS では、クラスを一切作らずにオブジェクトをその場で生み出せる。
+
+```typescript
+const u: UserSummary = { id: 1, username: "taro", displayName: "太郎" }  // クラス無しでOK
+```
+
+Java / PHP では **すべてのオブジェクトがクラスから生まれる**。`{ id: 1, ... }` のような「クラスに属さない裸のオブジェクト」が存在しないので、「その形に interface で名前を付ける」という発想がそもそも成り立たない。加えて Java / PHP は公称的型付けなので、形が合うだけでは仲間と認めない(→ 4 章・[Java 側メモ](../../java/syntax/interface-and-implements.md))。
+
+この「オブジェクトが先か、クラスが先か」という言語ごとの立ち位置の違いは、別メモ [object-and-class-by-language.md](../../object-and-class-by-language.md) で詳しく扱う。
+
+### では Java では何がその役割を担うのか — record / クラスの DTO
+
+**このプロジェクトに答えがある。** frontend の TS interface と backend の Java を並べると、**同じデータの形を、TS は `interface`、Java は `record`(クラスの一種)で表している**。
+
+```typescript
+// frontend/app/types/post.ts — TS は interface
+export interface UserSummary { id: number; username: string; displayName: string }
+export interface Timeline { posts: Post[]; nextCursor: number | null }
+```
+
+```java
+// backend/.../post/dto/PostResponse.java — Java は record(= クラス)
+public record UserSummary(Long id, String username, String displayName) {}
+
+// backend/.../post/dto/TimelineResponse.java
+public record TimelineResponse(List<PostResponse> posts, Long nextCursor) {}
+```
+
+役割はまったく同じ「API のデータの形(DTO)」なのに、使う道具が違う。**Java で「データの形」を定義したいときは interface ではなくクラス(特に `record`)を使う。** PHP でも同じくクラス(あるいは PHPStan / Psalm 用の PHPDoc `array{id: int, name: string}` 記法)を使う。
+
+### まとめ
+
+- **TS の interface** — プロパティを並べて「データの形」を書ける。オブジェクトリテラルにそのまま適用できる → **データの形とクラスの契約、両方に使える**
+- **Java / PHP の interface** — メソッドの約束専用。データの形は書けない → **クラスの契約にだけ使う**。データの形は `record` / クラスで表す
+
+同じ `interface` でも、**TS は「型システムの道具」、Java / PHP は「クラス設計の道具」**という立ち位置の違いがある。TS の interface のほうが受け持つ範囲が広い、と捉えると整理しやすい。
+
+## 6. instanceof とは
 
 `instanceof` は、**「この値が、指定したクラスから作られたインスタンスか?」を実行時に調べる演算子**。結果は `true` / `false`。
 
@@ -198,10 +276,14 @@ console.log(d instanceof Animal)   // ❌ エラー: Animal は interface
 - **交差型(&)** — `A & B` で複数の型を合体させる。type 側での「拡張」にあたる。
 - **宣言マージ** — 同名の interface を複数書くと自動で合体する TS の機能。type には無い。
 - **構造的型付け** — 形(プロパティ・メソッド)が合えば同じ型とみなす方式。TS はこれ。→ [Java 側メモ](../../java/syntax/interface-and-implements.md)
+- **オブジェクトリテラル** — `{ id: 1, name: "a" }` のように、クラスを定義せずその場で書けるオブジェクト。TS/JS にはあるが Java/PHP には無い。
+- **record(Java)** — データを運ぶだけのクラスを短く書ける Java 16+ の仕組み。TS の「データの形の interface」に相当する役割を担う。
+- **DTO** — データを運ぶためだけの入れ物(Data Transfer Object)。このプロジェクトでは TS 側が interface、Java 側が record で表している。
 - **instanceof** — ある値が指定クラスのインスタンスかを実行時に判定する演算子。interface には使えない。
 - **型の世界 / 値の世界** — interface/type はコンパイル時のみ(型の世界)。class は実行時にも残る(値の世界)。この分離が instanceof の可否を決める。
 
 ## 関連
 
+- オブジェクトとクラスの違い、3 言語での立ち位置、TS がクラスを使わない理由 → [../../object-and-class-by-language.md](../../object-and-class-by-language.md)
 - 前回の Java 中心メモ(interface とは・implements・公称的 vs 構造的・抽象クラス) → [../../java/syntax/interface-and-implements.md](../../java/syntax/interface-and-implements.md)
 - このメモの実例になった型定義 → [frontend/app/types/post.ts](../../../../frontend/app/types/post.ts) / [category.ts](../../../../frontend/app/types/category.ts)
