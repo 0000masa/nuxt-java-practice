@@ -31,8 +31,10 @@
 呼び出し順に、通過するファイルとメソッドを示す(パスは `backend/src/main/java/` からの相対)。
 
 1. `CategoryController.list()` — `com/example/app/category/CategoryController.java`
-   単純な参照のみのため Service 層を挟まず `CategoryRepository` を直接呼ぶ
-2. `CategoryRepository.findAllByOrderByDisplayOrderAsc()` — `com/example/app/category/CategoryRepository.java`
+   HTTP の入口。処理は行わず `CategoryService` に委譲する
+2. `CategoryService.getCategories()` — `com/example/app/category/CategoryService.java`
+   `@Transactional(readOnly = true)` の境界。Repository から取得した `Category` を `CategoryResponse` に詰め替える
+3. `CategoryRepository.findAllByOrderByDisplayOrderAsc()` — `com/example/app/category/CategoryRepository.java`
    Spring Data JPA のメソッド名規約による導出クエリで、`display_order` 昇順の全件取得
 
 登場するその他のファイル:
