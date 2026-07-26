@@ -4,8 +4,8 @@ import java.util.List; // 複数の値を順番に並べて入れておく箱(�
 
 import org.springframework.data.jpa.repository.JpaRepository; // 継承するだけで標準 CRUD を提供する Spring Data の基底
 
-// categories テーブルとやり取りするための「窓口」。Controller → (Service →) Repository という
-// 三段構えの一番下、DB アクセス担当にあたる(このプロジェクトでは CategoryController から使われる)。
+// categories テーブルとやり取りするための「窓口」。Controller → Service → Repository という
+// 三段構えの一番下、DB アクセス担当にあたる(CategoryService から使われる)。
 // class ではなく interface なので、メソッドの「宣言」だけを書き、実際に動く中身は Spring Data JPA が
 // 起動時に自動生成する。JpaRepository を継承するだけで save / findById / findAll / delete / count などの
 // 定番 CRUD が 1 行も書かずに使える(interface・継承・クエリメソッドの詳しい説明は UserRepository のコメント参照)。
