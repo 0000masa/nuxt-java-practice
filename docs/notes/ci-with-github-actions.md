@@ -14,7 +14,9 @@ GitHub Actions で自動テストを回すとき、**Java や MySQL をどこで
 
 GitHub Actions のジョブは **runner**（GitHub が用意する使い捨ての仮想マシン）の上で動きます。`runs-on: ubuntu-latest` と書くと、Ubuntu の仮想マシンが 1 台立ち上がり、ジョブが終われば破棄されます。
 
-ここで「**ホスト**」と言っているのは、この runner の OS そのものを指します。使い捨てなので、**開発環境と違って「汚さない配慮」は不要**です。この点が、ローカルのテスト用 DB の話（→ [testing-and-test-database.md](./java/spring/testing-and-test-database.md)）と大きく違います。
+ここで「**ホスト**」と言っているのは、この runner の OS そのものを指します。使い捨てなので、**開発環境と違って「データを汚さない配慮」は不要**です。この点が、ローカルのテスト用 DB の話（→ [testing-and-test-database.md](./java/spring/testing-and-test-database.md)）と大きく違います。
+
+ただし**「守る必要が無い」ことと「database 名を変えてよい」ことは別**です。テストの接続先は `build.gradle` が `app_test` に固定しているので、**CI でも `app_test` という名前で作る必要があります**（理由と実測 → 第 10 節）。ここは間違えやすいので先に注意しておきます。
 
 runner から使える「外部のもの」の置き方が、以下の 4 方式です。
 
@@ -36,9 +38,9 @@ jobs:
         run: |
           sudo systemctl start mysql.service
           mysql -uroot -proot -e "
-            CREATE DATABASE app CHARACTER SET utf8mb4;
+            CREATE DATABASE app_test CHARACTER SET utf8mb4;
             CREATE USER 'app'@'%' IDENTIFIED BY 'password';
-            GRANT ALL PRIVILEGES ON app.* TO 'app'@'%';"
+            GRANT ALL PRIVILEGES ON app_test.* TO 'app'@'%';"
 
       - uses: actions/setup-java@v4
         with:
@@ -49,12 +51,14 @@ jobs:
       - name: テスト実行
         working-directory: backend
         env:
+          # DB_NAME は書かない。build.gradle の test タスクが app_test に固定するため(→ 第 10 節)
           DB_HOST: 127.0.0.1
-          DB_NAME: app
           DB_USER: app
           DB_PASSWORD: password
         run: sh ./gradlew test
 ```
+
+**database 名が `app` ではなく `app_test` なのは誤記ではありません。** `build.gradle` の `test` タスクが接続先を `app_test` に固定しているためです。理由と実測は第 10 節にまとめています。
 
 **利点** — 追加のコンテナが無く、起動が速い。
 
@@ -84,7 +88,7 @@ jobs:
         image: mysql:8                      # 開発環境と同じイメージを指定できる
         env:
           MYSQL_ROOT_PASSWORD: root
-          MYSQL_DATABASE: app
+          MYSQL_DATABASE: app_test          # ← build.gradle が接続先を app_test に固定している(第 10 節)
           MYSQL_USER: app
           MYSQL_PASSWORD: password
         ports:
@@ -107,9 +111,9 @@ jobs:
       - name: テスト実行
         working-directory: backend
         env:
+          # DB_NAME は書かない。build.gradle が app_test に固定するので、ここで指定しても無視される
           DB_HOST: 127.0.0.1
           DB_PORT: '3306'
-          DB_NAME: app
           DB_USER: app
           DB_PASSWORD: password
         run: sh ./gradlew test               # gradlew に実行権限が無いので sh 経由
@@ -155,6 +159,14 @@ jobs:
       - name: MySQL だけ起動して healthy を待つ
         run: docker compose up -d --wait mysql
 
+      - name: テスト用 database を作る
+        # compose の mysql は .env の DB_NAME(= app)しか作らないため、app_test は自分で作る必要がある
+        run: |
+          docker compose exec -T mysql mysql -uroot -proot -e "
+            CREATE DATABASE IF NOT EXISTS app_test CHARACTER SET utf8mb4;
+            GRANT ALL PRIVILEGES ON app_test.* TO 'app'@'%';
+            FLUSH PRIVILEGES;"
+
       - name: backend コンテナをビルドしてテスト
         run: docker compose run --rm backend sh ./gradlew test
 ```
@@ -166,6 +178,7 @@ jobs:
 1. **backend イメージのビルドが毎回走る**（`docker/backend/Dockerfile` の `eclipse-temurin:21-jdk` を pull する時間も含む）
 2. **Gradle の依存キャッシュが効きにくい**。compose では依存を `gradle-cache` という named volume に置いていますが、**runner は毎回まっさらなのでボリュームも空**です。つまり毎回すべての依存をダウンロードし直します。`actions/cache` でボリュームを保存・復元する設定を自分で書くことになり、方式 B の `cache: gradle` の 1 行と比べて手間が大きく増えます
 3. **compose は開発向けに書かれている**。`docker compose up -d` をサービス名なしで実行すると nuxt / minio / minio-init / mailpit まで起動してしまい、テストに不要なものを待つことになります（上の例で `mysql` を明示しているのはこのため）
+4. **テスト用 database を作るステップが余分に必要**。compose の mysql が作るのは `.env` の `DB_NAME`（= `app`）だけなので、`app_test` は自分で `CREATE DATABASE` する必要があります。方式 B なら `MYSQL_DATABASE: app_test` の 1 語で済むところが、6 行のステップになります
 
 **結論: 一貫性は魅力だが、遅さと設定量で不利。テストだけを回す目的なら選ばないほうが無難です。**
 
@@ -184,6 +197,13 @@ jobs:
       - name: MySQL と MinIO だけ compose で起動
         run: docker compose up -d --wait mysql minio minio-init
 
+      - name: テスト用 database を作る
+        run: |
+          docker compose exec -T mysql mysql -uroot -proot -e "
+            CREATE DATABASE IF NOT EXISTS app_test CHARACTER SET utf8mb4;
+            GRANT ALL PRIVILEGES ON app_test.* TO 'app'@'%';
+            FLUSH PRIVILEGES;"
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -193,8 +213,8 @@ jobs:
       - name: テスト実行(Java はホストで動かす)
         working-directory: backend
         env:
+          # DB_NAME は書かない。build.gradle が app_test に固定する
           DB_HOST: 127.0.0.1               # compose が ports で公開しているので localhost で届く
-          DB_NAME: app
           DB_USER: app
           DB_PASSWORD: password
           S3_ENDPOINT: http://127.0.0.1:9000
@@ -273,17 +293,66 @@ jobs:
 
 **② `working-directory: backend` を忘れない** — `gradlew` はリポジトリ直下ではなく `backend/` にあります。
 
-**③ CI では DB 名を `app_test` にしなくてよい** — ローカルで `app_test` を分けるのは「開発データを守る」ためです。**runner の DB は毎回捨てられるので守る対象がありません**。`MYSQL_DATABASE: app` のまま使うのが素直で、設定も 1 つ減ります。
+**③ CI でも DB 名は `app_test` にする** — 「runner の DB は毎回捨てられるのだから `app` でよいのでは」と考えたくなりますが、**それでは CI が落ちます**。`build.gradle` の `test` タスクが接続先を `app_test` に固定しており、ワークフロー側で `DB_NAME: app` と書いても**無視される**ためです。理由は次の節。
+
+## 10. 落とし穴 — Gradle の `environment` はワークフローの `env:` に勝つ
+
+このプロジェクトの `build.gradle` には次の指定があります。
+
+```groovy
+tasks.named('test') {
+	useJUnitPlatform()
+	environment 'DB_NAME', 'app_test'
+}
+```
+
+`environment` は「**このタスクが起動するテスト JVM の環境変数を設定する**」指定です。ここが重要で、**外から渡された同名の環境変数を上書きします**。優先順位はこうなります。
+
+```
+ワークフローの env:  DB_NAME: app
+        ↓ 上書きされる（負ける）
+build.gradle の environment 'DB_NAME', 'app_test'
+        ↓
+テスト JVM が実際に見る値: app_test
+```
+
+実測で確認できます。存在しない database 名を外から渡しても、テストは平然と成功します。
+
+```
+$ docker compose exec -e DB_NAME=nosuchdb backend sh ./gradlew test --tests '*ApplicationTests*'
+BUILD SUCCESSFUL
+```
+
+`nosuchdb` という database は存在しないのに成功しています。つまり**その値は使われておらず、`app_test` に接続している**ということです。
+
+したがって、CI で `MYSQL_DATABASE: app` としてしまうと次の食い違いが起きます。
+
+| | 作られる database | テストが探す database |
+|---|---|---|
+| ❌ `MYSQL_DATABASE: app` | `app` | `app_test` → **`Unknown database 'app_test'` で全滅** |
+| ✅ `MYSQL_DATABASE: app_test` | `app_test` | `app_test` → 成功 |
+
+**「ローカルと CI で接続先が揃っている」ことは欠点ではなく利点です。** `build.gradle` が単一の真実の源になっているので、「テストは必ず `app_test` を使う」という不変条件が環境によらず保たれます。
+
+なお「CI からも上書きできるように」と次のような形にするのは**避けてください**。
+
+```groovy
+// ✗ これはローカルの安全装置を壊す
+environment 'DB_NAME', System.getenv('DB_NAME') ?: 'app_test'
+```
+
+backend コンテナには `env_file: .env` 経由で **`DB_NAME=app` が入っています**（`docker compose exec backend printenv DB_NAME` → `app`）。この書き方にすると `System.getenv('DB_NAME')` が `app` を返し、**ローカルのテストが再び開発 DB に接続します**。`PostRepositoryTest.setUp()` の `deleteAll()` が開発中の投稿を狙うことになります。
 
 ## つまずきポイント
 
 - **`services` に health-cmd を書かないと、MySQL の起動前にテストが走って落ちる。** compose の `healthcheck` + `depends_on` に相当するものを `options` に書く
 - **`services` への接続先は `127.0.0.1`。** compose のようにサービス名（`mysql`）では引けません（ジョブ自体をコンテナで動かす場合は逆にサービス名になります）
-- **`gradlew` の実行権限。** `sh ./gradlew` で回避する
+- **`gradlew` の実行権限。** `sh ./gradlew` で回避する（なぜ 644 なのか、なぜ CI でも同じ問題が起きるのかの仕組み → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)）
 - **compose 方式では Gradle の依存キャッシュが毎回空。** named volume は runner に残らないため、依存を毎回ダウンロードし直す
 - **`docker compose up -d` をサービス名なしで打つと、nuxt / minio / mailpit まで起動する。** CI では必要なサービス名を明示する
 - **`upload-artifact` に `if: always()` を付け忘れる。** 失敗時にこそレポートが欲しいのに、既定ではテストが落ちるとこのステップが飛ばされる
-- **CI のためにテスト DB を分けようとしてしまう。** runner は使い捨てなので不要。分ける必要があるのはローカルだけ
+- **`MYSQL_DATABASE: app` にしてしまう。** runner は使い捨てなので「開発 DB を守る」必要は無いが、**`build.gradle` がテストの接続先を `app_test` に固定している**ので、CI でも `app_test` を作らないと `Unknown database 'app_test'` で全滅する（→ 第 10 節）
+- **ワークフローの `env:` に `DB_NAME` を書いて安心してしまう。** Gradle の `environment` に負けるので効きません。書いても無害ですが、読む人を誤解させるので書かないほうがよい
 
 ## 用語集
 
@@ -296,11 +365,14 @@ jobs:
 - **`actions/upload-artifact`** — ジョブの成果物（テストレポートなど）を保存し、後からダウンロードできるようにするアクション
 - **`workflow_dispatch`** — 手動実行のトリガー。このリポジトリでは Terraform の apply / destroy に使う方針（→ `docs/infrastructure/README.md`）
 - **ミドルウェア** — アプリが利用する DB・ストレージ・メールなどの基盤ソフト
+- **`environment`（Gradle の `Test` タスク）** — テスト JVM に渡す環境変数の指定。**外から渡された同名の環境変数を上書きする**ため、CI のワークフローで `env:` に書いた値より強い
 
 ## 関連
 
+- **ローカルのテスト運用手順**（`app_test` の作り方・実行コマンド・テスト一覧） → [docs/test/README.md](../test/README.md)
 - ローカルでのテストの仕組み、テスト専用 DB、実行コマンド → [java/spring/testing-and-test-database.md](./java/spring/testing-and-test-database.md)
 - 開発環境の 5 コンテナ構成と環境変数の方針 → [docs/development/README.md](../development/README.md)
 - Terraform + GitHub Actions（OIDC 認証・`workflow_dispatch` での apply / destroy） → [docs/infrastructure/README.md](../infrastructure/README.md)
 - 言語ごとのビルドツールとパッケージ管理の対応（Gradle / Composer / npm） → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)
 - 環境変数の基本と `${VAR:default}` の読み方 → [env-vars-basics.md](./env-vars-basics.md)
+- ファイル権限の保存場所（inode）、umask、git のファイルモード、artifact で実行ビットが失われる話 → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)
