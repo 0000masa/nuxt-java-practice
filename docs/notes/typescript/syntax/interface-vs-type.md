@@ -286,4 +286,5 @@ console.log(d instanceof Animal)   // ❌ エラー: Animal は interface
 
 - オブジェクトとクラスの違い、3 言語での立ち位置、TS がクラスを使わない理由 → [../../object-and-class-by-language.md](../../object-and-class-by-language.md)
 - 前回の Java 中心メモ(interface とは・implements・公称的 vs 構造的・抽象クラス) → [../../java/syntax/interface-and-implements.md](../../java/syntax/interface-and-implements.md)
+- `Record<K,V>` と Java の `Map` / `record` の対応(名前が交差している件、TS の `Map` を JSON.stringify すると空になる件) → [../../java/syntax/map-vs-record.md](../../java/syntax/map-vs-record.md)
 - このメモの実例になった型定義 → [frontend/app/types/post.ts](../../../../frontend/app/types/post.ts) / [category.ts](../../../../frontend/app/types/category.ts)

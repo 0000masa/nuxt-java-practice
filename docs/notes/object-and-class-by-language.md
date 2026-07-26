@@ -557,6 +557,7 @@ try {
 ## 関連
 
 - TS の interface と type、「Java の interface ではデータの形を書けない」話 → [typescript/syntax/interface-vs-type.md](./typescript/syntax/interface-vs-type.md)
+- `record` とキー可変の入れ物(`Map` / `Record<K,V>` / 連想配列)の使い分け、JSON にしたときの違い → [java/syntax/map-vs-record.md](./java/syntax/map-vs-record.md)
 - interface と implements、抽象クラス、`super`、`instanceof`(Java 中心) → [java/syntax/interface-and-implements.md](./java/syntax/interface-and-implements.md)
 - コンストラクタの見分け方(`new` で何が呼ばれるか) → [java/syntax/constructor-declaration.md](./java/syntax/constructor-declaration.md)
 - クラス自体を値として持つ(`Post.class` / PHP の `Post::class` / TS はクラスがそのまま値) → [java/syntax/class-literal.md](./java/syntax/class-literal.md)
