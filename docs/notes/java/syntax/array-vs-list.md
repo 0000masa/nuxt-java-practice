@@ -104,4 +104,5 @@ str.length()   // String(文字列)… メソッド。カッコあり
 
 - `.stream().map().toList()` が何をしているか、なぜ 3 つ必要か → [stream-map-tolist.md](./stream-map-tolist.md)
 - 変数宣言の型明示と型推論(`var`)、`List<Post> fetched` の型の書き方 → [type-declaration-and-var.md](./type-declaration-and-var.md)
+- ジェネリクスと `new ArrayList<>()` の `<>`(ダイヤモンド演算子) → [diamond-operator.md](./diamond-operator.md)
 - コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)

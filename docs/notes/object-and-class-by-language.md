@@ -559,5 +559,6 @@ try {
 - TS の interface と type、「Java の interface ではデータの形を書けない」話 → [typescript/syntax/interface-vs-type.md](./typescript/syntax/interface-vs-type.md)
 - interface と implements、抽象クラス、`super`、`instanceof`(Java 中心) → [java/syntax/interface-and-implements.md](./java/syntax/interface-and-implements.md)
 - コンストラクタの見分け方(`new` で何が呼ばれるか) → [java/syntax/constructor-declaration.md](./java/syntax/constructor-declaration.md)
+- クラス自体を値として持つ(`Post.class` / PHP の `Post::class` / TS はクラスがそのまま値) → [java/syntax/class-literal.md](./java/syntax/class-literal.md)
 - クロージャ / アロー関数 / ファーストクラス callable(関数を値として扱う) → [functions-as-values.md](./functions-as-values.md)
 - 言語ごとのビルド・ツールの違い → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)

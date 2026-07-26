@@ -73,5 +73,6 @@ List<Post> page = hasNext ? fetched.subList(0, limit) : fetched;
 ## 関連
 
 - 配列と List(固定長/可変長・便利メソッドの在りか) → [array-vs-list.md](./array-vs-list.md)
+- ダイヤモンド演算子 `<>`(`var` と併用すると型推論が壊れる話も) → [diamond-operator.md](./diamond-operator.md)
 - コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)
 - パッケージと完全修飾名・ソースルートの話 → [../../java-package-basics.md](../../java-package-basics.md)
