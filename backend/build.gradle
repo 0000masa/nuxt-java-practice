@@ -33,4 +33,7 @@ dependencies {
 
 tasks.named('test') {
 	useJUnitPlatform()
+	// テストは開発 DB(app)ではなく専用の app_test を使う。application.yml の ${DB_NAME:app} を上書きする。
+	// app_test は手動で 1 回だけ作成する必要がある(Flyway は database 自体を作らない) → docs/test/README.md
+	environment 'DB_NAME', 'app_test'
 }

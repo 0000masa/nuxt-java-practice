@@ -103,6 +103,7 @@ docker compose down         # 停止(named volume のデータは残る)
 - **初回起動は backend に数分かかる。** コンテナ内で `gradlew` が Gradle 本体と依存ライブラリをダウンロードするため。2回目以降は `gradle-cache` volume が効いて速くなる
 - **backend のコード変更は、VS Code の Dev Container(`.devcontainer/`)で backend コンテナに入って開発すると保存だけで反映される。** コンテナ内の VS Code が保存時に自動コンパイルし、spring-boot-devtools がアプリを再起動する(手順 → [setup/backend.md](../setup/backend.md)、採用理由 → [手法比較メモ](../notes/java-dev-env-comparison.md))。Dev Container を使っていないときや `build.gradle` の依存を変更したときは従来どおり `docker compose restart backend`
 - 動作確認 URL: アプリ `http://localhost:3000`、API 直叩き `http://localhost:8080`、MinIO 管理画面 `http://localhost:9001`、メール確認 `http://localhost:8025`
+- **テストを実行する前に、テスト専用 database `app_test` の作成が 1 回だけ必要。** テストは開発 DB(`app`)ではなくこちらを使うので、テストが開発中のデータを壊すことはない。手順と実行コマンド → [docs/test/README.md](../test/README.md)
 
 具体的な `docker-compose.yml` とアプリの初期構築手順は以下を参照:
 

@@ -5,8 +5,10 @@
 要点は 3 つ。
 
 1. **テストは「どこまで立ち上げるか」を選ぶ**。全部立ち上げる `@SpringBootTest` は 1 つあれば足り、あとは必要な層だけ切り出す
-2. **現状このプロジェクトのテストは開発 DB(`app`)を共用している**。ロールバックで守られているが、綱渡りではある
-3. **専用テスト DB への切り替えは可能で、変更は `build.gradle` に 1 行**。Flyway がスキーマもシード(カテゴリー 10 件)も自動で作る — このメモの内容は実際に動かして確認済み
+2. **かつてこのプロジェクトのテストは開発 DB(`app`)を共用していた**。ロールバックで守られていたが、綱渡りではあった
+3. **現在は専用 database `app_test` を使う方式を採用済み**。変更は `build.gradle` に 1 行で、Flyway がスキーマもシード(カテゴリー 10 件)も自動で作る — このメモの内容は実際に動かして確認済み
+
+> このメモは**仕組みの解説**。日々の手順（`app_test` の作り方・実行コマンド・テスト一覧）は [docs/test/README.md](../../../test/README.md) にまとまっている。
 
 ## 1. テストの 3 段階 — どこまで立ち上げるかを選ぶ
 
@@ -88,11 +90,13 @@ ApplicationTests > contextLoads() FAILED
 - Flyway のマイグレーションが壊れている（SQL の文法ミス、チェックサム不一致）
 - `application.yml` の設定ミス
 
-## 3. 今このプロジェクトのテストは開発 DB を共用している
+## 3. かつては開発 DB を共用していた — なぜやめたか
 
-ここが本題の入口です。`backend/src/test/resources` が存在しないため、テストは**本体の `application.yml` をそのまま使います**。つまり `DB_NAME=app`、開発中の DB そのものにつなぎます。
+**この節は、専用テスト DB に切り替える前の状態の記録です**（現在は §4 の方式を採用済み）。何が問題だったかを残しておきます。
 
-`PostRepositoryTest` はそれを前提に、かなり大胆なことをしています。
+以前は `backend/src/test/resources` も `build.gradle` の上書きも無かったため、テストは**本体の `application.yml` をそのまま使っていました**。つまり `DB_NAME=app`、開発中の DB そのものにつないでいたことになります。
+
+`PostRepositoryTest` はそれを前提に、かなり大胆なことをしています（このコード自体は今も変わっていません）。
 
 ```java
 // PostRepositoryTest.java:47-49 付近
@@ -102,19 +106,19 @@ void setUp() {
 	postRepository.deleteAll();
 ```
 
-**開発 DB の投稿を全件削除しています。** 今のところ安全なのは、`@DataJpaTest` が**各テストを自動でトランザクションに包み、終了時にロールバックする**ためです。削除は取り消され、開発データは戻ります。実際に確認しても、テスト前後で `app.posts` は 2 件のまま変わりません。
+**開発 DB の投稿を全件削除しています。** これで事故が起きなかったのは、`@DataJpaTest` が**各テストを自動でトランザクションに包み、終了時にロールバックする**ためです。削除は取り消され、開発データは戻ります。実際に確認しても、テスト前後で `app.posts` は 2 件のまま変わりませんでした。
 
-ただし綱渡りではあります。
+ただし綱渡りではありました。
 
 - `@Transactional` の効かない書き方（別スレッド、`@Commit`、`REQUIRES_NEW` など）を 1 箇所足した瞬間に、**開発データが本当に消えます**
-- `categoryRepository.findById(1L).orElseThrow()` があるので、**開発 DB のシードデータに依存**しています。誰かがカテゴリーを消すとテストが落ちます
+- `categoryRepository.findById(1L).orElseThrow()` があるので、**開発 DB のシードデータに依存**します。誰かがカテゴリーを消すとテストが落ちます
 - テストと `docker compose up` のアプリが同じ DB を触るので、テスト中に画面を触ると結果が揺れる可能性があります
 
-「本物の MySQL でテストしたいが、開発 DB は使いたくない」という判断は妥当です。
+この 3 点を理由に、「本物の MySQL でテストしたいが、開発 DB は使いたくない」という方針に切り替えました。
 
-## 4. 専用テスト DB に切り替える — 実測済みの手順
+## 4. 採用した方式 — 専用 database `app_test`
 
-**結論: できます。** インメモリ DB に差し替える必要はなく、**同じ MySQL コンテナの中に `app_test` という database を追加するだけ**です。以下は実際に動かして確認した手順です。
+インメモリ DB に差し替える必要はなく、**同じ MySQL コンテナの中に `app_test` という database を追加するだけ**で済みました。以下は実際に動かして確認した内容です。
 
 ### 手順 1: database を先に作る
 
@@ -232,8 +236,8 @@ GRANT ALL PRIVILEGES ON app_test.* TO 'app'@'%';
 
 | 方式 | 本物の MySQL か | 開発 DB を汚さないか | 追加の手間 |
 |---|---|---|---|
-| **開発 DB 共用（現状）** | ○ | △ ロールバック頼み | なし |
-| **専用テスト DB（`app_test`）** | ○ | ○ | database を 1 回作る + `build.gradle` 1 行 |
+| **開発 DB 共用（以前の方式）** | ○ | △ ロールバック頼み | なし |
+| **専用テスト DB（`app_test`）← 採用** | ○ | ○ | database を 1 回作る + `build.gradle` 1 行 |
 | **Testcontainers** | ○ 毎回使い捨て | ○ | 依存追加 + テストクラスの修正 + 起動が毎回遅い |
 | **インメモリ DB（H2）** | **×** | ○ | 依存追加。ただし後述の問題 |
 
@@ -241,7 +245,7 @@ GRANT ALL PRIVILEGES ON app_test.* TO 'app'@'%';
 
 **Testcontainers**（テスト実行時に Docker で使い捨ての DB を立てるライブラリ）は理想的ですが、テストごとにコンテナ起動を待つぶん遅く、ローカル開発では手数が増えます。**CI で真価を発揮する道具**なので、CI を作るときに検討するのが順番として自然です。
 
-したがって**当面は「専用テスト DB」が最も費用対効果が高い**と考えます。
+したがって**当面は「専用テスト DB」が最も費用対効果が高い**と判断し、この方式を採用しました（運用手順 → [docs/test/README.md](../../../test/README.md)）。
 
 ## 5. テストの実行コマンド
 
@@ -285,7 +289,7 @@ sh ./gradlew test
 - **`src/test/resources/application.yml` は本体の設定を上書きしない、置き換える。** `username` や `ddl-auto: validate` が消える。環境変数で差し替えるほうが安全
 - **Flyway は database（schema）を作らない。** 作るのはテーブルだけ。`app_test` は先に手で作る
 - **MySQL の初期化スクリプトはボリュームが空のときだけ走る。** 既存環境に後から init SQL を置いても無反応。`down -v` すると開発データが消える
-- **`@DataJpaTest` のロールバックに頼って開発 DB を消す `deleteAll()` は危険。** 専用 DB に切り替えるまでは、トランザクションを外れる書き方を足さないこと
+- **`@DataJpaTest` のロールバックに頼って `deleteAll()` する構造は変わっていない。** 接続先が `app_test` になったので開発データは無事だが、トランザクションを外れる書き方を足せば `app_test` の中身は消える(Flyway が作り直すので実害は小さい)
 - **インメモリ DB(H2) は MySQL の代わりにならない。** 方言が違い、`ddl-auto: validate` の検証が意味を失う
 - **テストが `UP-TO-DATE` で飛ばされる。** 変更が無いと Gradle は実行を省略する。`--rerun-tasks` を付ける
 - **Spring Boot 4 でテスト系アノテーションのパッケージが移動している。** `@MockBean` は廃止で `@MockitoBean`
@@ -308,6 +312,7 @@ sh ./gradlew test
 
 ## 関連
 
+- **日々の運用手順**（`app_test` の作り方・実行コマンド・テスト一覧・方式の選定理由） → [docs/test/README.md](../../../test/README.md)
 - CI（GitHub Actions）でどこまでをホスト・services・compose に任せるか → [ci-with-github-actions.md](../../ci-with-github-actions.md)
 - 開発環境の 5 コンテナ構成・環境変数の方針 → [docs/development/README.md](../../../development/README.md)
 - Flyway の基本とマイグレーションの書き方 → [flyway-basics.md](../../flyway-basics.md)
