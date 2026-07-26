@@ -44,6 +44,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 - `docs/infrastructure/` — AWS 構成図、Terraform + GitHub Actions の運用フロー
 - `docs/development/` — docker-compose 開発環境の構成(5 コンテナ、ポート、環境変数方針)
 - `docs/setup/` — Nuxt / Spring Boot の環境構築手順
+- `docs/test/` — テストの実行方法と方針(テスト専用 database `app_test` の作り方、テスト一覧)
 - `docs/api/` — REST API ドキュメント(エンドポイントごとに1ファイル。API を変更したら必ず更新すること)
 - `docs/notes/` — 学習メモ(セッションで解説した内容の記録。1 トピック 1 ファイル)
 - `docs/superpowers/specs/` — 設計書(スペック)置き場(アプリ設計は `2026-07-19-app-design-overview.md`、用語集はリポジトリ直下 `CONTEXT.md`)
@@ -58,5 +59,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 - 開発環境: `docker compose up -d`
 - フロント: `cd frontend && npm run dev` / SSG ビルドは `npm run generate`
 - バックエンド: `cd backend && ./gradlew bootRun` / ビルドは `./gradlew build`
+- **テスト: リポジトリ直下で `docker compose exec backend sh ./gradlew test`**(クラスを絞るなら `--tests '*PostRepositoryTest*'`、キャッシュを無視するなら `--rerun-tasks`)
+  - テストは開発 DB(`app`)ではなく**専用 database `app_test`** を使う(`build.gradle` の `test` タスクが `DB_NAME` を上書きしている)。**`app_test` は初回に手動作成が必要**。手順とテスト方針 → `docs/test/README.md`
 - バックエンドの Java 開発は **VS Code の Dev Container**(`.devcontainer/`)で backend コンテナに入って行う(保存で自動コンパイル + devtools 再起動。ホストに JDK 不要)。依存(`build.gradle`)変更時は `docker compose restart backend`。詳細 → `docs/notes/java-dev-env-comparison.md`
 - **Claude が backend の Java を編集したら、編集後にリポジトリ直下で `docker compose exec backend sh ./gradlew classes` を実行して反映すること**(ホスト側からの編集は自動コンパイルされない。devtools がコンパイル結果を拾って再起動する。依存変更時は `docker compose restart backend`)
