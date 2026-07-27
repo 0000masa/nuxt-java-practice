@@ -69,6 +69,7 @@ npm の tarball、composer の ZIP、Java の jar（中身は ZIP 形式）、Li
 ## このリポジトリでの注意点
 
 - コマンドは `backend/` の中で実行する前提。`-d baseDir=.` を付けているので、展開すると `backend/build.gradle`、`backend/src/...` のように**直下に**ファイルが並ぶ。付け忘れると `backend/demo/...` のように余計な一段が挟まる
+- ただし **`baseDir=.` には副作用がある**（`gradlew` の実行権限が落ちる → 下の「落とし穴」）。`-d baseDir=backend` としてリポジトリ直下で実行し、`backend/` ごと受け取る書き方なら副作用を避けられる
 - `dependencies` の 5 つは `docs/setup/backend.md` の依存関係リストと一対一対応: `web` = Spring Web（REST API + 組み込み Tomcat）、`data-jpa` = DB アクセス、`mysql` = MySQL ドライバ、`validation` = リクエスト検証、`devtools` = 開発時の自動再起動
 
 ## 落とし穴
@@ -78,6 +79,7 @@ npm の tarball、composer の ZIP、Java の jar（中身は ZIP 形式）、Li
 - **zip と tar.gz は役割としては同じ「アーカイブ」。** 圧縮方式が違うだけで、npm 系は tar.gz、Java 系は zip（jar も中身は zip）という文化圏ごとの慣習
 - **既にファイルがあるディレクトリで展開すると混ざる。** `unzip` は既存ファイルとマージするので、`backend/` が空の状態で実行するのが安全
 - **依存の後付けはコマンドではなくファイル編集。** → [gradle-dependencies.md](./gradle-dependencies.md)
+- **`-d baseDir=.` を付けると `gradlew` の実行権限が失われる。** Initializr は本来ラッパースクリプトだけ 755 で ZIP に入れるが、`baseDir=.` のときだけ内部の名前比較が外れて 644 になる（Initializr 側の不具合。実測と原因コード → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)）。**`baseDir=.` を使うなら生成直後に `chmod +x gradlew` すること。** このリポジトリは付け忘れたままコミットされているため、全箇所で `sh ./gradlew` と書いて回避している
 
 ## 用語集
 
