@@ -46,8 +46,11 @@ docker compose exec backend sh ./gradlew test
 # クラスを絞る
 docker compose exec backend sh ./gradlew test --tests '*PostRepositoryTest*'
 
-# メソッド単位で絞る(日本語メソッド名もそのまま指定できる)
-docker compose exec backend sh ./gradlew test --tests '*PostControllerTest.投稿作成は201を返す'
+# メソッド単位で絞る
+docker compose exec backend sh ./gradlew test --tests '*PostRepositoryTest.returnsNewestFirst'
+
+# @Nested の中のメソッドを絞る(内部クラスは $ でつなぐ。$ を展開させないためシングルクォート必須)
+docker compose exec backend sh ./gradlew test --tests '*PostControllerTest$CreatePost.returnsBadRequestWhenBodyIsBlank'
 
 # 前回から変更が無くても必ず走らせ直す
 docker compose exec backend sh ./gradlew test --rerun-tasks
@@ -60,6 +63,42 @@ sh ./gradlew test
 ```
 
 `sh` を付けているのは、`gradlew` に実行権限が無いため(git 上のファイルモードが `100644`)。なぜ 644 になっているのか、権限がどこに保存されているのかの仕組み → [docs/notes/file-permissions-and-exec-bit.md](../notes/file-permissions-and-exec-bit.md)
+
+## 命名規約
+
+**メソッド名は英語の camelCase、テストの内容は `@DisplayName` に日本語の 1 文で書く。**
+
+```java
+@Test
+@DisplayName("本文が 280 文字を超えると 400 を返す")
+void returnsBadRequestWhenBodyExceedsMaxLength() throws Exception {
+```
+
+- **メソッド名に日本語を使わない。** Java の識別子に日本語を使うのは文法上は合法で、日本の現場では実際によく見かける。ただしこれは日本ローカルの慣習で、Spring Boot / JUnit のどちらの公式作法でもない。JUnit 5 が「テスト名を自然言語で書きたい」に対して用意している公式の機能が `@DisplayName` なので、そちらを使う
+- **メソッド名は動詞から始める。`should` は付けない。** Spring Framework / JUnit 5 本体のテストコードに合わせている。`@DisplayName` がすでに「〜を返す」と主張しているので、名前で二度主張しない
+- **`@DisplayName` は日本語で書く。** このリポジトリのドキュメントは日本語なので、テストが何を保証しているかも日本語で読めるようにする。メソッド名と 2 箇所を同期させる責任が生まれる点には注意する(片方だけ直さない)
+
+### `@Nested` を使う基準
+
+**1 つのテストクラスが検証対象を 2 つ以上持つときだけ `@Nested` で分ける。** 1 つしかないならクラス自体がグループなので、フラットに書く。
+
+```java
+@WebMvcTest(PostController.class)
+class PostControllerTest {
+
+	@Nested
+	@DisplayName("POST /api/posts")
+	class CreatePost { ... }
+
+	@Nested
+	@DisplayName("GET /api/posts")
+	class GetTimeline { ... }
+}
+```
+
+現状では `PostControllerTest` だけが該当する(`CategoryControllerTest` は `GET /api/categories` のみ、`PostRepositoryTest` は `findTimeline` のみ)。
+
+トップレベルのクラスを分ける手もあるが、`@WebMvcTest` と `@MockitoBean` の定型宣言がクラスごとに複製される。`@Nested` なら外側の `@BeforeEach` とフィールドをそのまま共有でき、グループ固有の前提だけ内側の `@BeforeEach` に足せる。
 
 ### 結果の見方
 
