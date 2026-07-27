@@ -41,7 +41,12 @@ curl https://start.spring.io/starter.zip \
   -d baseDir=. \
   -o starter.zip
 unzip starter.zip && rm starter.zip
+chmod +x gradlew    # baseDir=. のとき Initializr が gradlew に実行権限を付けないため(後述)
 ```
+
+**`chmod +x gradlew` を忘れないこと。** Spring Initializr は本来ラッパースクリプトを 755 で ZIP に入れるが、**`-d baseDir=.` を指定したときだけ 644 になる**（Initializr 側の不具合。`baseDir` を付けない／`backend` のような名前を指定した場合は 755 になる）。付け忘れると `./gradlew` が `Permission denied` で落ちる。
+
+このリポジトリは付け忘れた状態でコミットされているため、全箇所で `sh ./gradlew` と書いて回避している。仕組みと実測 → [docs/notes/file-permissions-and-exec-bit.md](../notes/file-permissions-and-exec-bit.md)
 
 ## 基本設定
 

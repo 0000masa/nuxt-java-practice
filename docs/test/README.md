@@ -59,7 +59,7 @@ docker compose exec backend sh ./gradlew test --rerun-tasks
 sh ./gradlew test
 ```
 
-`sh` を付けているのは、`gradlew` に実行権限が無いため(git 上のファイルモードが `100644`)。
+`sh` を付けているのは、`gradlew` に実行権限が無いため(git 上のファイルモードが `100644`)。なぜ 644 になっているのか、権限がどこに保存されているのかの仕組み → [docs/notes/file-permissions-and-exec-bit.md](../notes/file-permissions-and-exec-bit.md)
 
 ### 結果の見方
 
@@ -140,7 +140,7 @@ tasks.named('test') {
 
 - **`app_test` を作らずにテストを実行すると全部落ちる。** `Unknown database 'app_test'`。初回セットアップを 1 回打つ
 - **`UP-TO-DATE` はテストが走っていない印。** `--rerun-tasks` を付ける
-- **`sh ./gradlew` の `sh` を省略すると `Permission denied`。** `gradlew` に実行権限が無い
+- **`sh ./gradlew` の `sh` を省略すると `Permission denied`。** `gradlew` に実行権限が無い(→ [file-permissions-and-exec-bit.md](../notes/file-permissions-and-exec-bit.md))
 - **`src/test/resources/application.yml` を作ってはいけない。** 本体の設定を丸ごと置き換えてしまう(上記「設定の場所」参照)
 - **`docker compose down -v` は開発 DB も `app_test` も消す。** 消した後は初回セットアップをやり直す
 - **`app_test` にデータが残っていても気にしなくてよい。** ロールバックされるので普段は空。おかしくなったら `DROP DATABASE app_test` して作り直せば、Flyway が全部作り直す
