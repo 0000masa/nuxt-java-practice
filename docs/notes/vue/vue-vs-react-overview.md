@@ -266,6 +266,7 @@ frontend/
 
 ## 関連
 
+- スタイルの書き方(`<style scoped>` と Tailwind)→ [styling-scoped-css-and-tailwind.md](./styling-scoped-css-and-tailwind.md)
 - ディレクトリ規約・命名規則の一覧 → [../../development/frontend-structure-best-practices.md](../../development/frontend-structure-best-practices.md)
 - SSG を採用した理由 → [../../tech-stack/README.md](../../tech-stack/README.md)
 - Nuxt の環境構築手順 → [../../setup/frontend.md](../../setup/frontend.md)
