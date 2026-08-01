@@ -9,6 +9,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 import java.time.LocalDateTime;
 
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 // Spring Boot 4 でテストアノテーションのパッケージが技術別モジュールに移動している
@@ -22,6 +24,10 @@ import com.example.app.post.dto.PostResponse;
 /**
  * Controller 層のバリデーションとレスポンス形式の検証。
  * Service はモックにし、Web 層(リクエスト変換・バリデーション・例外ハンドリング)だけを起動する。
+ * エンドポイントが複数あるので @Nested で分ける。
+ *
+ * <p>WebMvcTest / MockitoBean / MockMvc といった共通の仕組みの解説は
+ * CategoryControllerTest のコメントにまとめてある(ここでは重複させない)。
  */
 @WebMvcTest(PostController.class)
 class PostControllerTest {
@@ -32,53 +38,68 @@ class PostControllerTest {
 	@MockitoBean
 	PostService postService;
 
-	@Test
-	void 投稿作成は201を返す() throws Exception {
-		PostResponse response = new PostResponse(1L, "こんにちは", LocalDateTime.now(),
-				new PostResponse.UserSummary(1L, "dev_user", "開発ユーザー"),
-				new PostResponse.CategorySummary(1L, "雑談"));
-		when(postService.create(any())).thenReturn(response);
+	@Nested
+	@DisplayName("POST /api/posts")
+	class CreatePost {
 
-		mockMvc.perform(post("/api/posts")
-				.contentType(MediaType.APPLICATION_JSON)
-				.content("{\"body\":\"こんにちは\",\"categoryId\":1}"))
-				.andExpect(status().isCreated())
-				.andExpect(jsonPath("$.id").value(1))
-				.andExpect(jsonPath("$.user.username").value("dev_user"));
+		@Test
+		@DisplayName("投稿作成は 201 を返す")
+		void returnsCreatedForValidRequest() throws Exception {
+			PostResponse response = new PostResponse(1L, "こんにちは", LocalDateTime.now(),
+					new PostResponse.UserSummary(1L, "dev_user", "開発ユーザー"),
+					new PostResponse.CategorySummary(1L, "雑談"));
+			when(postService.create(any())).thenReturn(response);
+
+			mockMvc.perform(post("/api/posts")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"body\":\"こんにちは\",\"categoryId\":1}"))
+					.andExpect(status().isCreated())
+					.andExpect(jsonPath("$.id").value(1))
+					.andExpect(jsonPath("$.user.username").value("dev_user"));
+		}
+
+		@Test
+		@DisplayName("本文が空なら 400 とフィールドエラーを返す")
+		void returnsBadRequestWhenBodyIsBlank() throws Exception {
+			mockMvc.perform(post("/api/posts")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"body\":\"\",\"categoryId\":1}"))
+					.andExpect(status().isBadRequest())
+					.andExpect(jsonPath("$.fieldErrors.body").exists());
+		}
+
+		@Test
+		@DisplayName("本文が 280 文字を超えると 400 を返す")
+		void returnsBadRequestWhenBodyExceedsMaxLength() throws Exception {
+			String longBody = "あ".repeat(281);
+
+			mockMvc.perform(post("/api/posts")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"body\":\"" + longBody + "\",\"categoryId\":1}"))
+					.andExpect(status().isBadRequest())
+					.andExpect(jsonPath("$.fieldErrors.body").exists());
+		}
+
+		@Test
+		@DisplayName("カテゴリー未指定なら 400 を返す")
+		void returnsBadRequestWhenCategoryIdIsMissing() throws Exception {
+			mockMvc.perform(post("/api/posts")
+					.contentType(MediaType.APPLICATION_JSON)
+					.content("{\"body\":\"こんにちは\"}"))
+					.andExpect(status().isBadRequest())
+					.andExpect(jsonPath("$.fieldErrors.categoryId").exists());
+		}
 	}
 
-	@Test
-	void 本文が空なら400とフィールドエラーを返す() throws Exception {
-		mockMvc.perform(post("/api/posts")
-				.contentType(MediaType.APPLICATION_JSON)
-				.content("{\"body\":\"\",\"categoryId\":1}"))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.fieldErrors.body").exists());
-	}
+	@Nested
+	@DisplayName("GET /api/posts")
+	class GetTimeline {
 
-	@Test
-	void 本文が280文字を超えると400を返す() throws Exception {
-		String longBody = "あ".repeat(281);
-
-		mockMvc.perform(post("/api/posts")
-				.contentType(MediaType.APPLICATION_JSON)
-				.content("{\"body\":\"" + longBody + "\",\"categoryId\":1}"))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.fieldErrors.body").exists());
-	}
-
-	@Test
-	void カテゴリー未指定なら400を返す() throws Exception {
-		mockMvc.perform(post("/api/posts")
-				.contentType(MediaType.APPLICATION_JSON)
-				.content("{\"body\":\"こんにちは\"}"))
-				.andExpect(status().isBadRequest())
-				.andExpect(jsonPath("$.fieldErrors.categoryId").exists());
-	}
-
-	@Test
-	void タイムラインのlimit上限は50() throws Exception {
-		mockMvc.perform(get("/api/posts").param("limit", "51"))
-				.andExpect(status().isBadRequest());
+		@Test
+		@DisplayName("limit の上限は 50")
+		void returnsBadRequestWhenLimitExceedsMax() throws Exception {
+			mockMvc.perform(get("/api/posts").param("limit", "51"))
+					.andExpect(status().isBadRequest());
+		}
 	}
 }
