@@ -96,12 +96,13 @@ ApplicationTests > contextLoads() FAILED
 
 以前は `backend/src/test/resources` も `build.gradle` の上書きも無かったため、テストは**本体の `application.yml` をそのまま使っていました**。つまり `DB_NAME=app`、開発中の DB そのものにつないでいたことになります。
 
-`PostRepositoryTest` はそれを前提に、かなり大胆なことをしています（このコード自体は今も変わっていません）。
+`PostRepositoryTest` はそれを前提に、かなり大胆なことをしていました（`deleteAll()` を呼ぶ構造は今も同じで、接続先とコメントだけが変わっています）。
 
 ```java
 // PostRepositoryTest.java:47-49 付近
 @BeforeEach
 void setUp() {
+	// ↓ 当時のコメント（現在は app_test 前提の内容に修正済み）
 	// 開発 DB を共用するため、既存の投稿はトランザクション内で消して前提を固定する(ロールバックで元に戻る)
 	postRepository.deleteAll();
 ```
