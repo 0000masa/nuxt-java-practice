@@ -7,6 +7,8 @@ Web 調査(Nuxt 公式ドキュメント + コミュニティ記事)の結果を
 
 > **注記(2026-07-19)**: 本リポジトリの frontend は **Nuxt 4**(`nuxt: ^4.4.8`)。本書は Nuxt 3 時点の調査だが、考え方はそのまま通用する。主な違いは、アプリ側コード(`pages/` `components/` `composables/` `layouts/` `middleware/` `plugins/` `utils/` `stores/` `types/` など)を **`app/` ディレクトリ配下**に置くこと。`public/` `server/` `shared/` `nuxt.config.ts` はルート直下のまま。
 
+> **本書は「どこに何を置くか」の資料。** Vue / Nuxt のコードそのものの読み方(`ref` / `computed` / `v-if` / `useFetch` などが何をしているか)は、React・Next.js 経験者向けの学習メモ [docs/notes/vue/](../notes/vue/vue-vs-react-overview.md) にまとめてある。
+
 ---
 
 ## 1. Nuxt 3 の標準ディレクトリ構成と役割
