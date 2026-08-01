@@ -79,6 +79,8 @@ Nuxt は **`composables/` の直下(トップレベル)だけ**を走査する�
 
 `use` プレフィックス + camelCase。`composables/useAuth.ts` が `useAuth()` を export。
 
+これは **Vue の慣習であって、フレームワークが強制するものではない**(React の `eslint-plugin-react-hooks` のように lint が名前でフックを判定する仕組みは Vue に無い)。Nuxt の自動インポートも名前ではなく**置き場所**で判定するため、`use` の有無は条件に入らない。慣習に従う理由と、`use` が付いていても呼び出し制約の有無は保証されないことについては → [../notes/vue/composables.md](../notes/vue/composables.md)
+
 ### API 呼び出しロジックの置き場所
 
 **「API 通信は composables に集約する」のが定石**。ページ/コンポーネントに `$fetch` を直書きせず、`useUsers()` のようなドメイン別 composable にまとめる。
