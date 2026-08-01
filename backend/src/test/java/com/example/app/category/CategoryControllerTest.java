@@ -121,8 +121,12 @@ class CategoryControllerTest {
 		// 【準備】モックへの台本渡し。when(A).thenReturn(B) は「A が呼ばれたら B を返せ」と、英語の語順のまま読む。
 		// List.of(...) … Java 9 以降の書き方で、中身を変更できないリストをその場で作る。
 		//   new ArrayList<>() して add を並べるより短く、テストデータ作りに向いている。
-		// 1L の L … この数値が int ではなく long(より大きい整数型)であることを示す印。
-		//   CategoryResponse の id が Long 型なので、それに合わせている。
+		// 1L の L … この数値が int ではなく long(より大きい整数型)であることを示す印。CategoryResponse の
+		//   id が Long 型で、L を外して 1 と書くとコンパイルエラーになる(1 は int リテラルであり、
+		//   int → Long は「int → long の拡大変換」+「long → Long のボックス化」の 2 段になる。Java は
+		//   引数渡しでこの 2 段を自動適用しない)。1L なら long → Long の 1 段で済むので通る。
+		//   そもそも id が Long なのは DB のカラムが BIGINT だから。詳しくは
+		//   → docs/notes/java/syntax/numeric-literals-and-integer-types.md
 		// CategoryResponse は record(→ CategoryResponse.java:5)。record は「データを入れるだけの箱」を
 		//   1 行で定義する Java 16 以降の記法で、コンストラクタ・id()/name() の取得メソッド・equals・toString が
 		//   自動生成される。中身を後から変更できない(イミュータブル)ので、API のレスポンス用データに向く。
