@@ -4,6 +4,8 @@
 
 > 補足: 現行の `nuxi`(3.37 時点)が生成するのは **Nuxt 4** ベースのプロジェクト。本リポジトリのドキュメントで「Nuxt 3」と書いていた箇所は Nuxt 4 に読み替える(SSG や devProxy などこのリポジトリの方針はどちらでも同じ)。
 
+> Vue / Nuxt が初めてなら、コードの読み方は [docs/notes/vue/](../notes/vue/vue-vs-react-overview.md) にまとめてある(React / Next.js との比較つき)。
+
 ## 前提ツール
 
 | ツール | バージョン | 備考 |
