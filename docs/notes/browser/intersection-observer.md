@@ -59,6 +59,8 @@ observer.disconnect()         // 全部まとめて監視解除
 observer.takeRecords()        // 溜まっている未通知の変化を取り出す(あまり使わない)
 ```
 
+**`new` と `observe()` は役割が違う。** `new IntersectionObserver(...)` が作るのは「何が起きたら何を呼ぶか」というルールを持ったオブジェクトだけで、**この時点では 1 つも監視していない**。実際に監視が始まるのは `observe(element)` を呼んだ瞬間。「道具を用意する」と「対象を登録する」が 2 段階に分かれている。
+
 **1 つの observer が複数の要素を監視できる。** だからコールバックの第 1 引数が配列になっている。渡ってくるのは「今回状態が変わった要素の分だけ」で、監視中の全要素ではない。
 
 ### コンストラクタの第 2 引数(`options`)
@@ -133,7 +135,7 @@ onBeforeUnmount(() => observer?.disconnect())
 }
 ```
 
-読むときのポイント。
+### 読むときのポイント
 
 **`observer` を `ref` にしていない。** 画面表示に使わない値だから。リアクティブにする必要のない値を `ref` で包む理由はない。ただし `onMounted` と `onBeforeUnmount` の両方から触るため、`onMounted` の外側(setup のスコープ)に置く必要がある。
 
@@ -153,6 +155,87 @@ async function loadMore() {
 
 **ページサイズは 20 件。** `fetchTimeline` に `limit` を渡していないので、バックエンド側の `@RequestParam(defaultValue = "20")` が効く。この 20 という数字が、後述の「1 ページで画面が埋まらないと止まる」問題を実質的に回避している。
 
+### `if (sentinel.value) observer.observe(sentinel.value)` を分解する
+
+`onMounted` の中でいちばん分かりにくい 1 行。**ここが実際に監視を開始している行**で、3 つの部分に分けて読む。
+
+#### `sentinel.value` — 監視したい DOM 要素
+
+```ts
+const sentinel = ref<HTMLElement | null>(null)
+```
+
+```vue
+<div ref="sentinel" class="sentinel" />
+```
+
+テンプレートに `ref="sentinel"`(コロンなしの文字列)と書くと、**Vue がマウント時に同名の `ref` へ実際の DOM 要素を入れる**。これがテンプレート ref。値が入るタイミングは決まっている。
+
+| 時点 | `sentinel.value` |
+|---|---|
+| `<script setup>` の実行中 | `null`(まだ DOM が存在しない) |
+| `onMounted` の中 | **`<div class="sentinel">` の実要素** |
+| `onBeforeUnmount` の中 | **まだ実要素が入っている** |
+| `onUnmounted` 以降 | `null` に戻る |
+
+3 行目と 4 行目の差が、このリポジトリが後始末に `onUnmounted` ではなく `onBeforeUnmount` を選んでいる理由でもある(→ [lifecycle-and-watch.md](../vue/lifecycle-and-watch.md) §1)。
+
+React の `useRef` + `ref={sentinel}` と同じ仕組みで、取り出し方が `.current` ではなく `.value` になっているだけ。
+
+#### `observer.observe(...)` — 監視対象として登録する
+
+§3 のとおり、`new` した時点ではまだ何も監視していない。
+
+```ts
+const observer = new IntersectionObserver(callback)  // ルールを決めた。監視対象はゼロ
+observer.observe(sentinel.value)                     // この要素を見張れ、と登録する
+```
+
+この行を実行した瞬間から交差の監視が始まり、§3「その 1」の初期観測によって、**次の更新サイクルでコールバックが 1 回届く**。マウント直後は投稿が 0 件で番兵が画面内にあるため、その 1 回目は `isIntersecting: true` で来る。
+
+#### `if (sentinel.value)` — `null` チェック
+
+理由が 2 つある。
+
+**型を絞り込むため(コンパイル時)。** `sentinel` の型は `HTMLElement | null` なので、そのまま渡すと「`null` かもしれない値を `Element` の引数に渡している」と TypeScript が止める。`if` で囲むとそのブロック内では `HTMLElement` に絞り込まれる(型ガード)。
+
+**例外を避けるため(実行時)。** `observe(null)` は無視されるのではなく `TypeError` を投げる。
+
+```
+Failed to execute 'observe' on 'IntersectionObserver': parameter 1 is not of type 'Element'.
+```
+
+**今のコードでは `null` にはならない。** 番兵はテンプレートに無条件で置かれていて、`onMounted` の時点では必ず要素が入っているため。ただし条件付き表示にした瞬間に `null` があり得るようになる。
+
+```vue
+<div v-if="!reachedEnd" ref="sentinel" class="sentinel" />   <!-- こうすると null になりうる -->
+```
+
+つまりこの `if` は「起きないケースへの保険」であり、同時に型エラーを消すための必須の記述でもある。
+
+#### まとめ
+
+```ts
+onMounted(() => {
+  loadMore()                                    // 1 ページ目を取りにいく
+  observer = new IntersectionObserver(...)      // 「交差したら loadMore」というルールを作る
+  if (sentinel.value)                           // 要素が取れていることを確認して
+    observer.observe(sentinel.value)            // 監視対象に登録 = 監視開始
+})
+
+onBeforeUnmount(() => observer?.disconnect())   // 登録を全部外す
+```
+
+**`observe()` と `disconnect()` が対**になっている。この対応が崩れたときに何が起きるかが §6。
+
+なお Vue 3.5 以降はテンプレート ref に専用の関数がある。`ref(null)` と `ref="名前"` の暗黙の紐づけをやめ、どの名前と対応するかを引数で明示する書き方。
+
+```ts
+const sentinel = useTemplateRef('sentinel')
+```
+
+このリポジトリは従来の書き方のままだが、新しく書くならこちらが推奨されている。
+
 ## 5. React で書くと何が変わるか
 
 同じものを React で書くとこうなる。
@@ -166,7 +249,7 @@ useEffect(() => {
     if (entries[0]?.isIntersecting) loadMore()
   })
   if (sentinel.current) observer.observe(sentinel.current)
-  return () => observer.disconnect()   // 後始末は return する
+  return () => observer.disconnect()   // 破棄時 + 依存が変わって再実行される直前に走る
 }, [])
 ```
 
@@ -186,6 +269,8 @@ useEffect(() => {
 | 後始末忘れの検出 | **されない** | **開発時の StrictMode が炙り出す** |
 
 前半 4 行は書き方の違いにすぎない。効いてくるのは最後の 2 行。
+
+なお `useEffect` の `return` が走るのは**アンマウント時だけではない**。依存が変わってエフェクトが再実行されるときも、その直前に走る。上の例が「アンマウント時だけ」に見えるのは依存配列が `[]` だからで、`return` の性質ではない(→ [lifecycle-and-watch.md](../vue/lifecycle-and-watch.md) §1「`useEffect` の return はいつ走るのか」)。この 2 役が、Vue では `onBeforeUnmount` と `onWatcherCleanup` の 2 つに分かれている。
 
 ### 後始末が実行される保証の強さ
 
@@ -271,6 +356,8 @@ W3C の仕様にこう書かれている。
 - **root** — 交差判定の基準になる領域。既定はビューポート
 - **threshold(しきい値)** — 対象の何割が見えたら通知するかの境界。この境界を跨いだときにだけコールバックが呼ばれる
 - **初期観測** — `observe()` を呼んだ対象に対して、次の更新サイクルで必ず 1 回通知が届く仕組み
+- **テンプレート ref** — テンプレートの `ref="名前"` で DOM 要素を取得する Vue の仕組み。React の `useRef` + `ref={}` に相当
+- **型ガード** — `if (x)` などで、その先のブロックの型を TypeScript に絞り込ませる書き方
 - **強制同期レイアウト** — 保留中のレイアウト計算をその場で完了させること。`getBoundingClientRect()` などが引き起こし、頻発すると描画が詰まる
 - **detached element** — DOM ツリーから取り除かれたのに、JavaScript から参照が残っていて回収されていない要素
 - **後始末(cleanup)** — 登録したものを解除する処理。書かないとメモリリークや二重実行の原因になる
