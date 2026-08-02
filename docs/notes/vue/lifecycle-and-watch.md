@@ -105,7 +105,75 @@ onMounted(async () => {
 | `onUnmounted` | 破棄の直後 | 走らない |
 | `onErrorCaptured` | 子孫でエラーが起きたとき | 走る |
 
-後始末は `onBeforeUnmount` と `onUnmounted` のどちらでも書けるが、**DOM や子コンポーネントにまだ触れる `onBeforeUnmount` のほうが安全**で、このリポジトリもそちらを使っている。
+後始末は `onBeforeUnmount` と `onUnmounted` のどちらでも書けるが、**DOM や子コンポーネントにまだ触れる `onBeforeUnmount` のほうが安全**で、このリポジトリもそちらを使っている。テンプレート ref も、`onBeforeUnmount` の時点ではまだ要素が入っていて、`onUnmounted` 以降は `null` に戻る。
+
+### コンポーネント破棄はいつ起きるか
+
+「破棄(アンマウント)」とは、**Vue がそのコンポーネントのインスタンスを捨て、対応する DOM 要素を取り除くこと**。`onBeforeUnmount` に書いた後始末が実際に走るのはこの瞬間なので、「いつ起きるのか」を具体的に押さえておく。
+
+| 何が起きたか | 破棄されるか | このリポジトリの例 |
+|---|---|---|
+| `<NuxtLink>` / `navigateTo()` によるページ遷移 | **される** | 投稿本文をクリックして `/posts/:id` へ移動 → `index.vue` が破棄 |
+| `v-if` が `false` になる | **される** | — |
+| `v-for` のリストから項目が消える | **される** | 投稿を削除して `PostCard` が消える |
+| 親コンポーネントが破棄される | **される**(子孫まで連鎖) | ページが変わればその中の `PostCard` も全部 |
+| 開発中のホットリロード(HMR) | **される** | ファイルを保存したとき |
+| `<KeepAlive>` に包まれている | **されない** | このリポジトリでは未使用 |
+| **ブラウザのリロード(F5)** | **されない**(後述) | |
+| **タブを閉じる / 別ドメインへ移動** | **されない**(後述) | |
+
+**このリポジトリで実際に走っている場面**はこれ。
+
+```vue
+<!-- components/post/Card.vue -->
+<NuxtLink v-else :to="`/posts/${post.id}`" class="post-body-link">
+```
+
+タイムラインで投稿本文をクリックすると `/posts/:id` へ遷移し、そこで `index.vue` が破棄されて `onBeforeUnmount(() => observer?.disconnect())` が走る。詳細ページから「← タイムラインへ戻る」で戻ると、**`index.vue` は同じものが復元されるのではなく、新しく作り直される**。だから積み上げた投稿もスクロール位置も初期化され、`onMounted` がもう一度走って新しい observer が作られる。
+
+`<KeepAlive>` で包んだ場合だけ例外で、コンポーネントは破棄されずに退避される。この場合 `onBeforeUnmount` / `onMounted` は呼ばれず、代わりに `onDeactivated` / `onActivated` が呼ばれる。「戻ったときにスクロール位置と投稿を保ちたい」となったら選択肢に入るが、そのときは observer の後始末も `onDeactivated` 側へ移すことになる。
+
+#### ブラウザがページを捨てるとき
+
+上の表の下 2 行が誤解しやすい。**リロード・タブを閉じる・別ドメインへ移動といった操作では、`onBeforeUnmount` は呼ばれない。**
+
+理由は、**JavaScript のランタイムごと消えるから**。Vue が「これから破棄します」と通知する余地がない。SPA 内のページ遷移は「JS は生きたまま、コンポーネントだけ差し替わる」のに対し、ブラウザのページ遷移は「舞台ごと片付ける」動きになる。
+
+**そしてそれで問題ない。** メモリも DOM も observer も、まとめて破棄されるため。`disconnect()` が必要なのは、**JS が生き続けたままコンポーネントだけ入れ替わる SPA 遷移**のほうだけ、ということになる。
+
+ではブラウザ離脱時に何かしたい場合は? **それは Vue のライフサイクルの外**で、ブラウザのイベントとして別に用意されている。
+
+| イベント | 用途 |
+|---|---|
+| `beforeunload` | 未保存の変更があるときに、離脱の確認ダイアログを出す |
+| `pagehide` | ページが非表示になるとき。`beforeunload` より発火が確実 |
+| `visibilitychange` | タブが裏に回ったときにも発火する。**自動保存にはこれが最も確実** |
+
+`beforeunload` で確認ダイアログを出す場合はこう書く。
+
+```ts
+function confirmLeave(event: BeforeUnloadEvent) {
+  event.preventDefault()
+  event.returnValue = true   // 古いブラウザ向けの互換指定
+}
+
+onMounted(() => window.addEventListener('beforeunload', confirmLeave))
+onBeforeUnmount(() => window.removeEventListener('beforeunload', confirmLeave))
+```
+
+**`addEventListener` した以上、`onBeforeUnmount` で `removeEventListener` する必要がある。** ここでも「登録したものは自分で外す」が効いてくる。
+
+`beforeunload` には注意点が 3 つある。
+
+**メッセージは指定できない。** かつては任意の文言を出せたが、悪用されたため廃止された。いまはブラウザ固定の文言しか出ない。
+
+**ユーザーがページを一度も操作していないと、ダイアログは出ない。** クリックやキー入力などの操作(sticky activation)が必要という仕様。「操作していない = 失われる入力もない」という理屈で、ダイアログを出す正当な理由がないとみなされる。
+
+**Firefox では、`beforeunload` のリスナがあるだけでそのページが bfcache に載らなくなる。** bfcache はブラウザバックで前のページを瞬時に復元する仕組みで、これが効かなくなると戻る操作が目に見えて遅くなる。**常時登録するのではなく、未保存の変更があるときだけ登録して、なくなったら外す**のが推奨されている。
+
+自動保存が目的なら `beforeunload` ではなく `visibilitychange` を使うほうがよい。モバイルではタブを閉じても `beforeunload` や `pagehide` が発火しないことがあるが、`visibilitychange`(非表示になったとき)は確実に来る。
+
+このリポジトリでは投稿フォームに下書き保存がないので、いまのところ出番はない。
 
 ### 呼ぶ場所の制約
 
@@ -269,6 +337,7 @@ React の公式ドキュメントに "You Might Not Need an Effect" という章
 - **オブジェクトの中身の変化を追えると思う。** `{ deep: true }` が要る。
 - **`await` の後でライフサイクル関数を呼ぶ。** 登録されない。`<script setup>` のトップレベルで呼ぶ。
 - **`onMounted` がサーバーでも走ると思う。** 走らない。逆に言えば、`window` / `document` / `localStorage` を触ってよい場所。
+- **ブラウザを閉じたら `onBeforeUnmount` が走ると思う。** 走らない。JS のランタイムごと消えるため Vue は通知できない。走るのは SPA 内のページ遷移や `v-if` による破棄のとき。ブラウザ離脱時に何かしたいなら `beforeunload` / `visibilitychange`。
 - **後始末を書き忘れる。** `IntersectionObserver` / `addEventListener` / `setInterval` は必ず `onBeforeUnmount` で解除する。React の `StrictMode` のような「後始末忘れを炙り出す仕組み」が Vue にはないため、書き忘れても開発中は何も起きない → [intersection-observer.md](../browser/intersection-observer.md) §6。
 - **何でも `watch` にする。** §4 のとおり、イベントハンドラで書けるならそちらが読みやすい。
 - **リアクティブでなくてよい値を `ref` にする。** `index.vue` の `observer` のように、画面表示に関係しない値は素の変数でよい。
@@ -277,6 +346,9 @@ React の公式ドキュメントに "You Might Not Need an Effect" という章
 
 - **ライフサイクル関数(ライフサイクルフック)** — コンポーネントの生成・更新・破棄の各段階で呼ばれる関数。`onMounted` など
 - **マウント** — コンポーネントが実 DOM に載ること。**アンマウント**はその逆で、DOM から取り除かれること
+- **SPA 内遷移** — JavaScript のランタイムを維持したまま、表示するコンポーネントだけを差し替えるページ移動。`<NuxtLink>` や `navigateTo()` がこれ。ブラウザのリロードとは別物
+- **bfcache(back/forward cache)** — ブラウザバック・フォワードで前のページを瞬時に復元するためにブラウザが保持する仕組み
+- **sticky activation** — ユーザーがそのページを一度でも操作したという状態。確認ダイアログなど、一部の機能はこれを満たさないと動かない
 - **番兵(sentinel)** — 「ここまで来た」を検出するためだけに置く目印の要素。このリポジトリでは無限スクロールの末尾に置いた 1px の div
 - **`watch`** — 指定した値の変化に反応して処理を実行する関数
 - **`watchEffect`** — 中で読んだ値を自動で依存として登録し、変化するたび再実行する関数
@@ -291,4 +363,6 @@ React の公式ドキュメントに "You Might Not Need an Effect" という章
 - 呼ぶ場所の制約(setup の同期実行中)→ [composables.md](./composables.md)
 - `[id].vue` が `onMounted` で取得している理由 → [data-fetching-and-ssg.md](./data-fetching-and-ssg.md)
 - Vue 公式「ウォッチャー」 https://ja.vuejs.org/guide/essentials/watchers
+- Vue 公式「ライフサイクルフック」 https://ja.vuejs.org/guide/essentials/lifecycle
+- MDN「beforeunload イベント」(ダイアログの制約と bfcache) https://developer.mozilla.org/ja/docs/Web/API/Window/beforeunload_event
 - React 公式「You Might Not Need an Effect」 https://ja.react.dev/learn/you-might-not-need-an-effect
