@@ -23,6 +23,7 @@
 | `app/posts/[id]/page.tsx` | `app/pages/posts/[id].vue` |
 | `app/[...slug]/page.tsx` | `app/pages/[...slug].vue` |
 | `app/layout.tsx`(ルート) | `app/app.vue` |
+| `app/posts/layout.tsx`(入れ子) | `app/pages/posts.vue` + `<NuxtPage />` |
 | `app/(group)/layout.tsx` | `app/layouts/*.vue` + `definePageMeta({ layout })` |
 | `app/loading.tsx` | (なし。自前で書く) |
 | `app/error.tsx` | `app/error.vue` |
@@ -51,7 +52,7 @@ app/pages/
     └── [id].vue       → /posts/:id
 ```
 
-Next の App Router では `app/posts/[id]/page.tsx` のようにディレクトリを掘って `page.tsx` を置いたが、**Nuxt はファイル名がそのまま URL 断片になる**。`posts/index.vue` と `posts.vue` の使い分けはあるが、基本は素直な対応。
+Next の App Router では `app/posts/[id]/page.tsx` のようにディレクトリを掘って `page.tsx` を置いたが、**Nuxt はファイル名がそのまま URL 断片になる**。基本は素直な対応で、迷うのは `posts/index.vue` と `posts.vue` の使い分けくらい(→ 後述)。
 
 | ファイル | URL |
 |---|---|
@@ -66,6 +67,76 @@ Next の App Router では `app/posts/[id]/page.tsx` のようにディレクト
 Nuxt は起動時に `pages/` を走査して、**vue-router のルート定義を自動生成**する。手で `<Route path=... />` を書くことはない。この点は Next と同じ。
 
 **`pages/` が存在しなければルーティング機能自体が無効になる**のも Nuxt の特徴で、単一ページのアプリなら `app.vue` だけで完結できる。
+
+### `posts/index.vue` と `posts.vue`
+
+どちらも `/posts` になるが、**役割が違う**。「子ルートがあるかどうか」で意味が変わる。
+
+**単独で置いたときは同じ。**
+
+```
+pages/posts.vue        → /posts
+pages/posts/index.vue  → /posts
+```
+
+**`pages/posts.vue` と `pages/posts/` ディレクトリが同時にあると、`posts.vue` は親ルート(子の共通の枠)になる。**
+
+```
+pages/
+├── posts.vue           ← 親。/posts 配下すべての外枠
+└── posts/
+    ├── index.vue       → /posts        ← posts.vue の中に描画される
+    └── [id].vue        → /posts/:id    ← 同じく posts.vue の中に描画される
+```
+
+このとき **`posts.vue` には `<NuxtPage />` が必須**。子を描画する差し込み口がなくなるため、書き忘れると子ページが表示されず Nuxt が警告を出す。
+
+```vue
+<!-- pages/posts.vue -->
+<template>
+  <div>
+    <h1>投稿</h1>
+    <nav><!-- /posts と /posts/:id で共通のタブなど --></nav>
+    <NuxtPage />         <!-- ここに index.vue や [id].vue が入る -->
+  </div>
+</template>
+```
+
+つまり **`posts.vue` は「`/posts` というページ」ではなく「`/posts/*` の共通の外枠」を作る仕組み**。単独で置いたときにページとして機能するのは、たまたま子がいないからにすぎない。
+
+Next.js にちょうど対応するものがある。
+
+| Nuxt | Next.js (App Router) |
+|---|---|
+| `pages/posts/index.vue` | `app/posts/page.tsx` |
+| `pages/posts/[id].vue` | `app/posts/[id]/page.tsx` |
+| **`pages/posts.vue`** | **`app/posts/layout.tsx`** |
+| 親の中の `<NuxtPage />` | `layout.tsx` の中の `{children}` |
+
+**`posts.vue` = 入れ子レイアウト**と読み替えれば、Next で `layout.tsx` を置くかどうかを考えるのと同じ判断になる。
+
+#### どちらを使うか
+
+**基本は `index.vue`。** 理由が 3 つ。
+
+**構成が一貫する。** `/posts` 配下のものが `posts/` ディレクトリに全部収まる。`posts.vue` と `posts/` が並ぶと関係するファイルが 2 か所に分かれる。
+
+**あとから増やすときに構造を変えなくてよい。** `posts.vue` 単独で始めると、`/posts/new` を足したくなった時点で `posts/` ディレクトリができ、そこで `posts.vue` が突然「親ルート」に変質する。`<NuxtPage />` を足さないと動かないのに、変質したこと自体に気づきにくい。
+
+**`<NuxtPage />` の要否を覚えなくて済む。** `index.vue` なら普通のページとして書くだけ。
+
+`posts.vue` を選ぶのは、**`/posts` と `/posts/:id` で共通の枠が欲しいと分かっているとき**だけ。両方の上部に同じタブを出す、サイドバーを共有する、といった場合に限られる。
+
+#### このリポジトリの現状
+
+```
+app/pages/
+├── index.vue          → /
+└── posts/
+    └── [id].vue       → /posts/:id
+```
+
+`posts/index.vue` も `posts.vue` もないため、**`/posts` は 404**。タイムラインが `/` にあるので、`/posts` という一覧ページを作っていない。
 
 ### Next にあって Nuxt にないもの
 
@@ -138,6 +209,29 @@ app.vue
      └─ <slot />
          └─ NuxtPage  → pages/index.vue
 ```
+
+### 補足: 親ルートページも外枠になる
+
+「2 段構え」は **Nuxt が「レイアウト」と呼んでいるもの**の話。実際に画面を包む枠は、これに加えてもう 1 つ増えることがある。§1 の親ルートページ(`pages/posts.vue`)がそれで、子ルートがあるとその外枠として振る舞う。
+
+```
+app.vue
+ └─ NuxtLayout           → layouts/default.vue
+     └─ <slot />
+         └─ NuxtPage     → pages/posts.vue        ← ページだが外枠として働く
+             └─ NuxtPage → pages/posts/[id].vue
+```
+
+ただしこれは **`layouts/` とは別の仕組み**(vue-router のネストルート)で、次の点が違う。
+
+| | `layouts/` のレイアウト | 親ルートページ |
+|---|---|---|
+| 実体 | `layouts/*.vue` | `pages/*.vue`(ページの一種) |
+| 差し込み口 | `<slot />` | `<NuxtPage />` |
+| 適用範囲 | ページ側が `definePageMeta({ layout })` で選ぶ | **URL の階層で自動的に決まる** |
+| 切り替え | できる | できない |
+
+**Nuxt の用語で「レイアウト」と言えるのは `layouts/` の中身だけ**なので、親ルートページを 3 つ目のレイアウトとは呼ばない。ただし**見た目の枠としては 3 重になる**ことは知っておく。使い分けは §1 を参照。
 
 ## 3. ルート情報の取り方
 
@@ -324,6 +418,8 @@ Nuxt にはリポジトリ直下の `server/` に API を書ける Nitro とい�
 - **`<NuxtLink>` に `href` を書く。** 属性名は `to`。
 - **`route.params.id` を数値として扱う。** 型は `string | string[]`。
 - **`pages/` を作らずにルーティングを期待する。** `pages/` が無いとルーティング自体が無効。
+- **`posts.vue` と `posts/` を並べて `<NuxtPage />` を書き忘れる。** 同名ファイルとディレクトリが揃うと `posts.vue` は親ルートに変わる。子ページが描画されなくなる → §1。
+- **一覧ページを `posts.vue` で作る。** 子が増えたときに親ルートへ変質する。素直に `posts/index.vue` にしておく。
 - **`app.vue` から `<NuxtPage />` を消す。** ページが描画されなくなる。
 - **`nuxt.config.ts` を変えて反映されない。** 開発サーバーの再起動が要る場合がある。
 - **`devProxy` が本番でも効くと思う。** 開発専用。本番は Spring Boot が同一オリジンで返す。
@@ -334,6 +430,8 @@ Nuxt にはリポジトリ直下の `server/` に API を書ける Nitro とい�
 
 - **ファイルベースルーティング** — ファイル配置からルート定義を自動生成する方式。Nuxt / Next 共通
 - **vue-router** — Vue の公式ルーターライブラリ。Nuxt が内部で使っている
+- **親ルートページ** — `pages/posts.vue` のように、同名ディレクトリの子ルートを `<NuxtPage />` で内包するページ。Next の入れ子 `layout.tsx` に相当する
+- **ネストルート** — ルートを親子関係で入れ子にする vue-router の仕組み。親のコンポーネントの中に子が描画される
 - **Nitro** — Nuxt のサーバーエンジン。開発サーバー・SSR サーバー・`server/` の API を担う。SSG では出力後に不要になる
 - **`compatibilityDate`** — その日付時点の既定挙動に固定する設定。フレームワーク更新による挙動変化を防ぐ
 - **`definePageMeta`** — ページにレイアウトやミドルウェアを指定するコンパイラマクロ
