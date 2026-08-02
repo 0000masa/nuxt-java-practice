@@ -9,7 +9,7 @@ React の `useEffect` に相当する機能を Vue で探すと、**用途ごと
 - **`useEffect` が 1 つで担っていた仕事を、Vue は 3 つ以上に分けている。** 依存配列の中身によって使う関数が変わる、と考えると対応づけやすい。
 - **依存配列は存在しない。** `watch` は監視対象を第 1 引数で明示し、`watchEffect` は実行時に自動収集する。
 - **`onMounted` はブラウザでしか走らない。** サーバー側の描画(SSR / SSG のビルド)では実行されない。このリポジトリが `[id].vue` で `onMounted` を使っているのはこの性質を利用している。
-- **後始末の書き方が違う。** `useEffect` は return で返したが、Vue は `onBeforeUnmount` を別に書くか、`watch` の中で `onWatcherCleanup()` を呼ぶ。
+- **後始末の書き方が違う。** `useEffect` の return **1 つ**が「次の実行の直前」と「アンマウント時」の 2 役を兼ねていたが、Vue はこれを `onWatcherCleanup()` と `onBeforeUnmount()` の **2 つ**に分けている。
 - **「値が変わったから何かする」より「イベントが起きたから何かする」を優先する。** React の "You Might Not Need an Effect" と同じ考え方で、このリポジトリのカテゴリー切り替えがその実例になっている。
 
 ---
@@ -22,8 +22,8 @@ React の `useEffect` に相当する機能を Vue で探すと、**用途ごと
 | `useEffect(fn, [x])` | `watch(x, fn)` | `x` が変わったとき(初回は走らない) |
 | `useEffect(fn, [x])` で初回も走らせたい | `watch(x, fn, { immediate: true })` | 初回 + `x` が変わったとき |
 | `useEffect(fn)`(依存配列なし) | `watchEffect(fn)` | 初回 + 中で読んだ値が変わったとき |
-| `useEffect` の return で後始末 | `onBeforeUnmount(fn)` | コンポーネント破棄の直前 |
-| 再実行のたびの後始末 | `watch` 内の `onWatcherCleanup(fn)` | 次の実行の直前と破棄時 |
+| `useEffect(fn, [])` の return | `onBeforeUnmount(fn)` | 破棄の直前(再実行がないため、ここだけ) |
+| `useEffect(fn, [x])` の return | `watch` 内の `onWatcherCleanup(fn)` | 次の実行の直前 + 破棄時 |
 | `useLayoutEffect` | `onMounted`(既定で DOM 更新後) | — |
 
 ## 1. `onMounted` / `onBeforeUnmount`
@@ -63,9 +63,51 @@ useEffect(() => {
     if (entries[0]?.isIntersecting) loadMore()
   })
   if (sentinel.current) observer.observe(sentinel.current)
-  return () => observer.disconnect()    // 後始末は return する
+  return () => observer.disconnect()    // 破棄時 + 依存が変わって再実行される直前に走る
 }, [])
 ```
+
+### `useEffect` の return はいつ走るのか
+
+対応関係を見る前に、ここを誤解しやすいので先に潰しておく。**`return` で返した関数は「アンマウント時だけ」に走るのではない。**
+
+> `useEffect` の cleanup は、**「次にそのエフェクトが実行される直前」と「アンマウント時」の 2 つのタイミング**で呼ばれる。
+
+依存配列に値が入っている場合を見ると分かる。
+
+```tsx
+useEffect(() => {
+  const id = setInterval(tick, delay)
+  return () => clearInterval(id)
+}, [delay])
+```
+
+`delay` が `1000` から `2000` に変わったときの順序。
+
+| # | 起きること |
+|---|---|
+| 1 | `delay` が変わって再レンダー |
+| 2 | **前回の cleanup が走る** → `clearInterval(古い id)` |
+| 3 | エフェクト本体が走る → `setInterval(tick, 2000)` |
+| 4 | 以降 `delay` が変わるたび 2〜3 の繰り返し |
+| 5 | アンマウント時に**最後の cleanup** が走る |
+
+**「片付けてから作り直す」を毎回やる**のが `useEffect` の設計で、登録と解除を同じ関数の中に書かせるのはそのため。片方だけ書き換えるとズレるので、対で書く構造になっている。
+
+上の `IntersectionObserver` の例が「アンマウント時だけ」に見えるのは、**依存配列が `[]` だから**。依存が二度と変わらない = エフェクトが再実行されない = 「次の実行の直前」が永遠に来ない。**一般ルールの特殊ケース**であって、`return` の性質そのものではない。
+
+(開発時の `StrictMode` だけは例外で、`[]` でも マウント → cleanup → マウント と 2 回走らせる。後始末の書き忘れを炙り出すための仕掛け → [intersection-observer.md](../browser/intersection-observer.md) §5)
+
+**この 2 役が、Vue では 2 つの別々の関数に分かれる。**
+
+| React の `return` の役割 | いつ | Vue の対応物 |
+|---|---|---|
+| 次の実行の直前に片付ける | 依存が変わったとき | `watch` 内の `onWatcherCleanup()`(→ §2) |
+| 最後に片付ける | アンマウント時 | `onBeforeUnmount()` |
+
+`onMounted` は再実行されないので、Vue には「次の実行の直前」という概念自体がない。その役割は `watch` 側に移っている。§0 の対応表が 2 行に分かれているのはこのため。
+
+### Vue と React の対応関係
 
 対応関係で押さえるところは 3 つ。
 
@@ -248,7 +290,7 @@ watch(keyword, (value) => {
 })
 ```
 
-`useEffect` の return と同じ役割。`onWatcherCleanup` は Vue 3.5 で追加された関数で、それ以前はコールバックの第 3 引数 `onCleanup` を使っていた(現在も使える)。
+`useEffect` の return が持つ 2 役のうち、**「次の実行の直前に片付ける」ほうがこれ**(→ §1「`useEffect` の return はいつ走るのか」)。`onWatcherCleanup` は Vue 3.5 で追加された関数で、それ以前はコールバックの第 3 引数 `onCleanup` を使っていた(現在も使える)。
 
 **`<script setup>` の中で作った `watch` は、コンポーネント破棄時に自動で停止する。** 手動で止めたいときは戻り値の関数を呼ぶ。
 
@@ -335,6 +377,7 @@ React の公式ドキュメントに "You Might Not Need an Effect" という章
 - **`watch` に `.value` を渡す。** `watch(user.name, fn)` は動かない。`watch(() => user.name, fn)`。
 - **`watch` が初回に走ると思う。** 走らない。`{ immediate: true }` が要る。
 - **オブジェクトの中身の変化を追えると思う。** `{ deep: true }` が要る。
+- **`useEffect` の return がアンマウント時だけ走ると思う。** 依存が変わって再実行されるたび、その直前にも走る。「破棄時だけ」に見えるのは依存配列が `[]` のときの特殊ケース → §1。
 - **`await` の後でライフサイクル関数を呼ぶ。** 登録されない。`<script setup>` のトップレベルで呼ぶ。
 - **`onMounted` がサーバーでも走ると思う。** 走らない。逆に言えば、`window` / `document` / `localStorage` を触ってよい場所。
 - **ブラウザを閉じたら `onBeforeUnmount` が走ると思う。** 走らない。JS のランタイムごと消えるため Vue は通知できない。走るのは SPA 内のページ遷移や `v-if` による破棄のとき。ブラウザ離脱時に何かしたいなら `beforeunload` / `visibilitychange`。
