@@ -305,10 +305,60 @@ export default defineNuxtConfig({
 | 項目 | 意味 |
 |---|---|
 | `compatibilityDate` | この日付時点の既定の挙動を使う、という固定。Nuxt / Nitro の破壊的変更から守るための仕組み。Next にはない |
-| `devtools` | ブラウザに Nuxt DevTools のパネルを出す |
+| `devtools` | ブラウザに Nuxt DevTools のパネルを出す(→ 後述) |
 | `css` | 全ページに読み込むグローバル CSS。`~` は `frontend/app/` を指すエイリアス |
 | `app.head` | 全ページ共通の `<title>` と `<html lang>` |
 | `nitro.devProxy` | **開発時だけ** `/api` へのリクエストを転送する |
+
+### Nuxt DevTools
+
+`devtools: { enabled: true }` で有効になるのは、**開発サーバー稼働中にブラウザ画面の下端に出る Nuxt アイコンのボタン**。押すとパネルが開き、フレームワークの内部を覗ける。`Shift + Alt + D`(Mac は `Shift + Option + D`)でも開閉する。
+
+ブラウザの開発者ツール(F12)とは別物で、**アプリの画面に重なって表示される Nuxt 専用の画面**。
+
+| タブ | 見えるもの |
+|---|---|
+| **Pages** | 全ルートの一覧。どのファイルが対応し、どのレイアウト・ミドルウェアが付いているか。URL を入力してマッチを試せる |
+| **Components** | 使っているコンポーネントの一覧と出どころ(自分のコード / Nuxt 組み込み / モジュール由来)。依存関係のグラフも出る |
+| **Imports** | 自動インポートされている関数の全一覧と、それぞれの出どころ・使用箇所 |
+| **Modules** | 入っている Nuxt モジュールの一覧 |
+| **Assets** | `public/` と `assets/` のファイル |
+| **Server Routes** | `server/` の API 一覧と、その場で叩けるリクエスト送信フォーム(このリポジトリでは空) |
+| **Payload** | `useState` / `useAsyncData` が持っている値 |
+| **Hooks / Plugins** | Nuxt のフックやプラグインの実行時間 |
+| **Terminals** | 開発サーバーの出力 |
+
+**このリポジトリで一番効くのは `Imports` タブ。** `ref` も `onMounted` も `useRoute()` も `usePosts()` も import せずに使えているが、このタブを開くと**登録されている関数が全部一覧で出て、どのファイル由来かも分かる**。自動インポートの正体がそのまま可視化される([composables.md](./composables.md) §5)。
+
+`Pages` タブは §1 の `posts.vue` / `posts/index.vue` の違いを確かめるのに使える。親ルートになっているかどうかがルート一覧に現れる。
+
+#### Vue DevTools とは別物
+
+紛らわしいが 2 つある。
+
+| | 何を見るもの | 形式 |
+|---|---|---|
+| **Vue DevTools** | コンポーネントの props / state / リアクティビティ、イベント | ブラウザ拡張 |
+| **Nuxt DevTools** | ルート、自動インポート、モジュール、ビルドなど**フレームワーク層** | Nuxt に同梱、画面内に表示 |
+
+Nuxt DevTools の中に Vue DevTools が統合されているので、実質こちらだけ開けば足りる(v4.0 からは Vite DevTools とも統合された)。
+
+#### Next.js に同等のものはない
+
+Next.js の公式ドキュメントに開発時 UI として載っているのは **`devIndicators`** — 画面隅の小さなバッジで、そのルートが静的か動的かを示すのとエラー表示程度のもの。ルート一覧・自動インポート・モジュールを 1 つのパネルで見る機能はない。
+
+| Nuxt DevTools のタブ | Next.js での代替 |
+|---|---|
+| Components | **React DevTools**(ブラウザ拡張、別途インストール) |
+| Pages | なし。`app/` のディレクトリを自分で見る |
+| Imports | **そもそも不要**(Next に自動インポートがない) |
+| Assets | なし |
+| Server Routes + 送信フォーム | なし。Postman などを別に使う |
+| Modules | なし(Next にモジュール機構がない) |
+
+**この差は、Nuxt のほうが「暗黙にやっていること」が多いことの裏返し。** 自動インポート、`pages/` からのルート生成、`layouts/` の自動適用、`components/` の自動登録、モジュールによる機能追加 — どれもコードに書かれていないため、コードを読んでも全体像が掴めない。その暗黙部分を見せるツールが必要になる。Next.js は `import` を自分で書き、モジュール機構も持たないので、可視化ツールの必要性も低い。
+
+なお **DevTools は本番ビルドに含まれない**ので、`enabled: true` のままでよい。
 
 ### `devProxy` が効いている理由
 
@@ -437,6 +487,7 @@ Nuxt にはリポジトリ直下の `server/` に API を書ける Nitro とい�
 - **`definePageMeta`** — ページにレイアウトやミドルウェアを指定するコンパイラマクロ
 - **ルートミドルウェア** — ページ遷移の前に走る処理。認証ガードなどに使う
 - **devProxy** — 開発サーバーが特定パスへのリクエストを別のサーバーへ中継する機能。CORS を回避する
+- **Nuxt DevTools** — 開発時に画面へ重ねて表示される Nuxt 専用のパネル。ルート・自動インポート・モジュールなど、コードに書かれていない仕組みを可視化する。Vue DevTools(コンポーネントの状態を見るブラウザ拡張)とは別物
 - **SPA フォールバック** — 静的配信で存在しないパスへのアクセスを、SPA の入口 HTML に流す設定。SSG + 動的ルートで必要になる(フェーズ 11)
 
 ## 関連
@@ -448,3 +499,4 @@ Nuxt にはリポジトリ直下の `server/` に API を書ける Nitro とい�
 - SSG を採用した理由 → [../../tech-stack/README.md](../../tech-stack/README.md)
 - 実装フェーズ計画 → [../../development/implementation-progress.md](../../development/implementation-progress.md)
 - Nuxt 公式「Routing」 https://nuxt.com/docs/getting-started/routing
+- Nuxt DevTools 公式 https://devtools.nuxt.com/
