@@ -124,7 +124,7 @@ React で言えば SWR / TanStack Query の `useQuery` に近い。だから `in
 
 ### `useAsyncData` との関係
 
-`useFetch` は `useAsyncData` と `$fetch` を組み合わせた短縮形で、おおよそ次と等価。
+`useFetch` は `useAsyncData` と `$fetch` を組み合わせた短縮形で、おおよそ次と等価。**`useAsyncData` のほうが下の層にある。**
 
 ```ts
 useFetch('/api/categories')
@@ -132,13 +132,92 @@ useFetch('/api/categories')
 useAsyncData('自動生成されたキー', () => $fetch('/api/categories'))
 ```
 
-**URL を渡すだけなら `useFetch`、取得処理を自分で書きたいなら `useAsyncData`。** 複数の API をまとめて呼ぶ、結果を加工してから返す、といった場合は後者を使う。
+**戻り値は同じ。** どちらも `data` / `status` / `error` / `refresh()` / `clear()` を返す。状態管理の機能に差はない。
+
+| | `useFetch` | `useAsyncData` |
+|---|---|---|
+| 第 1 引数 | **URL** | **キー**(省略可)。第 2 引数に**取得処理の関数** |
+| 何を取るか | その URL を `$fetch` する | **自分で書いた関数の戻り値**。何でもよい |
+| `$fetch` のオプション | `method` / `body` / `params` などをそのまま渡せる | 関数の中で自分で書く |
+| **URL や params が変わったとき** | **自動で取り直す** | **取り直さない**(`watch` を自分で指定する) |
+| キー | URL とオプションから自動生成 | 省略すると呼び出し位置から自動生成。明示もできる |
+| 戻り値 | 同じ | 同じ |
+
+効いてくるのは 2 行目と 4 行目。
+
+#### 取得処理を自分で書けるかどうか
+
+`useFetch` は URL を渡す形なので、**既にある関数を経由できない**。
+
+```ts
+const { fetchPost } = usePosts()
+
+// useFetch では書けない。fetchPost は URL ではなく関数
+// useAsyncData なら書ける
+const { data: post } = await useAsyncData(() => fetchPost(route.params.id as string))
+```
+
+複数の API をまとめて呼ぶ、結果を加工してから返す、といったこともできる。
+
+```ts
+const { data } = await useAsyncData(async () => {
+  const [posts, categories] = await Promise.all([
+    $fetch('/api/posts'),
+    $fetch('/api/categories'),
+  ])
+  return { posts, categories }
+})
+```
+
+#### 自動で取り直すかどうか
+
+`useFetch` は **URL やオプションに含まれるリアクティブな値を見ていて、変わると自動で取り直す。**
+
+```ts
+const keyword = ref('')
+
+useFetch('/api/search', { params: { q: keyword } })
+// keyword が変われば自動で再取得される
+```
+
+`useAsyncData` にこの自動追従はない。同じことをしたければ明示する。
+
+```ts
+useAsyncData(() => $fetch('/api/search', { params: { q: keyword.value } }), {
+  watch: [keyword],
+})
+```
+
+**便利さでは `useFetch`、挙動の明示性では `useAsyncData`。** `watch` と `watchEffect` の対比([lifecycle-and-watch.md](./lifecycle-and-watch.md) §3)と同じ構図になっている。
+
+#### 使い分け
+
+**URL を渡すだけで済むなら `useFetch`、それ以外は `useAsyncData`。**
+
+このリポジトリの `useCategories` は前者。
+
+```ts
+return useFetch<Category[]>('/api/categories', { server: false })
+```
+
+§5 で挙げる `[id].vue` の書き換え案が `useFetch` ではなく `useAsyncData` なのは、**`usePosts()` の `fetchPost` を再利用したいから**。URL を直接書けば `useFetch` でも書けるが、そうすると **API 呼び出しを `usePosts` に集約している設計が崩れる**(ページに URL が直書きされる)。
 
 ### キーとペイロード
 
 `useAsyncData` の第 1 引数のキーには役割がある。SSR のとき、**サーバーで取得した結果を HTML に JSON として埋め込み、ブラウザ側は同じキーでそれを拾って再取得を省く**。この埋め込みデータをペイロードと呼ぶ。
 
 これがないと「サーバーで取得 → HTML を返す → ブラウザで同じ API をもう一度叩く」という二重取得になる。`useFetch` はキーを自動生成するため、通常は意識しなくてよい。
+
+**キーにはもう 1 つ役割がある — 同じキーなら状態を共有する。**
+
+```ts
+// 別々のコンポーネントで呼んでも、data / status / error は 1 つ
+useAsyncData('categories', () => $fetch('/api/categories'))
+```
+
+意図すれば「重複リクエストの排除」として使えるが、**意図せず同じキーを付けると、無関係な取得同士が状態を共有して壊れる**。`useAsyncData` でキーを明示するときは、他と衝突しない名前にする。
+
+`useFetch` は URL とオプションからキーを自動生成するので通常は衝突しない。ただし裏を返すと、**同じ URL を 2 か所で呼べば自動的に共有される**。`useCategories()` を複数のページから呼ぶようになったときに効いてくる性質。
 
 ### 主なオプション
 
@@ -273,9 +352,9 @@ const { data: post, error } = await useAsyncData(
 )
 ```
 
-`notFound` の ref が `error` に置き換わり、`onMounted` が消える。トレードオフは次のとおり。
+`notFound` の ref が `error` に置き換わり、`onMounted` が消える。**比較対象は `useFetch` ではなく、いまの「`onMounted` + 自前の ref」**である点に注意(`useFetch` を使わない理由は §3「使い分け」のとおり、`fetchPost` を経由したいから)。トレードオフは次のとおり。
 
-- **`useAsyncData` の利点**: 状態管理(`data` / `status` / `error`)が付いてくる。`watch: [() => route.params.id]` を足せば URL 変更時の取り直しも自動になる。
+- **`useAsyncData` の利点**: 自前で用意していた状態(`post` / `notFound`)が `data` / `status` / `error` に置き換わる。`watch: [() => route.params.id]` を足せば URL 変更時の取り直しも自動になる。
 - **`onMounted` の利点**: 何が起きるかがコードの見た目どおり。`server: false` と `lazy: true` の意味を知らなくても読める。
 
 このリポジトリが `onMounted` を選んでいるのは、**「ビルド時には絶対に走らない」がコードから明白**であることを優先したため。`server: false` はオプション名を知らないと読み取れないが、`onMounted` は「マウント後、つまりブラウザで」としか読めない。
@@ -317,6 +396,8 @@ nitro: {
 - **`server: false` を付け忘れる。** `server` の既定は `true` なので、**書かなければサーバー側でも取得する**。ビルド時にバックエンドを叩きにいって `nuxt generate` が失敗する。
 - **取得完了を前提にテンプレートを書く。** `data` は最初 `null`。`v-if` や `?? []` で備える。
 - **`useFetch` を無限スクロールに使おうとする。** 蓄積型の取得には向かない。`$fetch` + 自前の ref。
+- **`useFetch` には状態管理がないと思う。** `useAsyncData` と戻り値は同じ。違うのは「URL を渡すか関数を渡すか」と「自動で取り直すかどうか」→ §3。
+- **`useAsyncData` のキーを適当に付ける。** 同じキーは状態を共有する。無関係な取得同士が混ざる → §3。
 - **`$fetch` のエラーを `e.message` で読む。** レスポンスボディは `e.data`。
 - **絶対 URL を書く。** `http://localhost:8080/api/posts` と書くと本番で壊れる。常に相対パス `/api/...`。
 - **動的ルートが静的生成されると思う。** されない。直接アクセスにはフォールバック設定が要る。
@@ -325,7 +406,7 @@ nitro: {
 
 - **`$fetch`** — Nuxt の HTTP クライアント(ofetch)。JSON 解析・エラー時の throw・クエリ組み立てを備える。どこからでも呼べる
 - **`useFetch`** — `$fetch` に SSR 対応と状態管理を足したコンポーザブル。setup の同期実行中にしか呼べない
-- **`useAsyncData`** — 取得処理を自分で書ける版。`useFetch` はこれの短縮形
+- **`useAsyncData`** — 取得処理を自分で書ける版。`useFetch` はこれの短縮形で、戻り値は同じ。既存の関数を経由したいときや、複数の API をまとめたいときに使う
 - **ペイロード(payload)** — サーバーで取得した結果を HTML に埋め込んだ JSON。ブラウザ側の二重取得を防ぐ
 - **ハイドレーション** — サーバーが返した HTML に、ブラウザ側で JS を結びつけて操作可能にすること
 - **プリレンダリング** — ビルド時にページを描画して HTML を書き出すこと。`nuxt generate` がこれを行う
