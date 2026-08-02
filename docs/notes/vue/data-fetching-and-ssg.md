@@ -43,7 +43,7 @@ Nuxt にはこの分割がない。**すべてのコンポーネントはブラ�
 そのため「サーバーでだけ実行される」という区別は、コンポーネント単位ではなく**取得関数のオプション**として表現される。
 
 ```ts
-useFetch('/api/posts')                    // サーバーで取得 → HTML に結果を埋め込む → ブラウザでは再取得しない
+useFetch('/api/posts')                    // 既定(server: true)。サーバーで取得 → HTML に結果を埋め込む → ブラウザでは再取得しない
 useFetch('/api/posts', { server: false }) // サーバーでは取得しない → ブラウザで取得する
 ```
 
@@ -142,14 +142,16 @@ useAsyncData('自動生成されたキー', () => $fetch('/api/categories'))
 
 ### 主なオプション
 
-| オプション | 効果 |
-|---|---|
-| `server: false` | サーバー側(SSR / ビルド時)では取得せず、ブラウザでだけ取得する |
-| `lazy: true` | 取得完了を待たずにページ遷移する。`status` を見て自分で読み込み表示を出す |
-| `immediate: false` | すぐには取得しない。`refresh()` で手動実行する |
-| `watch: [x]` | `x` が変わったら自動で取り直す |
-| `transform` | 取得結果を加工してから `data` に入れる |
-| `default` | 取得前の `data` の初期値 |
+| オプション | 既定値 | 効果 |
+|---|---|---|
+| `server` | **`true`** | `false` にすると、サーバー側(SSR / ビルド時)では取得せずブラウザでだけ取得する |
+| `lazy` | `false` | `true` にすると、取得完了を待たずにページ遷移する。`status` を見て自分で読み込み表示を出す |
+| `immediate` | `true` | `false` にすると、すぐには取得しない。`refresh()` で手動実行する |
+| `watch` | なし | `[x]` を渡すと `x` が変わったときに自動で取り直す |
+| `transform` | なし | 取得結果を加工してから `data` に入れる |
+| `default` | なし | 取得前の `data` の初期値 |
+
+**`server` の既定値が `true`** である点に注意。**何も指定しなければサーバー側でも取得しにいく**ので、SSG では `{ server: false }` を明示しない限りビルド時に API を叩く(→ §4)。
 
 ## 4. `nuxt generate` で何が起きるか
 
@@ -159,9 +161,9 @@ useAsyncData('自動生成されたキー', () => $fetch('/api/categories'))
 flowchart TB
   subgraph B["ビルド時 (npm run generate)"]
     direction TB
-    B1["ルートを 1 つずつ実際に描画する"] --> B2{"useFetch は<br/>server: false か?"}
-    B2 -->|"false のまま"| B3["ビルドマシンから API を叩く<br/>← バックエンドが居ないので失敗する"]
-    B2 -->|"server: false"| B4["取得せず、空のまま HTML を書き出す"]
+    B1["ルートを 1 つずつ実際に描画する"] --> B2{"useFetch に<br/>server: false を付けたか?"}
+    B2 -->|"いいえ(既定の server: true)"| B3["ビルドマシンから API を叩く<br/>← バックエンドが居ないので失敗する"]
+    B2 -->|"はい(server: false)"| B4["取得せず、空のまま HTML を書き出す"]
     B4 --> B5[".output/public/<br/>index.html / *.js / *.css"]
   end
 
@@ -312,7 +314,7 @@ nitro: {
 
 - **イベントハンドラの中で `useFetch` を呼ぶ。** 動かない。`$fetch` を使う([composables.md](./composables.md) §4)。
 - **`useFetch` の `data` を値として扱う。** `data` は ref。スクリプトでは `data.value`。
-- **`server: false` を付け忘れる。** ビルド時にバックエンドを叩きにいって `nuxt generate` が失敗する。
+- **`server: false` を付け忘れる。** `server` の既定は `true` なので、**書かなければサーバー側でも取得する**。ビルド時にバックエンドを叩きにいって `nuxt generate` が失敗する。
 - **取得完了を前提にテンプレートを書く。** `data` は最初 `null`。`v-if` や `?? []` で備える。
 - **`useFetch` を無限スクロールに使おうとする。** 蓄積型の取得には向かない。`$fetch` + 自前の ref。
 - **`$fetch` のエラーを `e.message` で読む。** レスポンスボディは `e.data`。
