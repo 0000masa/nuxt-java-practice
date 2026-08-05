@@ -8,7 +8,7 @@
 
 ## プロジェクト概要
 
-Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し、検証したいときだけ Terraform(GitHub Actions 経由)で AWS に環境を構築・撤収する。**常時公開はしない。**
+Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し、検証したいときだけ CloudFormation(GitHub Actions 経由)で AWS に環境を構築・撤収する。**常時公開はしない。**
 
 ## 技術スタック
 
@@ -17,7 +17,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 - DB: MySQL 8(本番は RDS)
 - 画像保存: MinIO(開発)/ S3 + CloudFront(本番)
 - メール送信: Mailpit(開発)/ SES(本番)
-- インフラ: Terraform + GitHub Actions(OIDC 認証、workflow_dispatch で apply/destroy)
+- インフラ: **CloudFormation(素の YAML。CDK は使わない)** + GitHub Actions(OIDC 認証、workflow_dispatch でスタック作成/削除)
 - AWS: 独自ドメイン(Route53 + ACM)、ALB → ECS Fargate → RDS、ECR
 
 ## フォルダ構成
@@ -25,7 +25,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 ```
 ├── frontend/    Nuxt 4 プロジェクト
 ├── backend/     Spring Boot プロジェクト
-├── terraform/   Terraform コード
+├── cloudformation/  CloudFormation テンプレート
 ├── docker/      Dockerfile 置き場(docker-compose.yml はリポジトリ直下)
 └── docs/        ドキュメント
 ```
@@ -36,12 +36,13 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 2. **Nuxt は SSG ビルドし、出力を Spring Boot の `static/` に配置して配信する。** 本番に Node.js コンテナは置かない。フロント配信用の S3 + CloudFront / Amplify は使わない
 3. S3 + CloudFront は**ユーザーアップロード画像専用**
 4. REST API はすべて `/api/**` 配下。フロントは相対パス `/api` を呼ぶ(開発時は Nuxt の devProxy が backend:8080 へ転送)
-5. AWS 環境は使い終わったら `terraform destroy` で撤収する運用
+5. AWS 環境は使い終わったらスタックを削除して撤収する運用。**Route53 ホストゾーンと ECR は手動管理**で常駐させ、それ以外を 1 スタックで作り捨てる(理由 → `docs/adr/0001-cloudformation-yaml-over-terraform.md` と `docs/infrastructure/README.md`)
 
 ## ドキュメント
 
 - `docs/tech-stack/` — 技術スタックと選定理由(Nginx 不採用・SSG 採用の理由もここ)
-- `docs/infrastructure/` — AWS 構成図、Terraform + GitHub Actions の運用フロー
+- `docs/infrastructure/` — AWS 構成図、CloudFormation + GitHub Actions の運用フロー
+- `docs/adr/` — アーキテクチャ決定記録(なぜその技術・構成を選んだか)
 - `docs/development/` — docker-compose 開発環境の構成(5 コンテナ、ポート、環境変数方針)
 - `docs/setup/` — Nuxt / Spring Boot の環境構築手順
 - `docs/test/` — テストの実行方法と方針(テスト専用 database `app_test` の作り方、テスト一覧)

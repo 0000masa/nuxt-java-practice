@@ -1,7 +1,9 @@
 # プロジェクト初期ドキュメント整備 設計書
 
 日付: 2026-07-17
-ステータス: 承認済み
+ステータス: 承認済み(一部は後に変更)
+
+> **注記(2026-08-05)**: 本書に記載の **IaC = Terraform という決定は撤回された**。現在は素の CloudFormation YAML を使う(ディレクトリも `terraform/` → `cloudformation/`)。理由 → [ADR-0001](../../adr/0001-cloudformation-yaml-over-terraform.md)、現行の運用方針 → [docs/infrastructure/README.md](../../infrastructure/README.md)。本書は当時の記録としてそのまま残す。
 
 ## 目的
 

@@ -363,7 +363,7 @@ backend コンテナには `env_file: .env` 経由で **`DB_NAME=app` が入っ�
 - **health-cmd** — コンテナが「使える状態になったか」を判定するコマンド。準備完了を待つために使う
 - **`actions/setup-java`** — runner に JDK を入れ、Gradle / Maven の依存キャッシュも面倒を見る公式アクション
 - **`actions/upload-artifact`** — ジョブの成果物（テストレポートなど）を保存し、後からダウンロードできるようにするアクション
-- **`workflow_dispatch`** — 手動実行のトリガー。このリポジトリでは Terraform の apply / destroy に使う方針（→ `docs/infrastructure/README.md`）
+- **`workflow_dispatch`** — 手動実行のトリガー。このリポジトリでは CloudFormation スタックの作成 / 削除に使う方針（→ `docs/infrastructure/README.md`）
 - **ミドルウェア** — アプリが利用する DB・ストレージ・メールなどの基盤ソフト
 - **`environment`（Gradle の `Test` タスク）** — テスト JVM に渡す環境変数の指定。**外から渡された同名の環境変数を上書きする**ため、CI のワークフローで `env:` に書いた値より強い
 
@@ -372,7 +372,7 @@ backend コンテナには `env_file: .env` 経由で **`DB_NAME=app` が入っ�
 - **ローカルのテスト運用手順**（`app_test` の作り方・実行コマンド・テスト一覧） → [docs/test/README.md](../test/README.md)
 - ローカルでのテストの仕組み、テスト専用 DB、実行コマンド → [java/spring/testing-and-test-database.md](./java/spring/testing-and-test-database.md)
 - 開発環境の 5 コンテナ構成と環境変数の方針 → [docs/development/README.md](../development/README.md)
-- Terraform + GitHub Actions（OIDC 認証・`workflow_dispatch` での apply / destroy） → [docs/infrastructure/README.md](../infrastructure/README.md)
+- CloudFormation + GitHub Actions（OIDC 認証・`workflow_dispatch` でのスタック作成 / 削除） → [docs/infrastructure/README.md](../infrastructure/README.md)
 - 言語ごとのビルドツールとパッケージ管理の対応（Gradle / Composer / npm） → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)
 - 環境変数の基本と `${VAR:default}` の読み方 → [env-vars-basics.md](./env-vars-basics.md)
 - ファイル権限の保存場所（inode）、umask、git のファイルモード、artifact で実行ビットが失われる話 → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)

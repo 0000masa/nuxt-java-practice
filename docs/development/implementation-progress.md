@@ -20,7 +20,8 @@
 | 9 | シードタスク | タスクモード(`--app.task=seed`)実装。users 1万 / posts 100万 / likes 300万 をセットベース SQL で投入 | 未着手 |
 | 10 | index 実験 | 検索ラボで実験用 index(複合・FULLTEXT)の before/after を検証し、結果を `docs/notes/` に記録 | 未着手 |
 | 11 | SSG 統合 | `nuxt generate` → Spring Boot `static/` 配置の本番形を確認。SPA フォールバック設定 | 未着手 |
-| 12 | AWS 運用 | `db-task.yml`(ECS Run Task で migrate/seed)、SES/S3 の本番設定。Terraform 側の作業と合わせて別途設計 | 未着手 |
+| 12 | AWS 運用 | `db-task.yml`(ECS Run Task で migrate/seed)、SES/S3 の本番設定。CloudFormation テンプレート側の作業と合わせて別途設計 | 未着手 |
+| 13 | インフラコード | CloudFormation テンプレート(素の YAML)の作成。**ファイル分割・環境差分の共通化方式は未確定で、着手前に別セッションで設計を議論する**。方針 → [ADR-0001](../adr/0001-cloudformation-yaml-over-terraform.md) と [infrastructure/README.md](../infrastructure/README.md) | 未着手 |
 
 ## 実装方針(全フェーズ共通)
 

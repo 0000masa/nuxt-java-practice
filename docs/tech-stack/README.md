@@ -14,8 +14,8 @@
 | メール送信(開発) | Mailpit | latest | SMTP 受信 + Web UI でメール確認 |
 | メール送信(本番) | Amazon SES | - | メール送信(ドメイン認証) |
 | コンテナ | Docker / docker-compose | - | 開発環境の構築 |
-| IaC | Terraform | - | AWS リソースの構築・撤収 |
-| CI/CD | GitHub Actions | - | Terraform 実行、イメージビルド & ECR push |
+| IaC | AWS CloudFormation(素の YAML) | - | AWS リソースの構築・撤収 |
+| CI/CD | GitHub Actions | - | CloudFormation 実行、イメージビルド & ECR push |
 
 ## アーキテクチャ上の決定事項
 
@@ -55,7 +55,9 @@ Nginx をリバースプロキシとして挟んでも役割が ALB とほぼ重
 
 ### 4. 必要なときだけ AWS 環境を建てる
 
-本番環境は常時公開ではない。検証したいときに GitHub Actions 経由で `terraform apply` を実行して構築し、終わったら `terraform destroy` で撤収する運用とする。詳細は [docs/infrastructure/README.md](../infrastructure/README.md) を参照。
+検証環境は常時公開ではない。検証したいときに GitHub Actions 経由で CloudFormation スタックを作成し、終わったらスタックを削除して撤収する運用とする。詳細は [docs/infrastructure/README.md](../infrastructure/README.md) を参照。
+
+IaC に Terraform ではなく素の CloudFormation YAML を選んだ理由(CDK を採らなかった理由も含む)は [ADR-0001](../adr/0001-cloudformation-yaml-over-terraform.md) に記録している。
 
 ## 開発環境と本番環境の対応
 
