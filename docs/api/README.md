@@ -28,7 +28,8 @@ backend/src/main/java/com/example/app/
 │       ├── PostResponse.java      … 投稿1件のレスポンス(ユーザー・カテゴリーの要約を内包)
 │       └── TimelineResponse.java  … タイムラインのレスポンス(posts + nextCursor)
 ├── category/                      … カテゴリードメイン
-│   ├── CategoryController.java    … GET /api/categories の HTTP 入口(単純な参照のみのため Service 層なし)
+│   ├── CategoryController.java    … GET /api/categories の HTTP 入口
+│   ├── CategoryService.java       … 参照のみだが Controller → Service → Repository を全機能で統一するため配置
 │   ├── CategoryRepository.java    … DB アクセス(JPA)
 │   ├── Category.java              … エンティティ(categories テーブル。Flyway で投入するマスタデータ)
 │   └── dto/
@@ -73,7 +74,12 @@ backend/src/main/java/com/example/app/
 
 **現在、認証は未実装。** 「いまリクエストしているユーザー」は `CurrentUserProvider` インターフェースで抽象化されており、現在は開発用実装 `DevCurrentUserProvider`(`@Profile("!prod")`)が固定ユーザー `dev_user` を返す(初回アクセス時に自動作成)。
 
-そのため、投稿の作成はすべて `dev_user` の投稿になり、削除の所有者チェックも `dev_user` を基準に行われる。フェーズ3でセッションベースの認証実装に差し替える予定。差し替え時はこのセクションと `CurrentUserProvider` の実装だけが変わり、各エンドポイントの仕様は変わらない想定。
+そのため、投稿の作成はすべて `dev_user` の投稿になり、削除の所有者チェックも `dev_user` を基準に行われる。
+
+**フェーズ3 の設計(2026-08-05 確定)で、当初の想定から変わった点が 2 つある** → [フェーズ3 設計](../superpowers/specs/2026-08-05-phase3-auth-design.md)
+
+- `CurrentUserProvider` は**セッション実装に差し替えるのではなく削除**し、Spring Security 標準の `@AuthenticationPrincipal` に寄せる
+- 「各エンドポイントの仕様は変わらない」という当初の想定は**誤り**だった。`POST /api/posts` と `DELETE /api/posts/{id}` は認証必須になり、未認証で呼ぶと 401 を返すようになる(閲覧系の GET は公開のまま)
 
 ## 日時のフォーマット
 

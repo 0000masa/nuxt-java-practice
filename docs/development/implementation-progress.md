@@ -11,7 +11,7 @@
 | 0 | 設計 | アプリ設計・テーブル設計・各種ドキュメント整備 | 完了 |
 | 1 | DB 基盤 | Flyway 導入、全テーブルのマイグレーション(V1)、categories マスタ投入(V2)、パッケージを `com.example.app` に整理 | 完了 |
 | 2 | 投稿・タイムライン | posts/categories の API(作成・削除・詳細・タイムライン=カーソルページネーション)+ フロント(タイムライン・投稿詳細・無限スクロール)。認証は未導入のため開発用ユーザーで代用 | 完了 |
-| 3 | 認証(パスワード) | Spring Security + Spring Session JDBC(セッションテーブルは V3)。会員登録 → 確認メール(Mailpit)→ 有効化、ログイン/ログアウト、パスワードリセット。フェーズ2の開発用ユーザーを実認証に置き換え | 未着手 |
+| 3 | 認証(パスワード) | Spring Security + Spring Session JDBC(セッションテーブルは V3)。会員登録 → 確認メール(Mailpit)→ メール確認、ログイン/ログアウト、パスワードリセット、**パスワード変更**。フェーズ2の開発用ユーザーを実認証に置き換え。**設計 → [2026-08-05-phase3-auth-design.md](../superpowers/specs/2026-08-05-phase3-auth-design.md)** | 作業中 |
 | 4 | 認証(Google) | `oauth2Login()` による Google ログイン、同一メールのアカウントリンク(`google_sub` 紐づけ) | 未着手 |
 | 5 | いいね | トグル API、タイムライン/詳細でのいいね数・自分のいいね状態表示(N+1 を解決する形で) | 未着手 |
 | 6 | 画像 | 投稿画像(最大4枚)・プロフィール画像のアップロード(MinIO/S3)と配信、投稿削除時のオブジェクト削除 | 未着手 |
@@ -34,6 +34,7 @@
 
 ## 完了メモ
 
+- **フェーズ3 の設計確定**(2026-08-05): 実装前に設計を詰めた。成果物 → [2026-08-05-phase3-auth-design.md](../superpowers/specs/2026-08-05-phase3-auth-design.md)(決定 14 件・API 一覧・フロー図・実装順序)、[ADR-0002](../adr/0002-session-cookie-over-jwt.md)(セッション Cookie 方式を採り JWT を発行しない)、[ADR-0003](../adr/0003-account-enumeration-and-unverified-signup.md)(ユーザー列挙を許容し未確認アカウントは再登録で作り直す)、`CONTEXT.md` に「メール確認 / パスワードリセット / パスワード変更」を追加。**スコープ追加**: パスワードリセット時のセッション無効化と同じ仕組みが使えるため、ログイン中のパスワード変更(`PUT /api/auth/password` + `/settings/password`)も含めることにした。**方針転換**: フェーズ2 で用意した `CurrentUserProvider` / `DevCurrentUserProvider` は使わず削除し、Spring Security 標準の `@AuthenticationPrincipal` に寄せる(`PostController` / `PostService` / `PostControllerTest` のシグネチャ変更を伴う)
 - **テスト DB の分離**(2026-07-26): テストの接続先を開発 DB(`app`)から専用 database `app_test` に切り替えた。`build.gradle` の `test` タスクで `environment 'DB_NAME', 'app_test'` を指定するだけで、`application.yml` の `${DB_NAME:app}` を上書きできる。`app_test` は**クローン後に手動で 1 回作成が必要**(Flyway は database 自体を作らない。MySQL の init SQL は空ボリュームのみ有効なため自動化していない)。空の database を用意すれば Flyway が V1/V2 を流してテーブル 6 つ + カテゴリー 10 件を用意する。手順とテスト方針 → [docs/test/README.md](../test/README.md)、仕組みの解説 → [testing-and-test-database.md](../notes/java/spring/testing-and-test-database.md)
 - **リファクタ**(2026-07-25): `CategoryController` が `CategoryRepository` を直接呼んでいた箇所に `CategoryService` を追加し、`Controller → Service → Repository` の三段構えを全機能で統一。当初は「単純な参照のみなので Service を挟まない」判断だったが、[backend-structure-best-practices.md](./backend-structure-best-practices.md) の「Controller は薄く、ロジックは Service に寄せる」に揃える方針を優先した。`@Transactional(readOnly = true)` の置き場が生まれ、`CategoryControllerTest`(`@WebMvcTest` + Service モック)を追加できるようになった
 - **フェーズ2**(2026-07-20): 投稿・タイムライン完成。
