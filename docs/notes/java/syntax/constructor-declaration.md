@@ -152,5 +152,6 @@ TS のコンストラクタは、型のためのオーバーロード「シグ�
 
 ## 関連
 
+- `static` フィールドはいつ初期化されるのか(クラス初期化とインスタンス初期化の違い、TS / PHP との比較) → [class-vs-instance-initialization.md](./class-vs-instance-initialization.md)
 - 変数宣言の型明示と型推論(`var`)、フィールドの型必須の話 → [type-declaration-and-var.md](./type-declaration-and-var.md)
 - 配列と List(固定長/可変長) → [array-vs-list.md](./array-vs-list.md)

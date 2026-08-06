@@ -560,6 +560,7 @@ try {
 - `record` とキー可変の入れ物(`Map` / `Record<K,V>` / 連想配列)の使い分け、JSON にしたときの違い → [java/syntax/map-vs-record.md](./java/syntax/map-vs-record.md)
 - interface と implements、抽象クラス、`super`、`instanceof`(Java 中心) → [java/syntax/interface-and-implements.md](./java/syntax/interface-and-implements.md)
 - コンストラクタの見分け方(`new` で何が呼ばれるか) → [java/syntax/constructor-declaration.md](./java/syntax/constructor-declaration.md)
+- クラス初期化とインスタンス初期化(`static` はいつ 1 回だけ走るか。「一度だけ」の単位が Java=クラス / TS=モジュール / PHP=リクエストで違う話) → [java/syntax/class-vs-instance-initialization.md](./java/syntax/class-vs-instance-initialization.md)
 - クラス自体を値として持つ(`Post.class` / PHP の `Post::class` / TS はクラスがそのまま値) → [java/syntax/class-literal.md](./java/syntax/class-literal.md)
 - クロージャ / アロー関数 / ファーストクラス callable(関数を値として扱う) → [functions-as-values.md](./functions-as-values.md)
 - 言語ごとのビルド・ツールの違い → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)

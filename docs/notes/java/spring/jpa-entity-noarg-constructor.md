@@ -98,6 +98,8 @@ Spring Boot 抜きで Hibernate を単体で使っても、同じ空コンスト
 
 ## 関連
 
+- Hibernate が「空の器」に値を差し込む経路(フィールド直接 or setter 経由)の話 → [jpa-access-type-field-vs-property.md](./jpa-access-type-field-vs-property.md)
+- エンティティの命名ルール全体(フィールド名 → 列名、クエリメソッド名、必須ルールの一覧) → [jpa-entity-naming-rules.md](./jpa-entity-naming-rules.md)
 - Java のコンストラクタの見分け方・オーバーロード(なぜ複数コンストラクタを持てるか) → [constructor-declaration.md](../syntax/constructor-declaration.md)
 - Entity と Repository の役割分担・JPA/Hibernate/Spring Data JPA の 3 層 → [repository-and-entity-vs-laravel-model.md](./repository-and-entity-vs-laravel-model.md)
 - アクセス修飾子(`public`/`protected`/package-private/`private`)の違い → [java-package-basics.md](../../java-package-basics.md)
