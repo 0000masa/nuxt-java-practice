@@ -22,4 +22,10 @@ public interface UserRepository extends JpaRepository<User, Long> {
 	 * 呼び出し側に存在チェックを強制でき、null 由来のエラー(NullPointerException)を防げる。
 	 */
 	Optional<User> findByUsername(String username);
+
+	/**
+	 * メールアドレスで User を 1 件探す。ログインの識別子はメールアドレスなので、
+	 * 認証(UserDetailsService)はこのメソッドでユーザーを引く。
+	 */
+	Optional<User> findByEmail(String email);
 }
