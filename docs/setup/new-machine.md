@@ -689,6 +689,41 @@ wsl --shutdown
 
 **予防策: git は WSL 側にだけ入れる**(手順 5)。すでに入れてしまった場合は、`~/` 配下に clone し直すこと。
 
+### 11. `~/.aws` がエクスプローラーでフォルダに見えない / 中身が Windows 側にある
+
+```bash
+ls -ld ~/.aws ~/.azure
+```
+
+先頭が `l` なら**シンボリックリンク**で、実体は `/mnt/c/Users/<Windowsユーザー名>/.aws` にある(実測)。エクスプローラーが WSL のシンボリックリンクをフォルダーではなく「ファイルのような項目」として表示するため、`.aws` が見つからないという症状になる。
+
+**動作はするが、AWS の認証情報と SSO トークンが WSL ではなく Windows のファイルシステムに保存される。** Windows 上の任意のプロセスから読める場所であり、Unix のパーミッション(`600`)も drvfs 越しでは実効性が薄い。長期アクセスキーを置くなら望ましくない。
+
+**原因(推定)**: Docker Desktop の WSL Integration。かつて ECS(AWS)と ACI(Azure)へのデプロイ機能を持っていた名残で、連携を有効にしたときに `.aws` と `.azure` を Windows 側へリンクする。対象がこの 2 つだけで、Azure CLI を入れていなくても空の `.azure` が作られる点が特徴。**リンク先が既に実ディレクトリとして存在する場合は上書きしない**(現行機は `.aws` が実ディレクトリ、`.azure` だけリンクという状態で確認)。
+
+この手順書は Docker Desktop(手順 3)を AWS CLI(付録)より先に入れるため、`~/.aws` が存在しないタイミングで連携が有効になり、リンクが作られる。**コマンドではなく順序に起因する。**
+
+**対処** — 実ディレクトリに戻す。すべて WSL(Ubuntu)のターミナルで実行する(`/mnt/c/...` は WSL から見た Windows の C ドライブなので、PowerShell に切り替える必要はない):
+
+```bash
+cp -r /mnt/c/Users/<Windowsユーザー名>/.aws ~/aws-backup      # 中身を退避
+rm ~/.aws                                                     # リンクを外す(リンク先は消えない)
+mkdir -p ~/.aws
+cp -r ~/aws-backup/. ~/.aws/
+find ~/.aws -type d -exec chmod 700 {} \;
+find ~/.aws -type f -exec chmod 600 {} \;
+ls -ld ~/.aws                                                 # 先頭が d になっていること
+aws sts get-caller-identity --profile <プロファイル名>
+```
+
+`cp` はコピーなので、`/mnt/c/...` 側の原本は残る。疎通確認が済むまでは消さずに残しておけば、失敗しても取り直せる。確認後に `rm -rf ~/aws-backup` で退避先を片付ける。
+
+> 退避先に `/tmp` を使わないのは、Ubuntu の systemd が `/tmp` の中身を **30 日で自動削除する**ため(`D /tmp 1777 root root 30d`)。電源を落としても消えはしないが、放置した退避データが黙って消える場所に置く必要はない。
+
+> **`rm ~/.aws` は末尾にスラッシュを付けないこと。** `rm -rf ~/.aws/` と書くとリンクを辿って Windows 側の中身を消す。ここでやりたいのは「リンクという名の矢印を捨てる」ことだけ。
+
+`.azure` も中身が空なら `rm ~/.azure` でよい。疎通確認後、Windows 側に残った `/mnt/c/Users/<Windowsユーザー名>/.aws` は削除してよい。
+
 ---
 
 ## 関連ドキュメント
