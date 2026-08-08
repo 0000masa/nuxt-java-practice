@@ -4,6 +4,8 @@
 
 ## 前提ツール
 
+> PC 自体のセットアップ(WSL2 / Docker Desktop / VS Code / git / GitHub 接続)から始める場合は → [docs/setup/new-machine.md](./new-machine.md)
+
 | ツール | バージョン | 備考 |
 |---|---|---|
 | Java (JDK) | 21 | ローカルで直接動かす場合。コンテナ内開発なら不要 |

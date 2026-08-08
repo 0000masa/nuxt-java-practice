@@ -13,7 +13,7 @@
 この構成は **3 つの層**に分かれる。どの層に何を入れるかを取り違えると「インストールしたのに使えない」が起きるので、最初に把握しておく。
 
 ```
-┌─ ① Windows(ホスト) ────────────────────────────┐
+┌─ ① Windows ────────────────────────────────────┐
 │  Docker Desktop / VS Code 本体                   │
 │  VS Code 拡張: WSL, Dev Containers               │
 │                                                  │
@@ -36,7 +36,9 @@
 | ② WSL2 | git、gh、リポジトリ、Vue / Markdown 系拡張 | この手順書 + `.vscode/extensions.json`(自動推奨) |
 | ③ コンテナ | Node 22、JDK 21、MySQL 8、MinIO、Mailpit、Java 系拡張 | `docker-compose.yml` と `.devcontainer/devcontainer.json`(全自動) |
 
-**重要なのは、Node.js も JDK も MySQL もホストにインストールしないこと。** すべて ③ のコンテナが持っている。ホストに必要なのは Docker と VS Code と git だけ(設計の理由 → [docs/notes/java-dev-env-comparison.md](../notes/java-dev-env-comparison.md))。
+**重要なのは、Node.js も JDK も MySQL も ① ② にインストールしないこと。** すべて ③ のコンテナが持っている。Windows に要るのは Docker Desktop と VS Code、WSL に要るのは git と gh だけ(設計の理由 → [docs/notes/java-dev-env-comparison.md](../notes/java-dev-env-comparison.md))。
+
+> **用語の注意**: このリポジトリのドキュメントでは、一貫して **「ホスト」= WSL2** を指す(対義語は「コンテナ」)。Windows のことは「ホスト」と呼ばず「Windows」と書く。例えば [docs/notes/java-dev-env-comparison.md](../notes/java-dev-env-comparison.md) の「ホストに JDK を置きたくない」は「WSL に JDK を置きたくない」の意味。
 
 所要時間の目安は、ダウンロード待ちを含めて 1〜2 時間。
 
@@ -190,7 +192,7 @@ docker compose version
 
 > **ライセンスについて**: Docker Desktop は個人利用・小規模事業者・教育・オープンソース用途では無料だが、**従業員 251 人以上または年間売上 1000 万ドル以上の企業での業務利用には有料サブスクリプションが必要**。個人の学習用 PC なら無料の範囲内。最新の条件は [Docker の公式ライセンス条項](https://docs.docker.com/subscription/desktop-license/)を確認すること。
 
-## 4. VS Code とホスト側の拡張機能を入れる
+## 4. VS Code と Windows 側の拡張機能を入れる
 
 [VS Code 公式ページ](https://code.visualstudio.com/)から Windows 版をダウンロードして実行する。
 
@@ -198,7 +200,7 @@ docker compose version
 
 **VS Code は Windows 側にだけ入れる。** WSL の中に入れてはいけない。VS Code は「画面は Windows、裏方は WSL やコンテナの中」という分離構造で動くため、本体は 1 つで足りる。
 
-インストール後、拡張機能ビュー(`Ctrl+Shift+X`)で以下 2 つを入れる。**これらはホスト側にしか入らない拡張**なので、リポジトリの推奨設定では自動化できない。手で入れる。
+インストール後、拡張機能ビュー(`Ctrl+Shift+X`)で以下 2 つを入れる。**これらは Windows 側にしか入らない拡張**なので、リポジトリの推奨設定では自動化できない。手で入れる。
 
 | 拡張機能 | ID | 役割 |
 |---|---|---|
@@ -399,16 +401,35 @@ claude
 
 ---
 
-## 付録. ホスト側に Node.js を用意する(このリポジトリには不要)
+## 付録. 別プロジェクト用のツール(このリポジトリには不要)
 
-**このリポジトリの開発には不要**(Node はコンテナが持っている)。ホストで直接 Next.js などを動かす別プロジェクト用の手順。
+**ここから下はこのリポジトリの開発には一切不要。** 同じ PC で扱う別プロジェクトのための手順なので、必要になったときだけ読めばよい。
+
+このリポジトリで使わない根拠:
+
+- **Node.js** — コンテナ(`node:22-slim`)が持っている
+- **AWS CLI** — AWS へのデプロイは GitHub Actions の OIDC 認証で行う設計で、手元から `aws` を叩く手順は存在しない(→ [docs/infrastructure/README.md](../infrastructure/README.md))
+- **Stripe CLI** — このリポジトリは決済を扱わない
+
+### 3 つに共通する前提
+
+1. **すべて WSL(Ubuntu)の中に入れる。** Windows 側には入れない
+2. **`unzip` と `curl` が要る。** WSL の Ubuntu は最小構成なので、先に入れておく
+
+   ```bash
+   sudo apt update && sudo apt install -y unzip curl
+   ```
+
+3. **認証はいずれもブラウザを開く。** WSL からは Windows のブラウザが自動で開かないことがあるので、その場合は表示された URL を手で Windows 側のブラウザに貼る(手順 6 の `gh auth login` と同じ)
+4. **現行機から認証情報のファイルをコピーしないこと。** `~/.aws/credentials` と `~/.config/stripe/config.toml` は生の秘密情報を含む。ファイル共有や USB を経由すると経路上に平文で残るため、新 PC では必ずログインをやり直して取得する
+
+### Node.js(fnm)
 
 バージョン管理ツール **fnm** を使う(現行の開発機と同じ構成。fnm 1.38.1 / Node 22.14.0)。プロジェクトごとに Node のバージョンを切り替えられるので、Node を直接インストールするより後々の事故が少ない。
 
-**先に `unzip` を入れておくこと。** fnm のインストーラは zip で配布されたバイナリを展開するが、WSL の Ubuntu は最小構成なので `unzip` が入っておらず、無いと `Checking availability of unzip... Missing!` で中断する(実測)。
+`unzip` が無いと `Checking availability of unzip... Missing!` で中断する(実測)。上の共通前提を先に済ませておくこと。
 
 ```bash
-sudo apt update && sudo apt install -y unzip
 curl -fsSL https://fnm.vercel.app/install | bash
 ```
 
@@ -433,6 +454,88 @@ node -v && npm -v
 ```
 
 別のバージョンが必要になったら `fnm install 20` のように追加し、`fnm use 20` で切り替える。プロジェクト直下に `.nvmrc` があれば `fnm use` だけでその版に合わせられる。
+
+### AWS CLI
+
+**公式インストーラで v2 を入れる。** Ubuntu 24.04 の標準リポジトリには `awscli` パッケージが無く(`apt-cache policy awscli` の候補が `(none)`)、`apt install` では入らない。現行機も公式インストーラ版(`aws-cli/2.31.14` が `/usr/local/bin/aws` に配置)。
+
+```bash
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+aws --version          # aws-cli/2.x.x と出れば成功
+rm -rf aws awscliv2.zip
+```
+
+公式ドキュメント → [AWS CLI の最新バージョンをインストールまたは更新する](https://docs.aws.amazon.com/ja_jp/cli/latest/userguide/getting-started-install.html)
+
+#### 認証 — IAM Identity Center(SSO)を優先する
+
+```bash
+aws configure sso
+```
+
+対話で SSO の開始 URL・リージョン・アカウント・ロール・プロファイル名を聞かれる。値は現行機の `~/.aws/config` の `[sso-session ...]` セクションに書いてあるので、そこから転記すればよい(**このファイルに秘密情報は含まれないので見て構わない**。秘密が入っているのは `~/.aws/credentials` のほう)。
+
+疎通確認:
+
+```bash
+aws sts get-caller-identity --profile <プロファイル名>
+```
+
+アカウント ID と ARN が返れば成功。SSO のセッションが切れたら `aws sso login --profile <プロファイル名>` で取り直す。
+
+**なぜ SSO を優先するか** — `aws configure`(長期アクセスキー)方式は、失効しない秘密鍵が平文で `~/.aws/credentials` に残り続ける。SSO は数時間で切れる一時認証情報を都度取得するため、ディスクに残るのは失効済みトークンだけになる。このリポジトリが GitHub Actions 側でもアクセスキーを使わず OIDC を選んでいるのと同じ理由(→ [docs/infrastructure/README.md](../infrastructure/README.md))。
+
+#### 認証 — SSO が使えない相手の場合
+
+IAM Identity Center を有効にしていない AWS アカウント(個人アカウントなど)では SSO を使えない。その場合のみ長期アクセスキーを使う。
+
+```bash
+aws configure --profile <プロファイル名>
+```
+
+IAM でアクセスキーを発行し、Access Key ID / Secret Access Key / リージョン / 出力形式を入力する。
+
+> **この方式を使うときの注意**: 発行したキーは自分で無効化するまで有効。使わなくなったら **IAM から必ず削除する**こと。また、ルートユーザーのアクセスキーは絶対に作らない(IAM ユーザーを作ってそちらに権限を付ける)。
+
+### Stripe CLI
+
+**Stripe 公式の apt リポジトリを追加して入れる**(現行機と同じ経路。`/etc/apt/sources.list.d/stripe.list`)。
+
+```bash
+curl -s https://packages.stripe.dev/api/security/keypair/stripe-cli-gpg/public \
+  | gpg --dearmor \
+  | sudo tee /usr/share/keyrings/stripe.gpg > /dev/null
+echo "deb [signed-by=/usr/share/keyrings/stripe.gpg] https://packages.stripe.dev/stripe-cli-debian-local stable main" \
+  | sudo tee /etc/apt/sources.list.d/stripe.list > /dev/null
+sudo apt update && sudo apt install -y stripe
+stripe --version
+```
+
+apt リポジトリ経由なので、以後は `sudo apt upgrade` で一緒に更新される。
+
+公式ドキュメント → [Stripe CLI](https://docs.stripe.com/stripe-cli)
+
+#### 認証
+
+```bash
+stripe login
+```
+
+ペアリングコードが表示され、ブラウザで承認すると `~/.config/stripe/config.toml` に認証情報が保存される。
+
+疎通確認:
+
+```bash
+stripe config --list
+```
+
+登録済みのアカウントが表示されれば成功。
+
+> `stripe login` は既定で**テストモード**のアカウントに接続する。本番モードを触るには `--live` が要る。テストモードのまま作業していることを `stripe config --list` で確認する習慣をつけるとよい。
+
+`stripe listen --forward-to ...`(webhook の転送)などの実際の使い方は、転送先 URL も webhook のパスもプロジェクトごとに違うため、**そのプロジェクトのリポジトリ側に書くこと**。この手順書の役割は「PC を使える状態にする」までとする。
 
 ---
 
