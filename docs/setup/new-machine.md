@@ -420,7 +420,16 @@ claude
    sudo apt update && sudo apt install -y unzip curl
    ```
 
-3. **認証はいずれもブラウザを開く。** WSL からは Windows のブラウザが自動で開かないことがあるので、その場合は表示された URL を手で Windows 側のブラウザに貼る(手順 6 の `gh auth login` と同じ)
+3. **認証はいずれもブラウザを開くので、先に `wslu` を入れておく。** WSL には Linux 用ブラウザが 1 つも無いため、素のままだと `xdg-open` が `Permission denied` を延々並べて失敗する(実測)。`wslu` が提供する `wslview` を入れると、WSL からの「ブラウザを開け」という要求が **Windows の既定ブラウザ**に転送される
+
+   ```bash
+   sudo apt install -y wslu
+   echo 'export BROWSER=wslview' >> ~/.bashrc
+   exec bash
+   wslview https://example.com   # Windows のブラウザが開けば成功
+   ```
+
+   入れない場合は、表示された URL を手で Windows 側のブラウザに貼れば認証自体は通る
 4. **現行機から認証情報のファイルをコピーしないこと。** `~/.aws/credentials` と `~/.config/stripe/config.toml` は生の秘密情報を含む。ファイル共有や USB を経由すると経路上に平文で残るため、新 PC では必ずログインをやり直して取得する
 
 ### Node.js(fnm)
@@ -499,8 +508,19 @@ aws configure sso
 | SSO registration scopes | 不要 | 既定 `sso:account:access` のままでよい |
 | アカウント / ロール | 選ぶだけ | 承認後に一覧で提示される |
 | CLI default client Region | 不要 | ログインは成功し、コマンドが別リージョンを見るだけ |
-| CLI default output format | 不要 | 表示形式が変わるだけ |
+| CLI default output format | 不要 | 表示形式が変わるだけ。空 Enter で `json` |
 | CLI profile name | 不要 | `--profile` に書く名前が変わるだけ |
+
+> **最後の `Profile name [AdministratorAccess-<アカウントID>]` で Enter を押すと、この長い既定値がそのままプロファイル名になる**(実測)。最初に入力した「SSO session name」は**セッション名**であってプロファイル名ではないため、`--profile masanori-sso` は `could not be found` になる。短い名前にしたいならここで自分で入力すること。
+>
+> 押してしまっても `~/.aws/config` のセクション見出しを書き換えるだけでよく、**再ログインは不要**。SSO トークンは `~/.aws/sso/cache/` にセッション名を鍵として保存されており、プロファイル名とは無関係だから。
+>
+> ```ini
+> [profile AdministratorAccess-247064999676]   ← この行を
+> [profile masanori-sso]                        ← こう変える
+> ```
+>
+> 編集は `code ~/.aws/config` か `nano ~/.aws/config` で行う。**`.aws` は `.` 始まりの隠しフォルダなので、エクスプローラーの既定では見えない**(表示するなら「表示」→「表示」→「隠しファイル」、またはアドレスバーに `\\wsl.localhost\Ubuntu-24.04\home\<ユーザー名>\.aws` を直接入力)。
 
 > **プロンプトの `[...]` はその項目の既定値。** 何も入力せず Enter を押すとその値が採用される。`[None]` は既定値なしなので必ず入力が要る。`SSO registration scopes [sso:account:access]` はそのまま Enter でよい。
 
