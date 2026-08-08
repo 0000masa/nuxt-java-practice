@@ -225,7 +225,6 @@ git --version
 ```bash
 git config --global user.name "0000masa"
 git config --global user.email "134136756+0000masa@users.noreply.github.com"
-git config --global init.defaultBranch main
 ```
 
 **メールアドレスには GitHub の noreply アドレスを使うこと。** 生のメールアドレスを設定すると、それがコミット履歴に永久に残り、公開リポジトリでは誰でも見られる状態になる。自分の noreply アドレスは GitHub の **Settings → Emails → Keep my email addresses private** の欄に `<ID>+<ユーザー名>@users.noreply.github.com` の形で表示されている。
@@ -237,6 +236,14 @@ git config --global init.defaultBranch main
 ```bash
 git config --global --list | grep user
 ```
+
+**任意** — 新しいリポジトリを `git init` で作るときの初期ブランチ名を `main` にしておく:
+
+```bash
+git config --global init.defaultBranch main
+```
+
+このリポジトリは clone するだけなのでブランチ名はリモート側(`main`)が使われ、**この設定の有無は今回の手順に影響しない。** 効くのは自分で新規プロジェクトを作るときで、設定しないと `master` で始まってしまい、`git init` のたびに既定ブランチ名に関するヒントが表示される。
 
 ## 6. GitHub CLI を入れて GitHub に接続する
 
