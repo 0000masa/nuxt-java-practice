@@ -157,7 +157,9 @@ wsl --shutdown
 
 [Docker Desktop 公式ページ](https://www.docker.com/products/docker-desktop/)から Windows 版インストーラをダウンロードして実行する。
 
-> コマンドで済ませたい場合は `winget install --id Docker.DockerDesktop -e` でも同じものが入る。
+**AMD64 版と ARM64 版を聞かれたら AMD64 を選ぶ。** 「AMD64」は CPU メーカーの AMD ではなく **64bit の x86 命令セットの名前**(`x64` と同義)で、Intel の CPU でもこちらを選ぶ。ARM64 は Snapdragon 搭載機専用。判断に迷ったら PowerShell で `echo $env:PROCESSOR_ARCHITECTURE` を実行すると、`AMD64` か `ARM64` かがそのまま表示される。
+
+> コマンドで済ませたい場合は `winget install --id Docker.DockerDesktop -e` でも同じものが入る(アーキテクチャは自動判別される)。
 
 インストール中の選択:
 
