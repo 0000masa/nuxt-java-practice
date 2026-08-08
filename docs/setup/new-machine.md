@@ -405,7 +405,10 @@ claude
 
 バージョン管理ツール **fnm** を使う(現行の開発機と同じ構成。fnm 1.38.1 / Node 22.14.0)。プロジェクトごとに Node のバージョンを切り替えられるので、Node を直接インストールするより後々の事故が少ない。
 
+**先に `unzip` を入れておくこと。** fnm のインストーラは zip で配布されたバイナリを展開するが、WSL の Ubuntu は最小構成なので `unzip` が入っておらず、無いと `Checking availability of unzip... Missing!` で中断する(実測)。
+
 ```bash
+sudo apt update && sudo apt install -y unzip
 curl -fsSL https://fnm.vercel.app/install | bash
 ```
 
