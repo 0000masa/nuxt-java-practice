@@ -502,7 +502,23 @@ aws configure sso
 | CLI default output format | 不要 | 表示形式が変わるだけ |
 | CLI profile name | 不要 | `--profile` に書く名前が変わるだけ |
 
-> **`SSO region` は「リソースを置くリージョン」ではなく、IAM Identity Center のインスタンスが存在するリージョン。** `CLI default client Region` とは別物なので混同しないこと(たまたま同じ値になることは多い)。IAM Identity Center コンソールを開いたときに表示されているリージョンがそれ。
+> **プロンプトの `[...]` はその項目の既定値。** 何も入力せず Enter を押すとその値が採用される。`[None]` は既定値なしなので必ず入力が要る。`SSO registration scopes [sso:account:access]` はそのまま Enter でよい。
+
+**`SSO region` は「リソースを置くリージョン」ではなく、IAM Identity Center のインスタンスが存在するリージョン。** IAM Identity Center コンソールを開いたときに表示されているリージョンがそれ。次に出てくる `CLI default client Region` とは別物なので混同しないこと(たまたま同じ値になることは多い)。
+
+**`CLI default client Region` は、`aws` コマンドがどのリージョンを操作するかの既定値。** プロファイルの `region` として保存され、`--region` を毎回打たなくて済むようにするためのもの。
+
+```bash
+aws ec2 describe-instances                      # 既定リージョンを見る
+aws ec2 describe-instances --region us-east-1   # その場だけ上書き
+```
+
+間違えても認証は成功するが、**気づきにくい壊れ方**をする。東京リージョンに建てたリソースを既定 `us-east-1` のまま探すと、エラーではなく**空の結果**が返り「作ったはずのものが消えた」と誤解する。このリポジトリで使う値は `ap-northeast-1`(東京)。
+
+関連する例外を 2 つ:
+
+- **IAM・Route 53・CloudFront はこの設定を無視する。** リージョンという概念を持たないグローバルサービスのため
+- **CloudFront で使う ACM 証明書だけは `us-east-1` でなければならない。** 独自ドメインの HTTPS を設定するときに踏むので、そのときだけ `--region us-east-1` を付ける
 
 設定の実体は `~/.aws/config` というテキストファイルなので、間違えたら直接開いて直すか、`aws configure sso` をやり直せば上書きされる。壊れるものは無い。
 
