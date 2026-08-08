@@ -489,6 +489,23 @@ aws configure sso
 
 残りの項目(`sso_region` / `sso_account_id` / `sso_role_name` / `region` / `output`)も同じく `~/.aws/config` に揃っている。
 
+**ただし、全部を事前に知っている必要はない。** 認証に失敗するのは次の 2 つを間違えたときだけで、アカウントとロールは**ブラウザ承認後に一覧から選ぶ**形で提示される。
+
+| プロンプト | 一致必須? | 間違えるとどうなるか |
+|---|---|---|
+| SSO session name | 不要 | ローカルの呼び名。AWS 側に存在しない概念 |
+| **SSO start URL** | **必須** | 承認画面に到達できず認証が失敗する |
+| **SSO region** | **必須** | 登録リクエストが通らず失敗する |
+| SSO registration scopes | 不要 | 既定 `sso:account:access` のままでよい |
+| アカウント / ロール | 選ぶだけ | 承認後に一覧で提示される |
+| CLI default client Region | 不要 | ログインは成功し、コマンドが別リージョンを見るだけ |
+| CLI default output format | 不要 | 表示形式が変わるだけ |
+| CLI profile name | 不要 | `--profile` に書く名前が変わるだけ |
+
+> **`SSO region` は「リソースを置くリージョン」ではなく、IAM Identity Center のインスタンスが存在するリージョン。** `CLI default client Region` とは別物なので混同しないこと(たまたま同じ値になることは多い)。IAM Identity Center コンソールを開いたときに表示されているリージョンがそれ。
+
+設定の実体は `~/.aws/config` というテキストファイルなので、間違えたら直接開いて直すか、`aws configure sso` をやり直せば上書きされる。壊れるものは無い。
+
 疎通確認:
 
 ```bash
