@@ -475,7 +475,19 @@ rm -rf aws awscliv2.zip
 aws configure sso
 ```
 
-対話で SSO の開始 URL・リージョン・アカウント・ロール・プロファイル名を聞かれる。値は現行機の `~/.aws/config` の `[sso-session ...]` セクションに書いてあるので、そこから転記すればよい(**このファイルに秘密情報は含まれないので見て構わない**。秘密が入っているのは `~/.aws/credentials` のほう)。
+対話で SSO の開始 URL・リージョン・アカウント・ロール・プロファイル名を聞かれる。
+
+最初に聞かれる **SSO start URL**(`https://d-xxxxxxxxxx.awsapps.com/start` の形)の調べ方は 3 通り:
+
+| 取得元 | 場所 |
+|---|---|
+| **既存機の設定ファイル**(最速) | `~/.aws/config` の `[sso-session ...]` → `sso_start_url` |
+| AWS マネジメントコンソール | **IAM Identity Center** → ダッシュボード → **「AWS アクセスポータルの URL」** |
+| ブラウザの履歴・ブックマーク | 普段 AWS にログインするときに開いているポータルの URL そのもの |
+
+コンソールで調べるには先に管理アカウントへサインインしている必要があり、「ログインする URL を調べるためにログインする」という循環になりやすい。既存機が手元にあるなら `~/.aws/config` から転記するのが確実(**このファイルに秘密情報は含まれないので見て構わない**。秘密が入っているのは `~/.aws/credentials` のほう)。
+
+残りの項目(`sso_region` / `sso_account_id` / `sso_role_name` / `region` / `output`)も同じく `~/.aws/config` に揃っている。
 
 疎通確認:
 
