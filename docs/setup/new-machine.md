@@ -64,11 +64,57 @@ wsl -l -v
 ```
 
 ```
-  NAME      STATE           VERSION
-* Ubuntu    Running         2
+  NAME            STATE           VERSION
+* Ubuntu-24.04    Stopped         2
 ```
 
 **VERSION が `2` であること**を必ず確認する。`1` になっていると Docker Desktop が連携できない。
+
+ディストロの名前は環境によって `Ubuntu` になることも `Ubuntu-24.04` になることもある。**以降の手順に出てくる `Ubuntu-24.04` は、ここで表示された実際の名前に読み替えること。**
+
+### Ubuntu が 2 つ登録されてしまった場合
+
+エクスプローラーの「Linux」に **`Ubuntu` と `Ubuntu-24.04` の両方**が見えることがある(実測あり)。中身は同じ Ubuntu 24.04 LTS で、**別インストールが 2 つ登録されている**状態。片方だけ残すこと。放置すると Docker Desktop の WSL Integration のトグルが 2 つ並び、「有効にしたのと別のターミナルを開いて `docker` が見つからない」という事故が起きる。
+
+まず、どちらにユーザーが作られているかを確認する(エクスプローラーで覗くとそのディストロは起動するため、`STATE` が `Running` かどうかは判断材料にならない):
+
+```powershell
+wsl -d Ubuntu -- ls /home
+wsl -d Ubuntu-24.04 -- ls /home
+```
+
+- ユーザー名が出たほうがセットアップ済み。片方だけなら、そちらを残す
+- **両方に出た場合は、すでに既定(`wsl -l -v` で `*` が付いているほう)を残す**。`--set-default` が不要で手数が減り、名前に版が入っているほうが将来 Ubuntu 26.04 を入れたときに区別しやすい
+
+残すほうで `sudo` が通ることを**削除の前に**確認する(パスワードを別々に設定していた場合の保険):
+
+```powershell
+wsl -d Ubuntu-24.04
+```
+
+```bash
+whoami     # ユーザー名が出る
+sudo -v    # パスワードが通れば OK
+exit
+```
+
+確認できたら、使わないほうを削除する:
+
+```powershell
+wsl --unregister Ubuntu
+wsl -l -v
+```
+
+> **`wsl --unregister` は指定したディストロのファイルシステムを完全に削除する。確認ダイアログは出ない。** 残すほうを間違えて指定していないか、実行前に必ず見直すこと。
+
+`*` の付いた 1 行だけになれば完了。既定になっていないほうを残した場合は `wsl --set-default <名前>` で既定にしておく。
+
+### ターミナルを開く場所に注意
+
+PowerShell から `wsl` と打つと、**そのときの Windows のカレントディレクトリ(`/mnt/c/Users/...`)を引き継いで起動する。** ここで作業してもエラーにはならないが、リポジトリをこの下に clone するとつまずき #4 に直行する。
+
+- **スタートメニューの「Ubuntu 24.04.x LTS」から開く**と、最初から `~`(`/home/<ユーザー名>`)で始まる
+- PowerShell から開いた場合は、最初に `cd ~` と打つ
 
 公式ドキュメント → [WSL を使用して Windows に Linux をインストールする](https://learn.microsoft.com/ja-jp/windows/wsl/install)
 
@@ -121,9 +167,9 @@ wsl --shutdown
 
 **(a) WSL Integration を有効にする ← 忘れやすい**
 
-Settings → **Resources** → **WSL Integration** → **`Ubuntu` のトグルを ON** → Apply & Restart
+Settings → **Resources** → **WSL Integration** → **`Ubuntu-24.04` のトグルを ON** → Apply & Restart
 
-これを ON にしないと、Ubuntu のターミナルで `docker` コマンドが見つからない。
+これを ON にしないと、Ubuntu のターミナルで `docker` コマンドが見つからない。既定ディストロ以外は自動で有効にならない。
 
 **(b) 自動起動を切る(推奨)**
 
@@ -382,9 +428,9 @@ node -v && npm -v
 
 ### 1. WSL 内で `docker: command not found`
 
-Docker Desktop の **WSL Integration が OFF**。Settings → Resources → WSL Integration → `Ubuntu` のトグルを ON にして Apply & Restart(手順 3-a)。
+Docker Desktop の **WSL Integration が OFF**。Settings → Resources → WSL Integration → `Ubuntu-24.04` のトグルを ON にして Apply & Restart(手順 3-a)。
 
-既定ディストロ以外は自動で有効にならないため、ここを踏むケースが多い。
+既定ディストロ以外は自動で有効にならないため、ここを踏むケースが多い。**ディストロが 2 つ登録されている場合**(→ 手順 1)、ON にしたのと別のほうのターミナルを開いていることもある。`wsl -l -v` で今どれを使っているか確認すること。
 
 ### 2. `docker compose up` で `variable is not set` の警告が大量に出る
 
