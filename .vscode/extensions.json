@@ -1,0 +1,16 @@
+// このリポジトリを開いたときに VS Code が推奨する拡張機能。
+// 通知の「インストール」または拡張機能ビューで @recommended を検索すると一括で入る。
+// backend コンテナの中で使う Java 系拡張は .devcontainer/devcontainer.json 側で指定している。
+// 新しい PC でのセットアップ手順 → docs/setup/new-machine.md
+{
+	"recommendations": [
+		// ホスト(Windows)側に入る拡張。WSL 内のフォルダやコンテナを開くために必要
+		"ms-vscode-remote.remote-wsl",
+		"ms-vscode-remote.remote-containers",
+		// frontend/ の Vue / Nuxt 開発
+		"vue.volar",
+		// docs/ の Markdown 編集(mermaid 図のプレビュー込み)
+		"bierner.markdown-mermaid",
+		"yzhang.markdown-all-in-one"
+	]
+}
