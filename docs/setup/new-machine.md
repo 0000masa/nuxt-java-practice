@@ -410,8 +410,9 @@ claude
 - **Node.js** — コンテナ(`node:22-slim`)が持っている
 - **AWS CLI** — AWS へのデプロイは GitHub Actions の OIDC 認証で行う設計で、手元から `aws` を叩く手順は存在しない(→ [docs/infrastructure/README.md](../infrastructure/README.md))
 - **Stripe CLI** — このリポジトリは決済を扱わない
+- **ngrok** — ローカルをインターネットに公開する必要がない(外部サービスからの webhook を受けないため)
 
-### 3 つに共通する前提
+### 共通する前提
 
 1. **すべて WSL(Ubuntu)の中に入れる。** Windows 側には入れない
 2. **`unzip` と `curl` が要る。** WSL の Ubuntu は最小構成なので、先に入れておく
@@ -648,6 +649,66 @@ stripe logout --all    # すべてのプロファイルの認証情報を削除
 > `stripe logout` が消すのは**手元のファイルにあるキー**。Stripe 側に登録された鍵そのものを確実に無効化したいなら、Stripe ダッシュボードの API キー画面から該当のキーを revoke すること。
 
 `stripe listen --forward-to ...`(webhook の転送)などの実際の使い方は、転送先 URL も webhook のパスもプロジェクトごとに違うため、**そのプロジェクトのリポジトリ側に書くこと**。この手順書の役割は「PC を使える状態にする」までとする。
+
+### ngrok
+
+**WSL の中で動いているサーバーを、一時的にインターネットから見えるようにするツール。** 外部サービスからの webhook をローカルで受け取る、スマートフォンの実機から確認する、といった用途で使う。
+
+**公式の apt リポジトリを追加して入れる。**
+
+```bash
+sudo mkdir -p -m 755 /etc/apt/keyrings
+curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc \
+  | sudo gpg --dearmor -o /etc/apt/keyrings/ngrok.gpg
+echo "deb [signed-by=/etc/apt/keyrings/ngrok.gpg] https://ngrok-agent.s3.amazonaws.com buster main" \
+  | sudo tee /etc/apt/sources.list.d/ngrok.list > /dev/null
+sudo apt update && sudo apt install -y ngrok
+ngrok version
+```
+
+> リポジトリ行の `buster` は Debian のコードネームだが、**ngrok は全ディストリビューション共通でこの 1 つを使う**。Ubuntu 24.04 でもそのまま指定する(公式手順どおり)。
+
+公式ドキュメント → [ngrok のインストール](https://ngrok.com/docs/getting-started/)
+
+#### 設定 — authtoken を登録する
+
+アカウント作成済みなら、[ダッシュボードの Your Authtoken ページ](https://dashboard.ngrok.com/get-started/your-authtoken)にトークンが表示されている。それを登録する。
+
+```bash
+ngrok config add-authtoken <トークン>
+```
+
+保存先は `~/.config/ngrok/ngrok.yml`(パーミッション `600`)。中身はこの形になる(現行機で確認):
+
+```yaml
+version: "3"
+agent:
+    authtoken: ...
+```
+
+確認:
+
+```bash
+ngrok config check
+```
+
+> **authtoken は秘密情報。** アカウントに紐づく鍵なので、コピーして共有したりリポジトリに入れたりしないこと。漏れたらダッシュボードから再発行する。
+
+#### 使い方
+
+WSL の中で動いているサーバー(例: ポート 3000)を公開する:
+
+```bash
+ngrok http 3000
+```
+
+`Forwarding https://xxxx.ngrok-free.app -> http://localhost:3000` のように公開 URL が表示される。**`Ctrl+C` で停止するまで公開され続ける。**
+
+Docker コンテナで動かしているサーバーも、`ports:` で WSL 側に公開されていれば同じように指定できる。
+
+無料プランでも**静的ドメインを 1 つ**使えるので、URL が毎回変わると困る場合(webhook の登録先など)はダッシュボードの Domains で取得する。指定するコマンドはダッシュボードに表示されるものをそのまま使うのが確実(オプション名がバージョンで変わっている)。
+
+> **セキュリティ上の注意 — 起動中は、その URL を知っていれば誰でもアクセスできる。** 認証はかからない。開発用の管理画面やデバッグ用エンドポイントも一緒に公開されるので、**用が済んだら必ず `Ctrl+C` で止めること。** 起動しっぱなしで放置しない。
 
 ---
 
