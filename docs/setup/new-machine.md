@@ -722,7 +722,35 @@ aws sts get-caller-identity --profile <プロファイル名>
 
 > **`rm ~/.aws` は末尾にスラッシュを付けないこと。** `rm -rf ~/.aws/` と書くとリンクを辿って Windows 側の中身を消す。ここでやりたいのは「リンクという名の矢印を捨てる」ことだけ。
 
-`.azure` も中身が空なら `rm ~/.azure` でよい。疎通確認後、Windows 側に残った `/mnt/c/Users/<Windowsユーザー名>/.aws` は削除してよい。
+成功すると `~/.aws` が `drwx------`(700)の実ディレクトリになり、`aws sts get-caller-identity` がアカウント ID と ARN を返す。**再ログインは不要**(SSO トークンのキャッシュも一緒に移動しているため)。
+
+**確認と後片付け**(この順で行う):
+
+1. **リンクが復活しないことを確かめる** — Docker Desktop を再起動してから:
+
+   ```bash
+   ls -ld ~/.aws     # 先頭が d のままなら恒久的に直っている
+   ```
+
+   `l` に戻るなら原因の推定が外れているので、対処を考え直す必要がある。
+
+2. **`.azure` も外す** — 中身を確認してから消す:
+
+   ```bash
+   ls -la /mnt/c/Users/<Windowsユーザー名>/.azure
+   rm ~/.azure      # 空(. と .. だけ)ならリンクを消すだけでよい
+   ```
+
+   中身がある場合は、`.aws` と同じ手順で WSL 内の実ディレクトリに移すこと。
+
+3. **退避先と Windows 側の原本を消す** — 手順 1 が確認できてから:
+
+   ```bash
+   rm -rf ~/aws-backup
+   rm -rf /mnt/c/Users/<Windowsユーザー名>/.aws
+   ```
+
+   Windows 側の削除は、**Windows 版の AWS CLI を使う予定がない**ことが前提。使うなら残す(その場合は認証情報が Windows 側にも存在し続ける点を意識しておく)。
 
 ---
 
