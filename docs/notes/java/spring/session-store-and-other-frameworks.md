@@ -464,6 +464,7 @@ Express や Hono はルーティングとミドルウェアだけの薄い層な
 
 ## 関連
 
+- **このメモの相方: 認証層(Spring Security)の仕組み** → [security-filter-chain.md](./security-filter-chain.md)。セッションに入る principal を誰が作り、誰が復元するのか
 - **なぜ Cookie セッション方式で、なぜ MySQL なのか(判断)** → [ADR-0002](../../../adr/0002-session-cookie-over-jwt.md)
 - **全端末ログアウトの実装** → [UserSessionManager.java](../../../../backend/src/main/java/com/example/app/auth/UserSessionManager.java)
 - **セッションに何を載せるかの判断** → [AppUserDetails.java](../../../../backend/src/main/java/com/example/app/auth/AppUserDetails.java) のクラスコメント
