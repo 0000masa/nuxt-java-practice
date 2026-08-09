@@ -33,7 +33,7 @@ MySQL を選んで Redis を選ばなかったのは、① 開発環境のコン
 ## 結果として生じること
 
 - **ログインリクエストだけ JSON ではなく form-urlencoded になる。** `formLogin()` は JSON ボディを読めないため、フロントは `/api/auth/login` にだけ `URLSearchParams` で送る。他の API とフロントの書き方が揃わないのは、この決定の代償として受け入れたもの。**「統一されていないから直そう」と JSON 化するとこの決定を壊すことになる**
-- **CSRF 対策が必須になる。** Cookie でセッションを持つと CSRF が成立するため、Spring Security の CSRF を有効にし、`XSRF-TOKEN` Cookie → `X-XSRF-TOKEN` ヘッダ方式でフロントから送る。「REST API だから CSRF は不要」は Bearer トークン方式の話であって、この構成には当てはまらない
-- **CSRF トークンの初回発行を意識する必要がある。** Spring Security 6 はトークンを遅延発行するため、ログイン前に一度 GET してトークンを受け取る必要がある。この役目は `GET /api/auth/me`(アプリ起動時に必ず叩く)が兼ねる
+- **CSRF 対策が必須になる。** Cookie でセッションを持つと CSRF が成立するため、Spring Security の CSRF を有効にし、`XSRF-TOKEN` Cookie → `X-XSRF-TOKEN` ヘッダ方式でフロントから送る。「REST API だから CSRF は不要」は Bearer トークン方式の話であって、この構成には当てはまらない(仕組みと、この方式を選んだことの弱点 → [csrf.md](../notes/browser/csrf.md))
+- **CSRF トークンの初回発行を意識する必要がある。** Spring Security 6 はトークンを遅延発行するため、ログイン前に一度 GET してトークンを受け取る必要がある。この役目は `GET /api/auth/me`(アプリ起動時に必ず叩く)が兼ねる(実際に Cookie が発行されている様子 → [csrf.md](../notes/browser/csrf.md))
 - **セッションテーブルを Flyway で管理する。** `spring.session.jdbc.initialize-schema` の既定は `embedded` なので MySQL では何も作られない。公式 DDL を V3 として取り込む。この 2 テーブルに JPA エンティティは作らないので `ddl-auto: validate` の検証対象外
 - **スケールアウト時は DB がセッションの共有点になる。** ECS Fargate でタスクを増やしてもセッションは共有されるが、そのぶん RDS への読み書きが増える。性能が問題になったら Redis(ElastiCache)への差し替えを検討する — `spring-session-data-redis` に入れ替えるだけで済むよう、アプリコードは Spring Session の抽象より下に依存させない

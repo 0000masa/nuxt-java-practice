@@ -16,6 +16,7 @@
 >     org.springframework.security: DEBUG
 > ```
 > **セッションを「どこに置くか」**はこのメモの担当ではない → [session-store-and-other-frameworks.md](./session-store-and-other-frameworks.md)。あちらが保管層(Spring Session)、こちらが認証層(Spring Security)で、**2 本で 1 対**になっている。
+> **CSRF トークンが何者で、なぜ効くのか**もこのメモの担当ではない → [csrf.md](../../browser/csrf.md)。こちらは `CsrfFilter` が列のどこにいるかまで、あちらがトークン 1 個の一生。
 
 ## まず結論(3 行)
 
@@ -82,7 +83,7 @@ Controller に書く方式だと「書き忘れ = 公開」になる。関門方
 |---|---|---|---|
 | **0** | `SessionRepositoryFilter` | リクエストを包み直し、セッションを MySQL から引く | Spring **Session** 側 → [別ノート](./session-store-and-other-frameworks.md) |
 | **1** | `SecurityContextHolderFilter` | セッションから principal を復元して置く | **`@AuthenticationPrincipal` の供給源** |
-| **2** | `CsrfFilter` | トークンを照合し、XSRF-TOKEN Cookie を発行 | `SecurityConfig.java:64` `csrf.spa()` |
+| **2** | `CsrfFilter` | トークンを照合し、XSRF-TOKEN Cookie を発行 | `SecurityConfig.java:66` `csrf.spa()` → [csrf.md](../../browser/csrf.md) |
 | **3** | `LogoutFilter` | `/api/auth/logout` を横取り | `SecurityConfig.java:78-80` / `AuthResponseWriter` |
 | **4** | `UsernamePasswordAuthenticationFilter` | `/api/auth/login` を横取り | `SecurityConfig.java:69-74` → `AppUserDetailsService` → `AppUserDetails` |
 | **5** | `AnonymousAuthenticationFilter` | 未ログインなら principal を `"anonymousUser"` にする | **`AppUserDetails.java:16-17` の「null が入る」理由** |
@@ -549,13 +550,14 @@ principal はセッションに保存済みで、`users` テーブルは毎回�
 | **Bean** | Spring が起動時に作って管理する部品の実体 |
 | **DI(依存性注入)** | 必要な部品を自分で `new` せず外から渡してもらう仕組み。Spring は**型**で解決する |
 | **制御の反転(IoC)** | 自分がフレームワークを呼ぶのではなく、フレームワークが自分のコードを呼ぶ構造 |
-| **CSRF** | 利用者のログイン状態を使って、別サイトから勝手に操作を実行させる攻撃 |
+| **CSRF** | 利用者のログイン状態を使って、別サイトから勝手に操作を実行させる攻撃(→ [csrf.md](../../browser/csrf.md)) |
 | **セッション固定化攻撃** | 攻撃者が用意したセッション ID を使わせ、ログイン後に乗っ取る攻撃。ID の再発行で防ぐ |
 | **アカウント列挙** | エラーの違いから「このメールは登録済み」と特定すること(→ ADR-0003) |
 
 ## 関連
 
 - [session-store-and-other-frameworks.md](./session-store-and-other-frameworks.md) — **このメモの相方**。principal を保存する側(Spring Session)の話。`getSession()` が MySQL に届くまで、保存先の 5 段階、Laravel / Better Auth との対比
+- [csrf.md](../../browser/csrf.md) — `CsrfFilter` が照合しているトークンの話。なぜ CSRF が成立するのか、なぜトークンで防げるのか、`csrf.spa()` が何を選んでいるのか
 - [exception-handling-vs-other-frameworks.md](./exception-handling-vs-other-frameworks.md) — `GlobalExceptionHandler` 側の話。このメモの `AuthResponseWriter` と対になる
 - [ADR-0002 セッション Cookie 方式を選んだ理由](../../../adr/0002-session-cookie-over-jwt.md) — なぜ JWT ではないか
 - [ADR-0003 アカウント列挙と未確認ユーザーの扱い](../../../adr/0003-account-enumeration-and-unverified-signup.md) — 「メール未確認」だけメッセージを分けた判断
