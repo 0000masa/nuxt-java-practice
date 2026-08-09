@@ -112,6 +112,24 @@ public class GlobalExceptionHandler {
 		return ErrorResponse.of(e.getMessage());
 	}
 
+	// 【400 Bad Request】DB を見て初めて分かる業務ルール違反(トークンの期限切れなど)。
+	// @Valid による形式チェックを通ったあとに Service が投げる。
+	@ExceptionHandler(InvalidRequestException.class)
+	@ResponseStatus(HttpStatus.BAD_REQUEST)
+	public ErrorResponse handleInvalidRequest(InvalidRequestException e) {
+		return ErrorResponse.of(e.getMessage());
+	}
+
+	// 【400 Bad Request】特定の入力項目に紐づく業務ルール違反(登録済みのメールアドレスなど)。
+	// 上の handleInvalidRequest との違いは、どの入力欄のエラーかを fieldErrors で伝えられること。
+	// @Valid の違反(下の handleValidation)と同じ形のレスポンスになるので、
+	// フロントは「どちらで弾かれたか」を気にせず fieldErrors を見るだけでよい。
+	@ExceptionHandler(FieldValidationException.class)
+	@ResponseStatus(HttpStatus.BAD_REQUEST)
+	public ErrorResponse handleFieldValidation(FieldValidationException e) {
+		return new ErrorResponse("入力内容に誤りがあります", Map.of(e.getField(), e.getMessage()));
+	}
+
 	/** リクエストボディ(@Valid)のバリデーションエラー */
 	// 【400 Bad Request】リクエストボディ(JSON)の中身が制約に違反していたとき。
 	//

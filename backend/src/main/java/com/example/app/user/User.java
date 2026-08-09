@@ -62,12 +62,14 @@ public class User {
 		this.email = email;
 	}
 
+	// 引数も局所変数もないため createdAt / updatedAt はフィールドに解決される。名前の衝突がないので this. は不要。
 	@PrePersist
 	void onCreate() {
 		createdAt = LocalDateTime.now();
 		updatedAt = createdAt;
 	}
 
+	// ここも同様に updatedAt という名前はフィールドしかないため this. は不要。
 	@PreUpdate
 	void onUpdate() {
 		updatedAt = LocalDateTime.now();
@@ -87,6 +89,16 @@ public class User {
 
 	public String getEmail() {
 		return email;
+	}
+
+	/** NULL のときはパスワードが未設定(Google ログインのみのユーザーと dev_user)。パスワードログインはできない。 */
+	public String getPasswordHash() {
+		return passwordHash;
+	}
+
+	/** ハッシュ化済みの値を渡すこと。平文を渡さないよう、呼び出し側で PasswordEncoder を通す。 */
+	public void setPasswordHash(String passwordHash) {
+		this.passwordHash = passwordHash;
 	}
 
 	public String getBio() {
