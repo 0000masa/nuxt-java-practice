@@ -775,6 +775,7 @@ EC2 やコンテナ、GitHub Actions に**長期のアクセスキーをファ�
 
 ## 関連
 
+- **この章(第 5 章)の続き — 配置から公開・更新・運用までの通しの手順** → [deploying-to-bare-linux.md](./deploying-to-bare-linux.md)(Spring Boot と Nginx + Laravel の 2 通り)
 - 権限そのものの仕組み(`rwx` がどこに記録されるか、`umask`、git とファイルモード) → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)
 - 環境変数と `.env`、秘密情報をプロセスへ渡す方法 → [env-vars-basics.md](./env-vars-basics.md)
 - AWS CLI / SSO の設定手順と、`~/.aws` が Windows 側へのリンクになる問題 → [docs/setup/new-machine.md](../setup/new-machine.md)
