@@ -160,7 +160,72 @@ Linux の `sudo` も発想は同じで、普段は uid 1000 のまま、必要�
 
 最後の行が見落としやすい。**全体インストールしたソフトでも、設定ファイルは各ユーザーのホーム配下に作られる。** プログラム本体は共有、設定は個別、という分業になっている。
 
-Linux 側の共有領域には、表に挙げなかったものがもう 1 つある。`/usr/bin` だ。ここも root 所有の共有領域だが、**`apt` などのパッケージ管理システムが管理する領域**なので、自分で入れたものを置く場所ではない。手で入れたファイルを置くと、パッケージ更新時に上書きされたり衝突したりする。**手動インストールは `/usr/local/bin`(単体の実行ファイル)か `/opt`(ディレクトリ一式)に置く**、という住み分けになっている。`/usr/local` の `local` が「このマシンで独自に入れたもの」の意味。
+### `/usr/bin` と `/usr/local/bin` の違い — 持ち主が違う
+
+Linux 側の共有領域には、表に挙げなかったものがもう 1 つある。`/usr/bin` だ。ここも root 所有の共有領域だが、**`/usr/local/bin` とは持ち主が違う。**
+
+| | `/usr/bin` | `/usr/local/bin` |
+|---|---|---|
+| 誰が置くか | **`apt` などのパッケージ管理システム** | **人間**(管理者が手で入れたもの) |
+| パッケージ更新の影響 | 上書き・削除される | **触られない** |
+| `dpkg` が中身を把握しているか | している | していない |
+| 件数(この環境の実測) | 1035 | 12 |
+
+`/usr/local` の `local` は「このマシンで独自に入れたもの」の意味。**パッケージ管理システムが管理する領域と、人間が手で入れたものの領域を分けておくための境界線**で、これがないと `apt upgrade` のたびに手で入れたファイルが消えたり衝突したりする。
+
+実測すると、持ち主の違いがはっきり出る:
+
+```
+$ dpkg -S /usr/bin/git
+git: /usr/bin/git                                       ← apt が把握している
+
+$ dpkg -S /usr/local/bin/aws
+dpkg-query: no path found matching pattern /usr/local/bin/aws
+                                                        ← apt は知らない = 手で入れたもの
+```
+
+`/usr/local/bin` の中身を見ると、確かに手で入れたものばかりが並んでいる:
+
+```
+$ ls /usr/local/bin
+aws  aws_completer  cagent  corepack  kubectl  n  node  npm  npx  sam  session-manager-plugin  stripe.old
+```
+
+### 同名のコマンドがあったらどちらが動くか — PATH の順序で決まる
+
+2 つの領域に同じ名前のコマンドがあった場合、**先に見つかったほうが実行される**。`PATH` は「実行ファイルを探すディレクトリの並び」で、前から順に探すため。
+
+```
+$ echo $PATH | tr ':' '\n'
+...
+/usr/local/bin      ← 11 番目
+/usr/sbin
+/usr/bin            ← 13 番目
+```
+
+**`/usr/local/bin` のほうが前にある。** これは意図された順序で、「手で入れた新しいバージョンが、パッケージ版より優先される」ようになっている。
+
+この環境には `node` が 3 つあり、実際に優先順位が働いている:
+
+```
+$ which -a node
+/run/user/1000/fnm_multishells/1893_.../bin/node    ← これが実行される(PATH の 2 番目)
+/run/user/1000/fnm_multishells/896_.../bin/node
+/usr/local/bin/node
+```
+
+`which` は最初の 1 つ、`which -a` は全部を表示する。**「入れたはずのバージョンと `node -v` の結果が食い違う」ときは、たいていこの優先順位が原因**なので、`which -a` で重複を疑う。
+
+なお、この住み分けは慣習であって OS が強制するものではない。実測でも例外が 1 つ見つかった:
+
+```
+$ dpkg -S /usr/local
+session-manager-plugin: /usr/local     ← deb パッケージなのに /usr/local へ入れている
+```
+
+AWS の session-manager-plugin は `.deb` で配られながら `/usr/local` に置く作りになっている。**慣習を破るパッケージも実在する**、という例。
+
+まとめると、**手動インストールは `/usr/local/bin`(単体の実行ファイル)か `/opt`(ディレクトリ一式)に置き、`/usr/bin` には置かない。**
 
 ### 実測: 同じ PC の中に両方が共存している
 
@@ -210,6 +275,44 @@ cursor
 ```
 
 **VS Code も Cursor も Notion も、`Program Files` ではなくユーザー配下に入っている。** これらは意図的にユーザー別インストールを既定にしているツールで、そのおかげで管理者権限のない環境でも入り、自動アップデートも昇格なしで走る。
+
+### では、全体インストールされるのは何か — 基準はサイズではない
+
+同じ PC の `Program Files` を見ると、性格のはっきり違う顔ぶれが並んでいる:
+
+```
+$ ls "C:\Program Files"
+DBeaver  DIFX  Docker  Google  HP  HPCommRecovery  Hyper-V  Intel
+WSL  Windows Defender  WindowsApps  WindowsPowerShell  nodejs ...
+```
+
+ユーザー配下(`VS Code` / `Cursor` / `Notion`)と見比べると、線引きが読み取れる。**全体インストールになるのは、「そうしないと機能しないもの」**であって、大きいものではない。
+
+| 全体インストールになる理由 | この PC での実例 |
+|---|---|
+| **OS の機能そのもの** — カーネルや OS の一部として組み込まれる | `WSL`、`Hyper-V`、`Windows Defender` |
+| **デバイスドライバ** — ハードウェアを扱うのでカーネル空間に入る | `Intel`、`HP`、`DIFX` |
+| **サービスとして常駐する** — ログインしていなくても動く必要がある | `Docker`(バックグラウンドサービス + WSL/Hyper-V 連携) |
+| **全ユーザーで共有したい** — 各自が別々に持つ意味がない | `nodejs`(MSI 版)、`DBeaver`、`HeidiSQL` |
+
+いずれも**管理者権限が必要な操作を含んでいる**のが共通点。ドライバはカーネルに登録し、サービスは OS のサービス一覧に登録し、OS 機能は `C:\Windows` を触る。ユーザー配下に置いても、これらの登録はできない。**「全体インストールを選んだ」のではなく「そうするしかない」**という順序になっている。
+
+裏を返すと、**エディタやチャットアプリのように「起動して使うだけ」のソフトには全体インストールにする理由がない。** VS Code や Cursor がユーザー別を既定にしているのはそのため。
+
+### サイズは基準になるのか — ならない
+
+ゲームのような容量の大きいものが全体インストールになるのでは、という発想は自然だが、**サイズと権限は無関係**。10GB のソフトでもドライバを積まないならユーザー配下に置ける。
+
+実際、大きいソフトは**第 3 の選択肢**を取ることが多い。プログラム本体と巨大なデータを分け、データの置き場所をユーザーに選ばせる方式で、Steam がその典型:
+
+| | 置き場所 | サイズ |
+|---|---|---|
+| Steam 本体 | `C:\Program Files (x86)\Steam`(既定) | 数百 MB |
+| ゲームのデータ | ライブラリフォルダ(**任意のドライブを指定可能**) | 数十 GB〜 |
+
+つまり容量が大きいことは、**全体インストールを選ぶ理由ではなく、「置き場所を選べるようにする」理由**になっている。同じ発想は Docker のイメージ置き場や、動画編集ソフトのキャッシュ設定にも出てくる。
+
+なお、容量が大きいものをユーザー配下に置くと問題になる環境は実在する。**企業でよく使われる移動ユーザープロファイル**(ログインのたびにユーザー配下をネットワーク経由で同期する仕組み)がそれで、この場合は大きなデータをユーザー配下から外す。ただしこれは「サイズ」ではなく「その環境がユーザー配下を同期対象にしているから」という別の事情。
 
 ### どちらを選ぶか
 
@@ -408,6 +511,126 @@ WantedBy=multi-user.target
 
 `EnvironmentFile` の指す `/etc/myapp/env` に DB のパスワードなどを置き、このファイルだけ `chmod 640` かつ `chown root:appuser` にしておく — アプリからは読めるが他のユーザーからは読めない、という形が定番。環境変数の渡し方そのものは [env-vars-basics.md](./env-vars-basics.md) に整理してある。
 
+#### ファイルを置いただけでは反映されない
+
+`.service` ファイルを `/etc/systemd/system/` に置くと自動で有効になる、**わけではない**。置いたあとに 3 つのコマンドが要る。
+
+```bash
+sudo systemctl daemon-reload    # 1. systemd に設定ファイルを読み直させる
+sudo systemctl enable myapp     # 2. サーバー起動時に自動で立ち上がるようにする
+sudo systemctl start myapp      # 3. 今すぐ起動する
+```
+
+それぞれ役割が違う。
+
+1. **`daemon-reload`** — systemd はファイルの変更を自動では検知しない。置いた・書き換えたあとにこれを実行しないと、古い内容のまま動き続ける(新しい systemd は `systemctl status` に「Unit file changed on disk」と警告を出してくれる)
+2. **`enable`** — **これが `[Install] WantedBy=` を書く理由。** 起動時に立ち上げる登録を行う
+3. **`start`** — 今このプロセスを起動する。`enable` は「次回の起動から」なので、両方必要
+
+`enable` が何をしているかは実測すると分かりやすい。**シンボリックリンクを 1 本張っているだけ**:
+
+```
+$ ls -l /etc/systemd/system/multi-user.target.wants/
+cron.service -> /usr/lib/systemd/system/cron.service
+console-setup.service -> /usr/lib/systemd/system/console-setup.service
+...
+```
+
+`WantedBy=multi-user.target` と書いておくと、`enable` したときに `multi-user.target.wants/` の中へこのリンクが作られる。**「multi-user 状態になったときに起動してほしいサービス」の一覧がこのディレクトリ**で、systemd は起動時にここを見る。`disable` はこのリンクを消すだけなので、設定ファイル本体は残る。
+
+#### 起動の流れ — 何が引き金で、何が起きるのか
+
+**起点は 2 つあり、どちらも読むファイルは同じ。**
+
+| 起点 | 誰が起動するか | いつ |
+|---|---|---|
+| `sudo systemctl start myapp` | 人が手で | 今すぐ起動したいとき |
+| サーバーの起動 | **systemd 自身** | `enable` 済みなら毎回 |
+
+注意したいのは、**サーバー起動時に `systemctl start` が実行されるわけではない**こと。systemd が `multi-user.target.wants/` のリンクを見て、自分で起動する。**引き金は違うが、読まれる設定ファイルも、そこから先の流れもまったく同じ。**
+
+その流れが次のとおり:
+
+```
+systemctl start myapp   (またはサーバー起動 → systemd が自分で)
+  → systemd が myapp.service を読む
+      User=appuser          … 権限を appuser に落とす
+      WorkingDirectory=     … カレントディレクトリを /opt/myapp にする
+      EnvironmentFile=      … /etc/myapp/env の中身を環境変数として持たせる
+  → その状態で ExecStart の行を実行する
+      /usr/bin/java -jar /opt/myapp/app.jar
+  → java が起動し、jar の中のアプリが動き出す
+  → Spring Boot が application.yml を読む
+      ${DB_HOST} の穴に、systemd から渡された環境変数が入る
+```
+
+**`User=` などの行は「プロセスをどんな状態で生ませるか」を決めていて、`ExecStart=` は「何を生むか」を決めている。** 権限を落とすのもカレントディレクトリを移すのも環境変数を持たせるのも、すべて `ExecStart` の実行より**前**に済ませてある。
+
+#### `ExecStart=` はコマンドラインそのもの
+
+`ExecStart=` は「このファイルにこの設定を使わせる」という対応づけではなく、**systemd が実行するコマンドを 1 行で書いたもの**。
+
+```
+ExecStart=/usr/bin/java -jar /opt/myapp/app.jar
+          ├────────────┤ ├──────────────────┤
+          実行プログラム      それに渡す引数
+```
+
+`man systemd.service` の説明では「The first item becomes the command to execute, and the subsequent items the arguments」。つまりターミナルで手で打つ次の 1 行と同じ意味で、それを systemd に代行させているだけ。
+
+```
+$ /usr/bin/java -jar /opt/myapp/app.jar
+```
+
+ここで **`app.jar` は設定ファイルではなく、アプリのプログラム本体**である点に注意。`java` は Java のプログラムを動かす実行係で、それ単体では何もできない。`-jar /opt/myapp/app.jar` は `java` に渡す引数で「この jar に入っているプログラムを動かせ」という指示になる。`-jar` は `java` のオプションであって、**systemd は中身を解釈していない**(systemd から見ればただの文字列)。
+
+#### 設定は 2 層に分かれている
+
+「設定ファイル」と呼べるものが 2 つ登場するので、読む人で区別する。
+
+| | `myapp.service` | `application.yml`(jar に同梱) |
+|---|---|---|
+| 読む人 | **systemd** | **Spring Boot(アプリ自身)** |
+| 決めること | どのユーザーで、どのコマンドを、どんな環境で起動するか | どの DB に繋ぐか、何番ポートで待つか |
+| いつ読まれるか | プロセスを起動する直前 | アプリが起動したあと |
+
+**2 つを繋いでいるのが `EnvironmentFile=` → 環境変数 → `${DB_HOST}` という経路。** systemd はアプリの設定を直接書き換えるのではなく、環境変数として渡すところまでをやり、アプリが自分でそれを拾う。この受け渡しの仕組みは [env-vars-basics.md](./env-vars-basics.md) に整理してある。
+
+#### `ExecStart=` で引っかかりやすい点が 2 つ
+
+**1. シェルではない。** `man systemd.service` に明記されている。
+
+> redirection using "<", "<<", ">", and ">>", pipes using "|", running programs in the background using "&", and other elements of shell syntax are not supported.
+
+`ExecStart=java -jar app.jar > log.txt` のような書き方は動かない。使いたければ `ExecStart=sh -c '...'` と明示的にシェルを呼ぶ。
+
+**2. パスは絶対パスで書く。** ここで使われるのは**自分のシェルの `PATH` ではない**。
+
+> If the command is not a full (absolute) path, it will be resolved to a full path using a **fixed search path determined at compilation time**.
+
+systemd 固有の固定リスト(`/usr/local/bin`、`/usr/bin`、`/bin` など)が使われるので、第 3 章で見た `fnm` の `node` のように**ユーザー配下にあるものは名前だけでは見つからない**。`ExecStart=/usr/bin/java` と絶対パスで書いているのはこのため。
+
+#### ファイル名は自由 — ただしそれがサービス名になる
+
+ファイル名はアプリのフォルダ名と一致している必要はない。**ファイル名から `.service` を除いた部分が、そのまま `systemctl` で指定する名前になる**というだけの関係:
+
+```
+/etc/systemd/system/myapp.service  →  sudo systemctl start myapp
+```
+
+拡張子のほうは自由ではなく、**種類を表す決められた名前**。`.service`(常駐プロセス)のほかに `.timer`(定期実行、cron の代わり)、`.socket`、`.mount` などがあり、systemd は拡張子で扱いを変える。
+
+#### 置き場所も `/usr/bin` と `/usr/local/bin` と同じ関係になっている
+
+`.service` ファイルの置き場所は 2 つあり、第 3 章で見た住み分けとまったく同じ構造をしている:
+
+| ディレクトリ | 誰が置くか | この環境の実測 |
+|---|---|---|
+| `/usr/lib/systemd/system/` | **パッケージ管理システム**(`apt` など) | 172 個の `.service` |
+| `/etc/systemd/system/` | **人間**(管理者が手で書いたもの) | 管理者が置いたファイルと、`enable` のリンク |
+
+`/etc` 側が優先されるので、**パッケージ版の設定を上書きしたいときも `/etc` 側に置く**(元ファイルは編集しない)。`apt upgrade` で上書きされないのも `/usr/local/bin` と同じ理屈。自分のアプリの `.service` を `/etc/systemd/system/` に置くのは、この住み分けに従っている。
+
 ### 5-5. コンテナだとどう変わるか
 
 このリポジトリは EC2 に直接置く構成ではなく、**ECS Fargate でコンテナとして動かす**(→ [docs/infrastructure/README.md](../infrastructure/README.md))。この場合、話は次のように変わる。
@@ -539,7 +762,12 @@ EC2 やコンテナ、GitHub Actions に**長期のアクセスキーをファ�
 - **スティッキービット** — 誰でも書けるディレクトリで「自分が作ったファイルしか消せない」制約を加える権限。`ls` で末尾が `t` になる(`/tmp` の `drwxrwxrwt`)
 - **`umask`** — 新しく作るファイル・ディレクトリから落とす権限のマスク。022 ならファイルは 644、ディレクトリは 755 になる
 - **`/opt` と `/usr/local`** — パッケージ管理の外で手動インストールしたものを置く共有領域。`/opt` はディレクトリ一式、`/usr/local/bin` は単体の実行ファイル向け。`/usr/bin` は `apt` の管理領域なので使わない
+- **`PATH`** — 実行ファイルを探すディレクトリの並び。前から順に探し、最初に見つかったものが実行される。`/usr/local/bin` が `/usr/bin` より前にあるので、手で入れたものがパッケージ版より優先される
+- **`which -a`** — 同名のコマンドを PATH 上から全部挙げる。バージョンが食い違うときの調べ方
 - **サービス専用ユーザー** — アプリ 1 つのために作る、ログインできないシステムユーザー。乗っ取られたときの被害範囲を縛るために使う
+- **ユニットファイル(`.service`)** — systemd にサービスの起動方法を教える設定ファイル。拡張子が種類を表し(`.service` / `.timer` など)、ファイル名から拡張子を除いた部分が `systemctl` で使うサービス名になる
+- **`daemon-reload` / `enable` / `start`** — ユニットファイルを置いたあとに要る 3 手順。順に「設定を読み直す」「起動時に立ち上げる登録(`WantedBy` の `.wants` へシンボリックリンクを張る)」「今すぐ起動する」。**置いただけでは反映されない**
+- **`ExecStart=`** — systemd が実行するコマンドラインそのもの。最初の項目が実行プログラム、残りがその引数。シェルではないのでパイプやリダイレクトは使えず、パスは絶対パスで書く
 - **systemd の `User=`** — サービス定義でプロセスの実行ユーザーを指定する行。systemd 自体は root で動くが、起動直前に権限をこのユーザーへ落とす
 - **プロファイル(AWS CLI)** — `~/.aws/config` に複数書ける設定の束。`--profile` で切り替える。1 人が複数アカウント・複数環境を取り違えないための仕組み
 - **インスタンスプロファイル / タスクロール** — EC2 や ECS に IAM ロールを紐付ける仕組み。長期の秘密鍵をディスクに置かず、一時認証情報が自動で渡る
