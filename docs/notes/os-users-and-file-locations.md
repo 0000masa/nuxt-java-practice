@@ -53,11 +53,11 @@ desktop-tennuhg\masanori.adachi S-1-5-21-4090821595-3417302871-1960351343-1002
 ```
 $ wc -l < /etc/passwd
 28
-$ grep -cE "nologin|/bin/false" /etc/passwd
+$ awk -F: '$7 ~ /(nologin|false)$/' /etc/passwd | wc -l
 25
 ```
 
-**28 個のユーザーのうち 25 個は、ログインシェルが `nologin` / `false` に設定されていてログインできない。** 中身を見ると理由がわかる:
+**28 個のユーザーのうち 25 個は、ログインシェルが `nologin` / `false` に設定されていてログインできない。**(`/etc/passwd` は `:` 区切りで、7 番目のフィールドがログインシェル。`awk` でそこだけを見ている)中身を見ると理由がわかる:
 
 ```
 $ grep -E "^(root|daemon|www-data|nobody|masanoriadachi):" /etc/passwd
@@ -152,13 +152,15 @@ Linux の `sudo` も発想は同じで、普段は uid 1000 のまま、必要�
 | | 全体インストール | ユーザー別インストール |
 |---|---|---|
 | 書き込む先(Windows) | `C:\Program Files` | `%LOCALAPPDATA%\Programs` |
-| 書き込む先(Linux) | `/usr/bin`、`/opt`、`/usr/local/bin` | `~/.local`、`~/.config` 配下 |
+| 書き込む先(Linux) | `/usr/local/bin`、`/opt` | `~/.local`、`~/.config` 配下 |
 | 管理者権限 | **要る**(UAC / `sudo`) | **要らない** |
 | 誰が使えるか | 全ユーザー | インストールした人だけ |
 | 他ユーザーへの影響 | ある(バージョンが共有される) | ない(各自が別バージョンを持てる) |
 | 設定の保存先 | どちらもユーザー配下(`~/.config` など) | 同左 |
 
 最後の行が見落としやすい。**全体インストールしたソフトでも、設定ファイルは各ユーザーのホーム配下に作られる。** プログラム本体は共有、設定は個別、という分業になっている。
+
+Linux 側の共有領域には、表に挙げなかったものがもう 1 つある。`/usr/bin` だ。ここも root 所有の共有領域だが、**`apt` などのパッケージ管理システムが管理する領域**なので、自分で入れたものを置く場所ではない。手で入れたファイルを置くと、パッケージ更新時に上書きされたり衝突したりする。**手動インストールは `/usr/local/bin`(単体の実行ファイル)か `/opt`(ディレクトリ一式)に置く**、という住み分けになっている。`/usr/local` の `local` が「このマシンで独自に入れたもの」の意味。
 
 ### 実測: 同じ PC の中に両方が共存している
 
@@ -188,7 +190,7 @@ $ ls -ld /run/user/1000
 drwx------ 8 masanoriadachi masanoriadachi 760 /run/user/1000
 ```
 
-`drwx------` = 本人以外は読むことすらできない。ディレクトリ名が uid そのものになっているのも、これが「uid 1000 専用の領域」だから。
+`drwx------` = root を除く他のユーザーは読むことすらできない。ディレクトリ名が uid そのものになっているのも、これが「uid 1000 専用の領域」だから。
 
 Windows 側でも同じ二分法が実測できる:
 
@@ -286,7 +288,19 @@ drwxr-xr-x  3 root           root           /home
 drwxr-x--- 40 masanoriadachi masanoriadachi /home/masanoriadachi
 ```
 
-`/home` 自体は誰でも通れる(`r-x`)が、`/home/masanoriadachi` は `drwxr-x---` で **その他のユーザーには権限がゼロ**。Ubuntu 24.04 から新規ユーザーのホームは 750 が既定になっている(以前は 755 で他人から読めた)。
+`/home` 自体は誰でも通れる(`r-x`)が、`/home/masanoriadachi` は `drwxr-x---` で **その他のユーザーには権限がゼロ**。**Ubuntu 21.04 から新規ユーザーのホームは 750 が既定**になっている(それ以前は 755 で、他のユーザーから中身を読めた)。
+
+この既定値は設定ファイルに書かれていて、手元でも確認できる:
+
+```
+$ grep -A1 "^# Default: DIR_MODE" /etc/adduser.conf
+# Default: DIR_MODE=0750
+#DIR_MODE=0750
+$ grep "^HOME_MODE" /etc/login.defs
+HOME_MODE	0750
+```
+
+`adduser` を使うときは `adduser.conf` の `DIR_MODE`、`useradd` を直接使うときは `login.defs` の `HOME_MODE` が効く。どちらも 0750 で揃っている。
 
 ### 結論: ユーザー配下に作るべき
 
@@ -336,7 +350,13 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin appuser
 | `--no-create-home` | ホームディレクトリを作らない | 作業場所が要らない |
 | `--shell /usr/sbin/nologin` | ログインシェルを与えない | **このユーザーでログインさせない** |
 
-3 番目が要点。仮にパスワードが漏れても、SSH でこのユーザーとしてログインすることはできない。第 1 章で見た `www-data` がまさにこの形で作られている:
+ただし **`--no-create-home` は実は冗長**。`--system` を付けた時点でホームは作られないためで、`man useradd` にそう書いてある:
+
+> Note that useradd will not create a home directory for such a user, regardless of the default setting in /etc/login.defs (CREATE_HOME). You have to specify the -m options if you want a home directory for a system account to be created.
+
+`login.defs` 側にも「この設定はシステムユーザーには適用されない」と明記されている。**システムユーザーはホームを作らないのが既定で、欲しい場合は逆に `-m` を付ける**、という関係。上のコマンドで書いているのは意図を読み手に示すための明示指定で、外しても結果は変わらない。
+
+3 行目が要点。仮にパスワードが漏れても、SSH でこのユーザーとしてログインすることはできない。第 1 章で見た `www-data` がまさにこの形で作られている:
 
 ```
 www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
@@ -428,9 +448,21 @@ drwxr-xr-x 3 masanoriadachi masanoriadachi 4096 cli
 drwxr-xr-x 3 masanoriadachi masanoriadachi 4096 sso
 ```
 
-`credentials` と `config` が `-rw-------`(600) = **所有者以外は読めない**。AWS CLI がこれらのファイルを作るときに明示的に 600 を設定している。
+`credentials` と `config` が `-rw-------`(600) = **root を除いて所有者以外は読めない**。
 
-注目したいのは、`~/.aws` ディレクトリ自体は `drwxr-xr-x`(755)で、`sso` や `cli` も 755 だという点。**ディレクトリの権限だけ見ると緩い。** それでも安全なのは、第 4 章で見たとおり親の `/home/masanoriadachi` が 750 で他ユーザーを弾いているから。
+この 600 は偶然ではない、と実測から言える。**この環境の `umask` は 022 なので、普通にファイルを作れば 644 になるはず**だからだ。実際、同じ階層のディレクトリは `drwxr-xr-x`(755)で umask どおりの値になっている。ファイルだけが 600 になっているのは umask では説明がつかないので、**AWS CLI 側がファイルを作るときに権限を明示的に設定していると考えられる**(AWS CLI v2 は実行ファイルに固めて配布されているためソースでは確認できなかった。ここは実測からの推論)。
+
+同じことは SSO のトークンキャッシュでも起きている:
+
+```
+$ ls -ld ~/.aws/sso/cache; ls -l ~/.aws/sso/cache/
+drwxr-xr-x 2 masanoriadachi masanoriadachi 4096 /home/masanoriadachi/.aws/sso/cache
+-rw------- 1 masanoriadachi masanoriadachi 3665 774ba089....json
+```
+
+ディレクトリは 755、中の JSON は 600。**秘密が入るファイルだけを狙って絞っている**という意図が読み取れる。
+
+では、755 のままのディレクトリは危なくないのか。**ディレクトリの権限だけ見れば確かに緩い**が、それでも安全なのは、第 4 章で見たとおり親の `/home/masanoriadachi` が 750 で他ユーザーを弾いているから。
 
 **権限は上から順に評価される。** `/home/masanoriadachi` に入れなければ、その下がどうなっていようと辿り着けない。逆に言うと、**ホームディレクトリの権限を緩めると下の対策がまとめて無意味になる**ので、`chmod 755 ~` のようなことは軽率にやらない。
 
@@ -493,10 +525,30 @@ EC2 やコンテナ、GitHub Actions に**長期のアクセスキーをファ�
 | ユーザー配下に作るほうがいいか | 通常はそう。共有が目的でないなら `C:\` 直下は選ばない |
 | 認証情報はユーザーごとに分けるのが普通か | 手元では結果的にそうなる。ただし実際に効くのはプロファイル分割で、サーバー・CI では**置かない**のが正解 |
 
-## 関連ドキュメント
+## 用語集
 
-- [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md) — `rwx` はどこに記録されているか、`umask`、git とファイルモード
-- [env-vars-basics.md](./env-vars-basics.md) — 環境変数と `.env`、秘密情報の渡し方
-- [docs/setup/new-machine.md](../setup/new-machine.md) — AWS CLI / SSO の設定手順、`~/.aws` が Windows 側へのリンクになる問題
-- [docs/infrastructure/README.md](../infrastructure/README.md) — GitHub Actions から AWS への OIDC 認証
-- [docs/development/README.md](../development/README.md) — docker-compose 開発環境の構成
+- **uid / gid** — Linux がユーザーとグループを識別する数値。名前は表示用で、権限判定に使われるのはこの数値のほう
+- **SID** — Windows でユーザーやグループを識別する文字列(`S-1-5-21-...`)。uid に相当する
+- **システムユーザー** — 人間ではなくプログラムを動かすために存在するユーザー。uid が 1000 未満で、ログインシェルに `nologin` が設定される(`www-data`、`syslog` など)
+- **ログインシェル** — そのユーザーでログインしたときに起動されるプログラム。`/etc/passwd` の 7 番目のフィールド。`nologin` を指定するとログインできなくなる
+- **ホームディレクトリ** — そのユーザーの作業領域。`/etc/passwd` の 6 番目のフィールドで、環境変数 `HOME`(Windows は `USERPROFILE`)に入り、`~` の展開先になる
+- **`DIR_MODE` / `HOME_MODE`** — 新規ユーザーのホームに付ける権限の既定値。`adduser` は `adduser.conf` の `DIR_MODE`、`useradd` は `login.defs` の `HOME_MODE` を見る。Ubuntu 21.04 から 0750
+- **UAC(ユーザーアカウント制御)** — Windows が管理者ユーザーにも普段は管理者権限を外したトークンを渡す仕組み。昇格して初めて Administrators が有効になる
+- **ACL(アクセス制御リスト)** — Windows の権限の実体。「誰に何を許可するか」の並び。`icacls` で確認できる
+- **継承(ACL の)** — 親フォルダの許可が配下に自動で適用される仕組み。`(OI)(CI)` が継承の指定、`(I)` は継承された結果であることを示す
+- **スティッキービット** — 誰でも書けるディレクトリで「自分が作ったファイルしか消せない」制約を加える権限。`ls` で末尾が `t` になる(`/tmp` の `drwxrwxrwt`)
+- **`umask`** — 新しく作るファイル・ディレクトリから落とす権限のマスク。022 ならファイルは 644、ディレクトリは 755 になる
+- **`/opt` と `/usr/local`** — パッケージ管理の外で手動インストールしたものを置く共有領域。`/opt` はディレクトリ一式、`/usr/local/bin` は単体の実行ファイル向け。`/usr/bin` は `apt` の管理領域なので使わない
+- **サービス専用ユーザー** — アプリ 1 つのために作る、ログインできないシステムユーザー。乗っ取られたときの被害範囲を縛るために使う
+- **systemd の `User=`** — サービス定義でプロセスの実行ユーザーを指定する行。systemd 自体は root で動くが、起動直前に権限をこのユーザーへ落とす
+- **プロファイル(AWS CLI)** — `~/.aws/config` に複数書ける設定の束。`--profile` で切り替える。1 人が複数アカウント・複数環境を取り違えないための仕組み
+- **インスタンスプロファイル / タスクロール** — EC2 や ECS に IAM ロールを紐付ける仕組み。長期の秘密鍵をディスクに置かず、一時認証情報が自動で渡る
+- **認証情報プロバイダチェーン** — AWS SDK / CLI が認証情報を探す順序の決まり。環境変数 → `~/.aws` → メタデータサービスと順に探すので、置き場所が変わってもアプリのコードは変えなくてよい
+
+## 関連
+
+- 権限そのものの仕組み(`rwx` がどこに記録されるか、`umask`、git とファイルモード) → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)
+- 環境変数と `.env`、秘密情報をプロセスへ渡す方法 → [env-vars-basics.md](./env-vars-basics.md)
+- AWS CLI / SSO の設定手順と、`~/.aws` が Windows 側へのリンクになる問題 → [docs/setup/new-machine.md](../setup/new-machine.md)
+- GitHub Actions から AWS への OIDC 認証(この文書の「置かない」の実例) → [docs/infrastructure/README.md](../infrastructure/README.md)
+- docker-compose 開発環境の 5 コンテナ構成と環境変数の方針 → [docs/development/README.md](../development/README.md)
