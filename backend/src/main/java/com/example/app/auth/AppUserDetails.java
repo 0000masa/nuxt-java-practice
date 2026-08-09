@@ -15,6 +15,8 @@ import com.example.app.user.User;
  * <p>Controller で {@code @AuthenticationPrincipal AppUserDetails} と書くとこのオブジェクトが渡る。
  * 未ログインのリクエストでは principal が {@code "anonymousUser"} という文字列になるため、
  * 型を指定した引数には {@code null} が入る(公開エンドポイントではこの null を前提にする)。
+ * そうなるのは AnonymousAuthenticationFilter が未ログイン時に匿名の principal を入れるため
+ * → docs/notes/java/spring/security-filter-chain.md
  *
  * <p><b>保持する値を最小限にしている理由</b>: このオブジェクトはシリアライズされて
  * SPRING_SESSION_ATTRIBUTES に保存される。表示名や bio まで持たせると、プロフィール編集後も
