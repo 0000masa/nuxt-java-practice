@@ -242,9 +242,25 @@ Laravel 側は少し事情が違う。nginx は `nginx` ユーザーで動き、
 
 ```bash
 sudo mkdir -p /srv/myapp/{releases,shared}
-sudo chown -R appuser:appuser /srv/myapp
-sudo chmod 750 /srv/myapp
+
+# コードは root 所有。アプリは読んで実行するだけ
+sudo chown -R root:appuser /srv/myapp
+sudo chmod -R u=rwX,g=rX,o= /srv/myapp
+
+# アプリが書く場所だけ appuser 所有(ログ、アップロード、キャッシュ)
+sudo mkdir -p /srv/myapp/shared/storage
+sudo chown -R appuser:appuser /srv/myapp/shared/storage
 ```
+
+**所有者を `appuser` にしないのがポイント。** `appuser` がコードを所有していると、乗っ取られたアプリが `app.jar` や PHP ファイルを**自分で差し替えられる**(所有者は `chmod` で自分の制限を外せるため)。**書き換えるのはデプロイする側であって、動いているアプリ自身ではない**ので、アプリには読み取りだけあれば足りる。詳細と実測 → [os-users-and-file-locations.md](./os-users-and-file-locations.md) 5-3。
+
+| 対象 | 所有者 | アプリにできること |
+|---|---|---|
+| コード(`releases/` 配下) | **root** または `deploy` | 読む・実行する |
+| 設定と秘密(`/etc/myapp/env`、`shared/.env`) | **root** | 読むだけ |
+| データ(`shared/storage/`) | **appuser** | 読み書きする |
+
+`chmod -R 750` ではなく `u=rwX,g=rX,o=` を使うのは、**数字だと jar や `.php` のようなただのデータにまで実行ビットが付いてしまう**ため。大文字の `X` は「ディレクトリと、元から実行可能なファイルにだけ `x` を付ける」指定。
 
 > **`chmod 750` にすると nginx が読めなくなるのでは？** Laravel の場合はそのとおりで、nginx が `public/` を読むために `appuser` グループに `nginx` を入れるか、`755` にするなどの調整が要る(→ 4-5)。Spring Boot の場合は nginx がファイルを直接読まない(全部プロキシする)ので `750` のままでよい。**ここも「Java と PHP で構成が変わる」箇所の 1 つ。**
 
@@ -367,7 +383,8 @@ scp backend/build/libs/app-0.0.1-SNAPSHOT.jar deploy@example.com:/tmp/app.jar
 # サーバー側で
 sudo mkdir -p /srv/myapp/releases/$REL
 sudo mv /tmp/app.jar /srv/myapp/releases/$REL/app.jar
-sudo chown -R appuser:appuser /srv/myapp/releases/$REL
+sudo chown -R root:appuser /srv/myapp/releases/$REL      # アプリは読むだけ(2-5 参照)
+sudo chmod -R u=rwX,g=rX,o= /srv/myapp/releases/$REL
 sudo ln -sfn /srv/myapp/releases/$REL /srv/myapp/current
 ```
 

@@ -597,11 +597,60 @@ uid が 33(1000 未満)、シェルが `nologin`。手元の WSL で見た `mess
 
 第 3 章の「ユーザー別インストールが無難」とは逆の結論になるのが要注意な点。**サーバー上のアプリは特定の人間に属さない共有の資産**なので、共有領域に置き、所有者だけをサービス専用ユーザーにする、という形を取る。
 
+#### 所有者は appuser にしない — コードは読み取り専用にする
+
+ここで直感に反するのが、**アプリのディレクトリの所有者を `appuser` にはしない**という点。
+
 ```bash
 sudo mkdir -p /opt/myapp
-sudo chown -R appuser:appuser /opt/myapp     # 所有者だけ専用ユーザーに
-sudo chmod 750 /opt/myapp                     # 本人と同グループだけ
+sudo chown -R root:appuser /opt/myapp        # コードは root 所有。アプリは読むだけ
+sudo chmod -R u=rwX,g=rX,o= /opt/myapp       # その他には一切見せない
 ```
+
+`chown -R appuser:appuser` にしたくなるが、そうすると **乗っ取られたアプリが自分のコードを書き換えられる**。`app.jar` や PHP ファイルをバックドア入りに差し替えられ、しかも再起動しても残る。5-4 で設定ファイルの所有者を root にするのと**まったく同じ理由**(所有者は `chmod` で自分の鍵を外せる)。
+
+**「デプロイのたびに書き換わるのだから appuser が書けないと困るのでは」というのは誤解。** 書き換えるのは**デプロイする側**(`deploy` ユーザーや `sudo`)であって、**動いているアプリ自身ではない**。アプリはコードを読んで実行できれば足りる。
+
+実運用のソフトが実際どうなっているかを見ると、この分け方が標準だと分かる:
+
+```
+$ ls -l /usr/sbin/rsyslogd /var/log/syslog
+-rwxr-xr-x 1 root   root  790192 /usr/sbin/rsyslogd   ← コードは root 所有
+-rw-r----- 1 syslog adm   876171 /var/log/syslog      ← 書くデータだけ syslog 所有
+```
+
+**`rsyslogd` は `syslog` ユーザーで動いているが、自分の実行ファイルは所有していない。** 書くのはログだけ。これが「**コードは読み取り専用、データだけ書き込み可**」という原則で、第 1 章で見た `messagebus` や `polkitd` も同じ形になっている。
+
+そのうえで、**アプリが書く必要のある場所だけ**を `appuser` 所有にする:
+
+```bash
+sudo mkdir -p /opt/myapp/storage             # ログ、アップロード、キャッシュなど
+sudo chown -R appuser:appuser /opt/myapp/storage
+sudo chmod -R u=rwX,g=rX,o= /opt/myapp/storage
+```
+
+| 対象 | 所有者 | アプリ(`appuser`)にできること |
+|---|---|---|
+| コード(jar、PHP ファイル) | **root**(または `deploy`) | 読む・実行する |
+| 設定と秘密(`/etc/myapp/env`) | **root** | 読むだけ |
+| データ(ログ、アップロード、キャッシュ) | **appuser** | 読み書きする |
+
+なお **`chmod -R 750` ではなく `u=rwX,g=rX,o=` を使っている**のにも理由がある。実測:
+
+```
+=== chmod -R 750 を当てる ===
+-rwxr-x---  app.jar        ← ただのデータなのに x が付いてしまう
+-rwxr-x---  bin/run.sh
+
+=== chmod -R u=rwX,g=rX,o= を当てる ===
+drwxr-x---  （ディレクトリ）
+-rw-r-----  app.jar        ← x は付かない
+-rwxr-x---  bin/run.sh     ← 元から実行可能だったものだけ残る
+```
+
+**大文字の `X` は「ディレクトリと、元から実行ビットが立っているファイルにだけ `x` を付ける」**という指定。`-R` で数字を使うと、jar や `.php` のようなただのデータにまで実行ビットが付いてしまう(実行ビットの意味は [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md) を参照)。
+
+> **これは systemd の `ProtectSystem=strict` + `ReadWritePaths=` と同じ発想**を、ファイルの所有者と権限のレイヤーでやったもの。両方かけておくと、片方を突破されてももう片方が残る。
 
 ### 5-4. systemd の `User=` で権限を落とす
 
@@ -757,7 +806,14 @@ ls: cannot access 'mydir/env': No such file or directory   ← 消せてしま�
 
 **守る対象が「読ませるが変えさせない」なら、所有者を相手にしないこと。** これは設定ファイルに限らず一般的に成り立つ原則で、`/usr/bin` が root 所有になっているのも同じ理由(第 2 章の理由 1)。
 
-同じ発想で、5-3 の `chown -R appuser:appuser /opt/myapp` は**所有者を appuser にしている** — アプリ本体はデプロイのたびに書き換わるので、書き込みができないと困るため。**「読ませたいのか、書かせたいのか」で所有者を root にするか appuser にするかが決まる。**
+**この判断基準は設定ファイルに限らない。** 5-3 でアプリのコードも `root:appuser` にしたのは同じ理由で、`appuser` 所有にすると乗っ取られたアプリが自分のコードを差し替えられるため。逆にログやアップロード先は `appuser` 所有にする — アプリが書けないと機能しないから。
+
+**「アプリ自身に書かせる必要があるか」だけで所有者が決まる**、と覚えておくとよい:
+
+| | 所有者 | 例 |
+|---|---|---|
+| アプリは読むだけでよい | **root** | 設定ファイル、秘密、アプリのコード |
+| アプリが書く必要がある | **appuser** | ログ、アップロード先、キャッシュ |
 
 #### `chmod appuser:appuser` ではダメなのか — コマンドが違う
 
