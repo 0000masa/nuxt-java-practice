@@ -336,13 +336,68 @@ HTTP/1.1 403
 | 破るのに必要なこと | 正解を**読む** | Cookie を**書く** |
 | 代表例 | Laravel、Rails の既定 | **このアプリ**、SPA 向け構成一般 |
 
+### 混同しやすい 3 つの軸
+
+上の表は**保管場所だけ**の話で、「トークンをどうやって画面まで届けるか」「どうやって送り返すか」は**別の軸**。ここを混ぜると、実在する組み合わせを「あり得ない」と誤解する。
+
+| 軸 | 何を決めるか | 選択肢 |
+|---|---|---|
+| **保管場所** | 正解をどこに置くか | サーバーのセッション / Cookie |
+| **配送手段** | クライアントへどう届けるか | HTML の hidden / Cookie / レスポンスヘッダ / JSON ボディ |
+| **送信手段** | クライアントがどう送り返すか | `_csrf` パラメータ / カスタムヘッダ |
+
+**3 つは独立に選べる。** 実例で確かめる。
+
+| | 保管場所 | 配送手段 | 送信手段 |
+|---|---|---|---|
+| Laravel の Blade フォーム | セッション | hidden(`@csrf`) | `_token` パラメータ |
+| Laravel + axios | **セッション** | **Cookie** | ヘッダ |
+| このアプリ | Cookie | Cookie | ヘッダ |
+
+**2 行目が重要**。Laravel は正解をセッションに持ったまま(= Synchronizer)、配送だけ Cookie でやっている。**「Cookie で配る = Double Submit」ではない**。Cookie が保管と配送を兼ねているかどうかで見分ける。
+
+そして **SSG が縛るのは配送手段の 1 つ(hidden)だけ**。保管場所を Cookie にする理由は、そこから直接は出てこない。
+
 ### なぜ SPA では Cookie 保管なのか
 
-理由が 2 つある。
+上の整理を踏まえると、理由は「hidden が使えないから」ではない。2 つある。
 
-**① サーバーが HTML を作らないから。** Synchronizer 方式は「サーバーが HTML を生成するときに hidden フィールドへトークンを埋め込む」ことを前提にしている。このアプリは Nuxt を SSG でビルドして静的ファイルとして配る構成なので([CLAUDE.md](../../../CLAUDE.md) の決定 2)、**トークンを埋め込む相手の HTML がそもそも存在しない**。Cookie で配るしかない。
+**① Spring Security の Synchronizer 実装には、SPA へ届ける出し口が用意されていないから。** 保管を `HttpSessionCsrfTokenRepository`(Spring Security の既定)にすると、トークンの出し口は `CsrfTokenRequestAttributeHandler` になる。これが何をするかというと、**リクエスト属性にセットするだけ**で、HTTP レスポンスには一切書かない(`ソース確認`: `spring-security-web` 7.1.0)。
 
-**② セッションが無い状態でも配れるから。** ログイン前 — つまりセッションがまだ無い状態 — でも、ログインリクエスト自体に CSRF トークンが要る。Cookie 保管ならセッションと無関係に発行できる。
+```java
+// org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler#handle
+CsrfToken csrfToken = new SupplierCsrfToken(deferredCsrfToken);
+request.setAttribute(CsrfToken.class.getName(), csrfToken);
+String csrfAttrName = (this.csrfRequestAttributeName != null) ? this.csrfRequestAttributeName
+        : csrfToken.getParameterName();
+request.setAttribute(csrfAttrName, csrfToken);
+```
+
+リクエスト属性は**サーバー内部にしか存在しない**。これを読んで HTML に書き出す担当 — つまりテンプレートエンジン — がいて初めて、トークンはブラウザに届く。**サーバーが HTML をレンダリングする構成が暗黙の前提になっている**。
+
+このアプリは Nuxt を SSG でビルドして静的ファイルとして配るので([CLAUDE.md](../../../CLAUDE.md) の決定 2)、その担当がいない。一方 `CookieCsrfTokenRepository` は `saveToken()` が `Set-Cookie` を書くので、**保管と配送を同時に済ませてくれる**。
+
+**ただし「Synchronizer では SPA に配れない」わけではない。** 出し口を自分で足せばよく、そのための部品も用意されている。Controller の引数に `CsrfToken` を取れば JSON で返せる(`CsrfTokenArgumentResolver` が `HandlerMethodArgumentResolver` として登録されている。`ソース確認`: `WebMvcSecurityConfiguration`)。
+
+```java
+// Synchronizer 方式のまま SPA へ配る場合に自分で書くことになるもの
+@GetMapping("/api/csrf")
+public CsrfToken csrf(CsrfToken token) {
+    return token;
+}
+```
+
+`csrf.spa()` は**この 1 本を書かずに済ませるための選択**であって、他に道が無いわけではない。
+
+**② CSRF トークンのためだけに、匿名利用者のセッションを作らずに済むから。** ログイン前でもログインリクエスト自体に CSRF トークンが要る。`HttpSessionCsrfTokenRepository` でもトークンは配れるが、その際に**セッションを作る**(`ソース確認`)。
+
+```java
+// org.springframework.security.web.csrf.HttpSessionCsrfTokenRepository#saveToken
+HttpSession session = request.getSession();   // 引数なし = 無ければ作る
+session.setAttribute(this.sessionAttributeName, token);
+```
+
+このアプリではセッションが MySQL に載る([session-store-and-other-frameworks.md](../java/spring/session-store-and-other-frameworks.md))ので、**サイトを開いただけの未ログイン利用者ぶんまで `SPRING_SESSION` に行が増える**ことになる。Cookie 保管ならこれが起きない。
 
 ### この方式の弱点
 
@@ -573,13 +628,13 @@ Laravel から来ると、CSRF は「`@csrf` を書く」でほぼ終わる話�
 
 `XSRF-TOKEN` / `X-XSRF-TOKEN` という名前は、Spring と Laravel で偶然一致したわけではない。**AngularJS の `$http` がこの名前で自動送信する実装を持っていたのが広まり、事実上の標準になった**もの。今も axios が `xsrfCookieName: 'XSRF-TOKEN'` を既定に持っている。
 
-Laravel が `VerifyCsrfToken` で `XSRF-TOKEN` Cookie も併せて発行しているのはこのためで、**保管はセッション(Synchronizer)なのに、SPA 向けの受け取り口として Cookie も配る**というハイブリッドになっている。「Cookie がある = Double Submit」ではないので、そこで方式を判定すると読み違える。
+Laravel が `VerifyCsrfToken` で `XSRF-TOKEN` Cookie も併せて発行しているのはこのためで、**保管はセッション(Synchronizer)なのに、SPA 向けの受け取り口として Cookie も配る**というハイブリッドになっている。「Cookie がある = Double Submit」ではないので、そこで方式を判定すると読み違える(→ §6 の 3 軸)。
 
 ### 埋め込み方式が使えない理由
 
 `@csrf` はサーバーが HTML をレンダリングする前提の仕組み。このアプリは `nuxt generate` で静的な HTML を作り置きしてから配るので、**HTML が作られる時点でリクエストも利用者も存在しない**。トークンを埋め込む余地が無い。
 
-Nuxt を SSR で動かしていれば埋め込みもできるが、この構成では選択肢に入らない。**「SSG を選んだ」という決定が、CSRF の方式まで決めている**。
+Nuxt を SSR で動かしていれば埋め込みもできるが、この構成では選択肢に入らない。ただし §6 の 3 軸のとおり、**SSG が消したのは「hidden で配る」という配送手段だけ**。保管場所まで Cookie にする必要は無く、Laravel + axios のように「セッション保管 + Cookie 配送」も選べた。`csrf.spa()` を使っているのは、その組み合わせを自分で組むより楽だから。
 
 ## つまずきポイント
 
@@ -615,7 +670,8 @@ JavaScript が読めなければ成立しない仕組みなので、外して正
 | **オリジン** | スキーム + ホスト + ポートの組。`https://a.example.com` と `https://b.example.com` は別オリジン |
 | **サイト(same-site)** | 登録可能ドメイン(eTLD+1)の単位。`a.example.com` と `b.example.com` は**同一サイト**。オリジンより粗い |
 | **`SameSite`** | 他サイトから発生したリクエストに Cookie を付けるかを制御する Cookie の属性。`Strict` / `Lax` / `None` |
-| **Synchronizer Token Pattern** | 正解をサーバーのセッションに保管する方式。Laravel / Rails の既定 |
+| **Synchronizer Token Pattern** | 正解をサーバーのセッションに保管する方式。Laravel / Rails / Spring Security の既定。**配送手段は方式に含まれない**(hidden でも Cookie でも配れる) |
+| **保管場所 / 配送手段 / 送信手段** | CSRF トークンを語るときに混同しやすい 3 つの軸。独立に選べる(→ §6) |
 | **Double Submit Cookie** | 正解を Cookie に置き、Cookie とヘッダの一致だけを見る方式。サーバーの状態が不要。**このアプリ** |
 | **cookie tossing** | サブドメインから親ドメインの Cookie を上書きする攻撃。Double Submit の弱点を突く |
 | **プリフライト** | ブラウザが本体の送信前に `OPTIONS` で許可を確認する CORS の手順。カスタムヘッダや JSON の送信で発生する |
