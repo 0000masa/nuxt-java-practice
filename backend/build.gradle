@@ -22,12 +22,16 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
 	implementation 'org.springframework.boot:spring-boot-starter-webmvc'
 	implementation 'org.springframework.boot:spring-boot-starter-flyway' // Boot 4 は自動設定がモジュール分割されており flyway-core 単体では有効にならない
+	implementation 'org.springframework.boot:spring-boot-starter-security' // 認証・認可(フェーズ3)
+	implementation 'org.springframework.boot:spring-boot-starter-session-jdbc' // セッションを MySQL に保存する(→ docs/adr/0002)。素の spring-session-jdbc ではなくこの starter を使う(Flyway と同じくこちらに自動設定が入っている)
+	implementation 'org.springframework.boot:spring-boot-starter-mail' // 確認メール・パスワードリセットメールの送信
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	runtimeOnly 'org.flywaydb:flyway-mysql' // MySQL 8 対応(flyway-core だけでは MySQL に接続できない)
 	runtimeOnly 'com.mysql:mysql-connector-j'
 	testImplementation 'org.springframework.boot:spring-boot-starter-data-jpa-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
 	testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+	testImplementation 'org.springframework.boot:spring-boot-starter-security-test' // @WithMockUser や CSRF 付きリクエストのテスト支援
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
