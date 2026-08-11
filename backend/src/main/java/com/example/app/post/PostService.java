@@ -13,8 +13,8 @@ import com.example.app.common.exception.ResourceNotFoundException; // 見つか�
 import com.example.app.post.dto.CreatePostRequest; // 投稿作成時に受け取るデータ(DTO)
 import com.example.app.post.dto.PostResponse; // 投稿1件を返すときのデータ(DTO)
 import com.example.app.post.dto.TimelineResponse; // タイムライン一覧を返すときのデータ(DTO)
-import com.example.app.user.CurrentUserProvider; // 「今リクエストしているユーザー」を返す役
 import com.example.app.user.User; // ユーザーのエンティティ
+import com.example.app.user.UserRepository; // ユーザーの DB 出し入れ役
 
 /**
  * 投稿にまつわる業務ロジック(アプリのルールに沿った処理)を担当するクラス。
@@ -35,13 +35,13 @@ public class PostService {
 	// この調理場が使う3つの道具。いずれも DI(依存性注入)でコンストラクタから受け取る(仕組みは PostController と同じ)。
 	private final PostRepository postRepository; // 投稿の DB 出し入れ役
 	private final CategoryRepository categoryRepository; // カテゴリーの DB 出し入れ役
-	private final CurrentUserProvider currentUserProvider; // 現在ユーザー取得役(開発中は DevCurrentUserProvider が固定ユーザーを返す)
+	private final UserRepository userRepository; // 投稿者を引くための DB 出し入れ役
 
 	public PostService(PostRepository postRepository, CategoryRepository categoryRepository,
-			CurrentUserProvider currentUserProvider) {
+			UserRepository userRepository) {
 		this.postRepository = postRepository;
 		this.categoryRepository = categoryRepository;
-		this.currentUserProvider = currentUserProvider;
+		this.userRepository = userRepository;
 	}
 
 	// 【一覧取得】タイムラインを1ページ分取得する。ページ送りは「カーソルページネーション」方式。
@@ -80,14 +80,19 @@ public class PostService {
 	}
 
 	// 【作成】新しい投稿を作る。書き込み系なので @Transactional(readOnly なし)。
+	// userId は投稿者。Controller が @AuthenticationPrincipal から取り出して渡す(認証必須のエンドポイント)。
 	@Transactional
-	public PostResponse create(CreatePostRequest request) {
+	public PostResponse create(CreatePostRequest request, Long userId) {
 		// まず紐づけるカテゴリーの存在確認。無ければ 404。
 		//   (投稿は必ず実在するカテゴリーに紐づく、という CONTEXT.md のルールをここで守っている)
 		//   request は record なので categoryId() / body() のように項目名メソッドで値を取り出す。
 		Category category = categoryRepository.findById(request.categoryId())
 				.orElseThrow(() -> new ResourceNotFoundException("カテゴリーが見つかりません: id=" + request.categoryId()));
-		User user = currentUserProvider.getCurrentUser(); // 今の投稿者(開発中は固定ユーザー。本番の認証はフェーズ3で差し替え予定)
+		// 投稿者を DB から引く。レスポンス(PostResponse)に username と displayName を含めるので、
+		// 参照だけを返す getReferenceById ではなく実体が必要になる。
+		//   セッションは生きていても users の行が消えている場合があり得るので、無ければ 404。
+		User user = userRepository.findById(userId)
+				.orElseThrow(() -> new ResourceNotFoundException("ユーザーが見つかりません: id=" + userId));
 		// Post の実体を作り、save で DB に保存。save は Spring Data JPA が用意済みで、保存後の Post(id 等が埋まる)を返す。
 		Post post = postRepository.save(new Post(user, category, request.body()));
 		return PostResponse.from(post);
@@ -95,15 +100,16 @@ public class PostService {
 
 	// 【削除】投稿を削除する。存在確認 → 権限チェック → 削除、の順。
 	@Transactional
-	public void delete(Long id) {
+	public void delete(Long id, Long userId) {
 		// 削除対象の存在確認。無ければ 404。
 		Post post = postRepository.findById(id)
 				.orElseThrow(() -> new ResourceNotFoundException("投稿が見つかりません: id=" + id));
-		User currentUser = currentUserProvider.getCurrentUser();
 		// 認可(権限)チェック: 投稿の持ち主と今のユーザーが違えば削除させず 403。
 		//   比較は == ではなく .equals() を使う。id の型は Long(オブジェクト型)で、== は「同じ箱か」を見るため、
 		//   値が同じでも別物と判定されうる。中身の値が等しいかは .equals() で見るのが Java の鉄則。
-		if (!post.getUser().getId().equals(currentUser.getId())) {
+		//   post.getUser() は遅延読み込みのプロキシだが、getId() は外部キーの値そのものなので
+		//   users テーブルへの SELECT は発生しない(ここではユーザーの中身が要らない)。
+		if (!post.getUser().getId().equals(userId)) {
 			throw new ForbiddenOperationException("自分の投稿以外は削除できません");
 		}
 		postRepository.delete(post); // CONTEXT.md のとおり物理削除(本当に消す)

@@ -4,6 +4,7 @@ package com.example.app.post;
 //   使う前に「どこの誰か」をはっきりさせる Java のルール。各アノテーションが具体的に何をするかは、
 //   実際にそれが付くクラス宣言・メソッドの箇所で解説する。
 import org.springframework.http.HttpStatus; // 201 CREATED などのステータスコード定数の置き場
+import org.springframework.security.core.annotation.AuthenticationPrincipal; // ログイン中のユーザーを引数で受け取る指示
 import org.springframework.validation.annotation.Validated; // クラスに付けてバリデーションを有効化する目印
 import org.springframework.web.bind.annotation.DeleteMapping; // HTTP DELETE とメソッドを結ぶ
 import org.springframework.web.bind.annotation.GetMapping; // HTTP GET とメソッドを結ぶ
@@ -15,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestParam; // URL の ? の後
 import org.springframework.web.bind.annotation.ResponseStatus; // 返す HTTP ステータスコードを指定する
 import org.springframework.web.bind.annotation.RestController; // このクラスが REST API コントローラーだと宣言する
 
+import com.example.app.auth.AppUserDetails; // ログイン中のユーザーを表す principal
 import com.example.app.post.dto.CreatePostRequest; // 投稿作成時に「受け取る」データの入れ物(DTO)
 import com.example.app.post.dto.PostResponse; // 投稿1件を「返す」ときのデータの入れ物(DTO)
 import com.example.app.post.dto.TimelineResponse; // タイムライン一覧を「返す」ときのデータの入れ物(DTO)
@@ -109,10 +111,15 @@ public class PostController {
 	// @RequestBody CreatePostRequest request … リクエストの本文(JSON)を CreatePostRequest に変換して受け取る。
 	//   ブラウザが送る {"body":.., "categoryId":..} が自動で Java オブジェクトに詰め替えられる(JSON→オブジェクト)。
 	// @Valid … request の中身を、CreatePostRequest に書かれた制約に従ってチェック。違反なら Service に渡る前にエラー。
+	// @AuthenticationPrincipal AppUserDetails principal … ログイン中のユーザーを Spring Security から受け取る。
+	//   このエンドポイントは SecurityConfig で認証必須にしてあるので、ここに来た時点で principal は必ず居る
+	//   (未ログインなら Controller に入る前にフィルタが 401 を返す)。
+	//   公開エンドポイントで同じ引数を受けると、未ログイン時は null になる点に注意。
 	@PostMapping
 	@ResponseStatus(HttpStatus.CREATED)
-	public PostResponse create(@Valid @RequestBody CreatePostRequest request) {
-		return postService.create(request);
+	public PostResponse create(@Valid @RequestBody CreatePostRequest request,
+			@AuthenticationPrincipal AppUserDetails principal) {
+		return postService.create(request, principal.getUserId());
 	}
 
 	// 【削除】DELETE /api/posts/{id} … URL の id の投稿を削除する。DELETE は「削除」を表す HTTP メソッド。
@@ -122,7 +129,7 @@ public class PostController {
 	//   他人の投稿を消そうとすると Service が例外(ForbiddenOperationException)を投げる。
 	@DeleteMapping("/{id}")
 	@ResponseStatus(HttpStatus.NO_CONTENT)
-	public void delete(@PathVariable Long id) {
-		postService.delete(id);
+	public void delete(@PathVariable Long id, @AuthenticationPrincipal AppUserDetails principal) {
+		postService.delete(id, principal.getUserId());
 	}
 }
