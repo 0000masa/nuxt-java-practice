@@ -22,10 +22,13 @@ import org.junit.jupiter.api.Test; // このメソッドはテストだ、と JU
 import org.springframework.beans.factory.annotation.Autowired; // Spring が用意した部品を受け取る指示
 // Spring Boot 4 でテストアノテーションのパッケージが技術別モジュールに移動している
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest; // Web 層だけを起動する軽量テストの宣言
+import org.springframework.context.annotation.Import; // 特定の設定クラスをテストに読み込む指示
 import org.springframework.test.context.bean.override.mockito.MockitoBean; // 本物の Bean をモックに差し替える指示
 import org.springframework.test.web.servlet.MockMvc; // 実サーバーなしで HTTP リクエストを疑似送信する道具
 
+import com.example.app.auth.AuthResponseWriter; // SecurityConfig が使う、認証エラーを JSON で返す役
 import com.example.app.category.dto.CategoryResponse; // カテゴリー1件を返すときのデータ(DTO)
+import com.example.app.config.SecurityConfig; // アプリ本体の認可ルール
 
 /**
  * カテゴリー一覧 API(GET /api/categories)の Controller 層だけを検証するテスト。
@@ -72,8 +75,18 @@ import com.example.app.category.dto.CategoryResponse; // カテゴリー1件を�
 //   .class は「クラスそのものを値として渡す」記法(クラスリテラル → docs/notes/java/syntax/class-literal.md)。
 //   実体ではなく設計図のまま手渡しているイメージ。
 // クラスに public が付いていないのは JUnit 5 の作法。JUnit 4 では必須だったが、5 からは不要になった。
+// @Import(SecurityConfig.class) … アプリ本体の認可ルールを読み込む。
+//   これが無いと @WebMvcTest は Spring Boot の「既定のセキュリティ設定」(全リクエスト認証必須)を使ってしまい、
+//   本来は公開しているはずの GET /api/categories が 401 になる。読み込むことで
+//   「このエンドポイントが未ログインで叩けること」自体をテストで守れる。
+// @MockitoBean AuthResponseWriter … SecurityConfig が必要とする部品。認証エラー時の JSON 出力担当だが、
+//   このテストは認証に失敗する経路を通らないのでモックで足りる。
 @WebMvcTest(CategoryController.class)
+@Import(SecurityConfig.class)
 class CategoryControllerTest {
+
+	@MockitoBean
+	AuthResponseWriter authResponseWriter;
 
 	// MockMvc … Tomcat を起動して TCP 通信することなく、Spring の内部だけで
 	//   「HTTP リクエストが来た」ことにして Controller を呼び出せるテスト用の道具。
