@@ -9,5 +9,18 @@ spring:
     hibernate:
       ddl-auto: validate # スキーマは Flyway(db/migration)が管理。エンティティとの不一致は起動時エラーで検出する
     open-in-view: false # ビュー描画中の遅延ロードを禁止し、DB アクセスを Service 層に閉じる
+  session:
+    timeout: 1d # 未操作でセッションが切れるまでの時間。切れる挙動を試したいときは DELETE FROM SPRING_SESSION で作れる
+    jdbc:
+      initialize-schema: never # セッションテーブルは Flyway(V3)が作る。既定の embedded だと MySQL では何も作られず、無いまま動かして落ちる
+      # cleanup-cron の既定は毎分実行(0 * * * * *)。期限切れセッションの掃除は Spring Session に任せる
+  mail:
+    host: ${SMTP_HOST:localhost} # 開発は Mailpit、本番は SES
+    port: ${SMTP_PORT:1025}
 server:
   port: 8080
+# アプリ固有の設定(型付きで受け取る → config/AppProperties)
+app:
+  base-url: ${APP_BASE_URL:http://localhost:3000} # メール本文のリンクの組み立てに使う
+  mail:
+    from: ${MAIL_FROM:no-reply@example.com}
