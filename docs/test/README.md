@@ -96,7 +96,7 @@ class PostControllerTest {
 }
 ```
 
-現状では `PostControllerTest` だけが該当する(`CategoryControllerTest` は `GET /api/categories` のみ、`PostRepositoryTest` は `findTimeline` のみ)。
+現状では `PostControllerTest`(投稿の作成・削除・タイムライン)と `AuthControllerTest`(登録・メール確認・現在ユーザー・パスワード変更)が該当する。`CategoryControllerTest` は `GET /api/categories` のみ、`PostRepositoryTest` は `findTimeline` のみ、`AuthTokenServiceTest` はトークンの発行と検証のみなのでフラットに書いている。
 
 トップレベルのクラスを分ける手もあるが、`@WebMvcTest` と `@MockitoBean` の定型宣言がクラスごとに複製される。`@Nested` なら外側の `@BeforeEach` とフィールドをそのまま共有でき、グループ固有の前提だけ内側の `@BeforeEach` に足せる。
 
@@ -146,13 +146,26 @@ tasks.named('test') {
 | テストクラス | 種類 | DB | 本数 | 何を守っているか |
 |---|---|---|---|---|
 | `ApplicationTests` | `@SpringBootTest` | 使う | 1 | アプリ全体が起動できること(Bean 配線・Flyway・`ddl-auto: validate`) |
-| `PostControllerTest` | `@WebMvcTest` | **不要** | 5 | 投稿 API のステータスコードとバリデーションエラーの形 |
+| `PostControllerTest` | `@WebMvcTest` | **不要** | 6 | 投稿 API のステータスコードとバリデーションエラーの形、principal の id が Service に渡ること |
 | `CategoryControllerTest` | `@WebMvcTest` | **不要** | 2 | カテゴリー一覧 API の順序と 0 件時の挙動 |
 | `PostRepositoryTest` | `@DataJpaTest` | 使う | 4 | カーソルページネーションの境界条件 |
+| `AuthTokenServiceTest` | `@DataJpaTest` | 使う | 7 | 使い捨てトークンの境界(期限切れ・使用済み・用途違い・ハッシュ保存・再発行での無効化) |
+| `AuthControllerTest` | `@WebMvcTest` | **不要** | 7 | 認証 API の入力チェックと `fieldErrors`、`/api/auth/me` が未ログインでも 200、パスワード変更が認可で弾かれること |
+| `AuthFlowTest` | `@SpringBootTest` | 使う | 2 | 登録 → 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと |
 
-合計 12 本。`@WebMvcTest` の 7 本は Service をモックに差し替えるので DB を使わない。
+合計 29 本。`@WebMvcTest` の 15 本は Service をモックに差し替えるので DB を使わない。
 
 テストの方針は「**要所に絞る**」(→ [implementation-progress.md](../development/implementation-progress.md))。網羅率を追わず、ページネーションのクエリ・認証の境界・いいねの重複防止のような**バグの温床**を優先する。
+
+### `@WebMvcTest` とセキュリティの注意点
+
+**`@WebMvcTest` は Spring Boot の「既定のセキュリティ設定」(全リクエスト認証必須)を使う。** アプリの認可ルールを効かせるには `@Import(SecurityConfig.class)` を付ける必要があり、付けないと公開しているはずの `GET /api/posts` や `GET /api/categories` が 401 になってテストが落ちる。
+
+読み込む場合は `SecurityConfig` が要求する `AuthResponseWriter` を `@MockitoBean` で用意する。その副作用として **401 / 403 のステータスコード自体はこのスライスで検証できない**(ステータスを書くのがモックにした `AuthResponseWriter` のため)。書き込み系のリクエストには `with(user(...))` と `with(csrf())` を添える。本物のステータスは `AuthFlowTest` で確認している。
+
+### `AuthFlowTest` に `@Transactional` を付けてはいけない
+
+確認メールの送信は「登録トランザクションのコミット後」に走る(`@TransactionalEventListener(AFTER_COMMIT)`)。テストをトランザクションで囲むとコミットされないため送信が発火せず、メール本文からトークンを取れなくなる。そのため作ったデータは `@BeforeEach` / `@AfterEach` で自分で消している。
 
 ## なぜ専用 database なのか
 
