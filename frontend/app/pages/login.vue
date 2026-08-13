@@ -9,6 +9,7 @@ const submitting = ref(false)
 const errorMessage = ref('')
 /** メール未確認で弾かれたときだけ、再送の導線を出す */
 const showResend = ref(false)
+const resending = ref(false)
 const resendNotice = ref('')
 
 const canSubmit = computed(
@@ -18,7 +19,9 @@ const canSubmit = computed(
 /** ログイン後の戻り先。middleware が付けた ?redirect= があればそこへ */
 function destination() {
   const redirect = route.query.redirect
-  return typeof redirect === 'string' && redirect.startsWith('/') ? redirect : '/'
+  if (typeof redirect !== 'string') return '/'
+  // `//evil.com` はプロトコル相対 URL として外部サイトに解決される。自サイト内のパスだけ通す
+  return redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/'
 }
 
 // 既にログインしているなら留まる意味がない
@@ -45,13 +48,19 @@ async function onSubmit() {
 }
 
 async function onResend() {
+  if (resending.value) return
+  resending.value = true
   resendNotice.value = ''
   try {
     await resendVerification(email.value.trim())
+    // 再送できた時点でログイン失敗の文言は用済み。案内と並べて出すと解決していないように見える
+    errorMessage.value = ''
     resendNotice.value = '確認メールを再送しました。メールのリンクを開いてください'
     showResend.value = false
   } catch (e) {
     errorMessage.value = apiErrorMessage(e, '確認メールの再送に失敗しました')
+  } finally {
+    resending.value = false
   }
 }
 </script>
@@ -63,7 +72,13 @@ async function onResend() {
     <form class="auth-form" @submit.prevent="onSubmit">
       <p v-if="errorMessage" class="auth-error">
         {{ errorMessage }}
-        <button v-if="showResend" type="button" class="auth-inline-button" @click="onResend">
+        <button
+          v-if="showResend"
+          type="button"
+          class="auth-inline-button"
+          :disabled="resending"
+          @click="onResend"
+        >
           確認メールを再送する
         </button>
       </p>
