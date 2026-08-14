@@ -576,16 +576,16 @@ useHead({ title: computed(() => post.value?.body.slice(0, 20) ?? '投稿') })
 
 ただし SSG + クライアント取得の構成では、**ビルド時に生成される HTML の `<title>` は動的な値を含められない**(その時点でデータがないため)。SNS のリンクプレビューを効かせたいなら、SSR かビルド時取得が必要になる。
 
-## 8. まだ使っていないもの
+## 8. その他の Nuxt 機能 — 使っているもの・使わないもの
 
-このリポジトリで今後使う予定のある機能を、対応関係だけ挙げておく。
-
-### `middleware/` — 認証ガード(フェーズ 3)
+### `middleware/` — 認証ガード(フェーズ 3 で導入)
 
 ```ts
 // app/middleware/auth.ts
-export default defineNuxtRouteMiddleware((to, from) => {
-  if (!isLoggedIn()) return navigateTo('/login')
+export default defineNuxtRouteMiddleware((to) => {
+  if (import.meta.server) return          // プリレンダ時は Cookie が無いので抜ける
+  if (useAuthStore().isLoggedIn) return
+  return navigateTo(`/login?redirect=${encodeURIComponent(to.fullPath)}`)
 })
 ```
 
@@ -594,9 +594,18 @@ export default defineNuxtRouteMiddleware((to, from) => {
 definePageMeta({ middleware: 'auth' })
 ```
 
-Next の `middleware.ts` に相当するが、**Next がすべてのリクエストをサーバーで受けるのに対し、Nuxt のルートミドルウェアはページ遷移のたびにクライアント側でも走る**。SSG 構成ではサーバー側が存在しないので、実質クライアント側のガードになる。認証の本体はバックエンドのセッションが握る。
+Next の `middleware.ts` に相当するが、**Next がすべてのリクエストをサーバーで受けるのに対し、Nuxt のルートミドルウェアはページ遷移のたびにクライアント側でも走る**。SSG 構成ではサーバー側が存在しないので、実質クライアント側のガードになる。**認証の本体はバックエンドのセッションが握る**(静的 HTML 自体は誰でも取得できるので、これは UX のための仕組みでしかない)。
 
-### `useState()` — SSR 対応のグローバル状態(フェーズ 3 以降)
+### `plugins/` — 起動時の初期化(フェーズ 3 で導入)
+
+`app/plugins/*.ts` に置いたファイルが起動時に自動実行される。このリポジトリでは 2 つ使っている。
+
+- `plugins/api.ts` — `$fetch` の共通ラッパ `$api` を `provide` する(CSRF トークンの付与と 401 の共通処理)
+- `plugins/auth.client.ts` — 起動時に 1 回 `/api/auth/me` を叩いてログイン状態を復元する
+
+実行順序・`.client` の意味・Next の `instrumentation-client.ts` との比較 → **[plugins-and-startup.md](./plugins-and-startup.md)**
+
+### `useState()` — 使っていない。Pinia を採用した
 
 ```ts
 const user = useState<User | null>('user', () => null)
@@ -604,13 +613,9 @@ const user = useState<User | null>('user', () => null)
 
 Nuxt 組み込みで、**キーで名前空間を分けた ref をアプリ全体で共有する**もの。React Context に近い立ち位置だが、Provider で包む必要がない。
 
-「単に `ref` をモジュールのトップレベルに置けばよいのでは」と思うところだが、SSR ではサーバープロセスが複数リクエストで共有されるため、モジュールスコープの `ref` は**別のユーザーに漏れる**。`useState` はリクエストごとに切り離される。SSG では問題にならないが、作法として `useState` を使う。
+「単に `ref` をモジュールのトップレベルに置けばよいのでは」と思うところだが、SSR ではサーバープロセスが複数リクエストで共有されるため、モジュールスコープの `ref` は**別のユーザーに漏れる**。`useState` はリクエストごとに切り離される。SSG では問題にならないが、作法としてはこちらに従うことになる。
 
-これで足りなくなったら Pinia(Vue の標準的な状態管理ライブラリ、Redux / Zustand の位置)を検討する。
-
-### `plugins/` — 起動時の初期化
-
-`app/plugins/*.ts` に置いたファイルが起動時に自動実行される。`$fetch` の共通エラーハンドラを仕込む、といった用途。Next に相当する仕組みはなく、`layout.tsx` やプロバイダで代替していた部分。
+**このリポジトリはフェーズ 3 で `useState` を経由せず Pinia を採用した**(Vue の標準的な状態管理ライブラリ。Redux / Zustand の位置)。ログインユーザーはヘッダ・ルートミドルウェア・複数ページが共有する状態で、「複数画面で共有する状態 → Pinia」という既存のルールにそのまま当てはまったため → [spec 決定 10](../../superpowers/specs/2026-08-05-phase3-auth-design.md) / [frontend-structure-best-practices.md](../../development/frontend-structure-best-practices.md)。実体は `app/stores/auth.ts`。
 
 ### `server/` — 使わない
 
@@ -648,7 +653,7 @@ Nuxt にはリポジトリ直下の `server/` に API を書ける Nitro とい�
 - **`definePageMeta`** — ページにレイアウトやミドルウェアを指定するコンパイラマクロ
 - **ルートミドルウェア** — ページ遷移の前に走る処理。認証ガードなどに使う
 - **devProxy** — 開発サーバーが特定パスへのリクエストを別のサーバーへ中継する機能。CORS を回避する
-- **Nuxt DevTools** — 開発時に画面へ重ねて表示される Nuxt 専用のパネル。ルート・自動インポート・モジュールなど、コードに書かれていない仕組みを可視化する。Vue DevTools(コンポーネントの状態を見るブラウザ拡張)とは別物
+- **Nuxt **DevTools**** — 開発時に画面へ重ねて表示される Nuxt 専用のパネル。ルート・自動インポート・モジュールなど、コードに書かれていない仕組みを可視化する。Vue DevTools(コンポーネントの状態を見るブラウザ拡張)とは別物
 - **ハイドレーション** — サーバー(またはビルド時)が出力した HTML に、ブラウザ側の JS がイベントリスナを取り付けて操作可能にする処理。`ssr: false` では起きない
 - **OGP** — SNS にリンクを貼ったときのプレビュー(タイトル・説明・画像)を決める `<meta>` タグ群。読み取るクローラは JS を実行しないため、HTML に入っている必要がある
 - **SPA フォールバック** — 静的配信で存在しないパスへのアクセスを、404 ではなく SPA の入口 HTML(`200.html`)に 200 で流す**配信側の設定**。Nuxt の `ssr` 設定とは無関係で、クライアント側ルーターを持つ構成なら配信手段によらず必要になる(フェーズ 11)
@@ -658,6 +663,7 @@ Nuxt にはリポジトリ直下の `server/` に API を書ける Nitro とい�
 
 - 全体像と対応表 → [vue-vs-react-overview.md](./vue-vs-react-overview.md)
 - データ取得と SSG → [data-fetching-and-ssg.md](./data-fetching-and-ssg.md)
+- プラグインと起動処理(`plugins/` の実行順序・`.client`・Next の `instrumentation-client.ts`)→ [plugins-and-startup.md](./plugins-and-startup.md)
 - 自動インポートの仕組み → [vue-vs-react-overview.md](./vue-vs-react-overview.md) §2 / [composables.md](./composables.md) §5
 - ディレクトリ規約の一覧 → [../../development/frontend-structure-best-practices.md](../../development/frontend-structure-best-practices.md)
 - SSG を採用した理由 → [../../tech-stack/README.md](../../tech-stack/README.md)

@@ -239,20 +239,30 @@ export function useCategories() {
 
 ```
 frontend/
-├── nuxt.config.ts              ビルド設定・devProxy(/api → backend:8080)
+├── nuxt.config.ts              ビルド設定・devProxy(/api → backend:8080)・Pinia の登録
 └── app/
     ├── app.vue                 ルートコンポーネント。<NuxtLayout><NuxtPage /></NuxtLayout>
     ├── layouts/default.vue     共通レイアウト(ヘッダ + <slot />)
+    ├── plugins/                起動時に 1 回だけ走る初期化
+    │   ├── api.ts              $fetch 共通ラッパ $api(CSRF トークン付与・401 の共通処理)
+    │   └── auth.client.ts      /api/auth/me を叩いてログイン状態を復元
+    ├── middleware/auth.ts      ログイン必須ページのガード(ページ遷移のたびに走る)
+    ├── stores/auth.ts          ログインユーザーの共有状態(Pinia)
     ├── pages/
     │   ├── index.vue           タイムライン。無限スクロール
-    │   └── posts/[id].vue      投稿詳細
+    │   ├── posts/[id].vue      投稿詳細
+    │   ├── login.vue / signup.vue / verify-email.vue
+    │   ├── password-reset/     リセットの申請(index)と実行(confirm)
+    │   └── settings/password.vue  パスワード変更
     ├── components/post/
     │   ├── Card.vue            → <PostCard>
     │   └── Form.vue            → <PostForm>
-    ├── composables/            API 通信の集約(usePosts / useCategories)
-    ├── utils/formatDate.ts     相対時刻の整形(自動インポートされる)
+    ├── composables/            API 通信の集約(usePosts / useCategories / useAuth)
+    ├── utils/                  相対時刻の整形・API エラーの取り出し(自動インポートされる)
     └── types/                  型定義(自動インポートされない)
 ```
+
+`plugins/` と `middleware/` と `stores/` はフェーズ 3(認証)で増えた。起動時に何がどの順で走るかは [plugins-and-startup.md](./plugins-and-startup.md) にまとめてある。
 
 ## 読む順番
 
@@ -263,6 +273,7 @@ frontend/
 5. **[props-and-emits.md](./props-and-emits.md)** — コンポーネント間のデータの受け渡し
 6. **[nuxt-vs-nextjs.md](./nuxt-vs-nextjs.md)** — ルーティング・レイアウト・設定
 7. **[data-fetching-and-ssg.md](./data-fetching-and-ssg.md)** — `useFetch` / `$fetch` と SSG 前提の取り方
+8. **[plugins-and-startup.md](./plugins-and-startup.md)** — `plugins/` の実行順序と `.client`。起動してから画面が使えるまでに何が走るか
 
 ## 関連
 
