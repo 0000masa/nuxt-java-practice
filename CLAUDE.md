@@ -44,7 +44,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 - `docs/infrastructure/` — AWS 構成図、CloudFormation + GitHub Actions の運用フロー
 - `docs/adr/` — アーキテクチャ決定記録(なぜその技術・構成を選んだか)
 - `docs/development/` — docker-compose 開発環境の構成(5 コンテナ、ポート、環境変数方針)
-- `docs/setup/` — Nuxt / Spring Boot の環境構築手順
+- `docs/setup/` — 新しい PC への開発環境構築手順(`new-machine.md`)と、Nuxt / Spring Boot の環境構築手順
 - `docs/test/` — テストの実行方法と方針(テスト専用 database `app_test` の作り方、テスト一覧)
 - `docs/api/` — REST API ドキュメント(エンドポイントごとに1ファイル。API を変更したら必ず更新すること)
 - `docs/notes/` — 学習メモ(セッションで解説した内容の記録。1 トピック 1 ファイル)
