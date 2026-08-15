@@ -1,6 +1,8 @@
 package com.example.app.auth;
 
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -8,9 +10,11 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.authentication.DisabledException;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.oauth2.core.OAuth2AuthenticationException;
 import org.springframework.stereotype.Component;
 
 import com.example.app.common.dto.ErrorResponse;
+import com.example.app.config.AppProperties;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -36,10 +40,12 @@ public class AuthResponseWriter {
 
 	private final ObjectMapper objectMapper;
 	private final AuthService authService;
+	private final AppProperties appProperties;
 
-	public AuthResponseWriter(ObjectMapper objectMapper, AuthService authService) {
+	public AuthResponseWriter(ObjectMapper objectMapper, AuthService authService, AppProperties appProperties) {
 		this.objectMapper = objectMapper;
 		this.authService = authService;
+		this.appProperties = appProperties;
 	}
 
 	/** ログイン成功 → 200 + 現在ユーザー。フロントはこのレスポンスをそのままストアに入れられる。 */
@@ -65,6 +71,42 @@ public class AuthResponseWriter {
 				? "メールアドレスの確認が完了していません。確認メールを再送してください"
 				: "メールアドレスまたはパスワードが違います";
 		writeJson(response, HttpStatus.UNAUTHORIZED, ErrorResponse.of(message));
+	}
+
+	/**
+	 * Google ログイン成功 → フロントの受け皿ページへリダイレクト。
+	 *
+	 * <p>パスワードログインと違い JSON を返さないのは、ここがブラウザのページ遷移だから
+	 * (fetch ではないので、返した JSON を読む相手がいない)。
+	 *
+	 * <p>戻り先を専用ページに固定しているのは、利用者が元々どのページに行きたかったかを
+	 * <b>サーバーが知らない</b>ため。SSG + SPA では保護ページも静的 HTML として 200 で返るので、
+	 * 「行きたかったクライアント側ルート」はブラウザだけが知っている。そちらは
+	 * /auth/callback が sessionStorage から読んで移動する(設計の決定11・12)。
+	 */
+	public void onOAuth2LoginSuccess(HttpServletRequest request, HttpServletResponse response,
+			Authentication authentication) throws IOException {
+		//このメソッドを呼ぶと、サーバーは中身のない HTTP レスポンスを返します:
+		// HTTP/1.1 302 Found
+		// Location: http://localhost:3000/auth/callback
+		// ブラウザは 3xx と Location ヘッダを見ると、自動的にその URL へ新しい GET リクエストを送り直します。利用者から見ると「ページが勝手に切り替わった」ように見えます。
+		response.sendRedirect(appProperties.baseUrl() + "/auth/callback");
+	}
+
+	/**
+	 * Google ログイン失敗 → ログインページへリダイレクト。
+	 *
+	 * <p>メッセージ本文ではなく<b>コード</b>を渡す。URL の文字列をそのまま画面に出すと、
+	 * 細工したリンクを踏ませて任意の文言を表示させられるため、対応表はフロントに置く。
+	 */
+	public void onOAuth2LoginFailure(HttpServletRequest request, HttpServletResponse response,
+			AuthenticationException exception) throws IOException {
+		//型判定と同時に、その型の変数 oauth2Exception を宣言しています。判定が true なら、キャスト済みの値が oauth2Exception に入ります。
+		String code = exception instanceof OAuth2AuthenticationException oauth2Exception
+				? oauth2Exception.getError().getErrorCode()
+				: "login_failed";
+		response.sendRedirect(appProperties.baseUrl() + "/login?error="
+				+ URLEncoder.encode(code, StandardCharsets.UTF_8));
 	}
 
 	/** ログアウト成功 → 204(返す中身なし)。既定はログインページへのリダイレクト。 */

@@ -101,6 +101,19 @@ public class User {
 		this.passwordHash = passwordHash;
 	}
 
+	/** NULL のときは Google 未連携。値が入っていれば Google ログインが使える。 */
+	public String getGoogleSub() {
+		return googleSub;
+	}
+
+	/**
+	 * Google アカウントを紐づける(アカウントリンク → CONTEXT.md)。
+	 * 渡すのは OIDC の {@code sub} で、メールアドレスではない。
+	 */
+	public void setGoogleSub(String googleSub) {
+		this.googleSub = googleSub;
+	}
+
 	public String getBio() {
 		return bio;
 	}

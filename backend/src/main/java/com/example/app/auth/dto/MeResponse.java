@@ -13,12 +13,18 @@ import com.example.app.user.User;
 // コンパイラは先にクラス全体の中身を把握してから、各行の型を解決します。順番を気にするのは「メソッドの中のローカル変数」だけです。
 public record MeResponse(CurrentUser user) {
 
-	public record CurrentUser(Long id, String username, String displayName, String email) {
+	/**
+	 * @param hasPassword パスワードが設定されているか。Google ログインだけで作られたユーザーは
+	 *                    false になる。画面はこれを見て、パスワード変更フォームの代わりに
+	 *                    「パスワードリセットから設定してください」の案内を出す(設計の決定14)。
+	 *                    自分自身の情報なので、他人に何かが漏れる値ではない
+	 */
+	public record CurrentUser(Long id, String username, String displayName, String email, boolean hasPassword) {
 	}
 
 	public static MeResponse of(User user) {
-		return new MeResponse(
-				new CurrentUser(user.getId(), user.getUsername(), user.getDisplayName(), user.getEmail()));
+		return new MeResponse(new CurrentUser(user.getId(), user.getUsername(), user.getDisplayName(),
+				user.getEmail(), user.getPasswordHash() != null));
 	}
 
 	public static MeResponse anonymous() {

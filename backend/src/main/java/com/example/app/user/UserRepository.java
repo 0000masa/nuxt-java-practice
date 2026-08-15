@@ -28,4 +28,12 @@ public interface UserRepository extends JpaRepository<User, Long> {
 	 * 認証(UserDetailsService)はこのメソッドでユーザーを引く。
 	 */
 	Optional<User> findByEmail(String email);
+
+	/**
+	 * Google OIDC の sub(不変 ID)で User を 1 件探す。
+	 * Google ログインはまずこれで引く。メールで引かないのは、利用者が Google 側で
+	 * メールアドレスを変えても同じユーザーだと分かるようにするため
+	 * → docs/adr/0004-google-account-linking.md
+	 */
+	Optional<User> findByGoogleSub(String googleSub);
 }
