@@ -22,7 +22,7 @@ export default defineNuxtPlugin(() => {
       options.headers = headers
     },
 
-    onResponseError({ request, response }) {
+    async onResponseError({ request, response }) {
       if (response.status !== 401 || !import.meta.client) return
 
       // 認証系エンドポイントの 401 は「ログイン失敗」「メール未確認」など、
@@ -32,8 +32,10 @@ export default defineNuxtPlugin(() => {
       // それ以外の 401 はセッションが切れたということ。状態を捨ててログイン画面へ送る。
       useAuthStore().set(null)
       const current = window.location.pathname + window.location.search
-      //このフックで return しても、$api の呼び出し元にはエラーが投げられます。 onResponseError は「エラーが起きたときに追加で何かする」ための場所であって、エラーを握りつぶす場所ではありません。
-      return navigateTo(`/login?redirect=${encodeURIComponent(current)}`)
+      // onResponseError は追加処理を行うためのフックで、戻り値は無視される
+      // ($api の呼び出し元にはこの後もエラーが投げられる)。
+      // navigateTo の戻り値もルートミドルウェア以外では意味を持たないので return しない。
+      await navigateTo(`/login?redirect=${encodeURIComponent(current)}`)
     },
   })
 
