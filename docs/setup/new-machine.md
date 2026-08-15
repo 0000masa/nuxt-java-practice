@@ -324,6 +324,8 @@ cp .env.example .env
 
 **値の編集は不要**。開発環境用の初期値がそのまま入っている(中身の説明 → [docs/development/README.md](../development/README.md))。
 
+例外は Google ログインの 2 つ(`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`)だけ。ダミー値のままでもアプリは起動し、Google ログイン**以外**はすべて動く。実際に Google でログインしたくなったら → [docs/setup/google-oauth.md](./google-oauth.md)
+
 ## 9. コンテナを起動する
 
 ```bash
