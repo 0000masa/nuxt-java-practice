@@ -12,3 +12,126 @@ body {
   color: #0f172a;
   line-height: 1.6;
 }
+
+/* --- 認証まわりのフォーム(login / signup / password-reset / settings)の共通スタイル ---
+   同じ形のフォームが 6 画面あるため、各ページの scoped CSS に散らさず 1 箇所にまとめている。 */
+
+.auth-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 1.4rem 1.3rem;
+  max-width: 26rem;
+  margin: 1.5rem auto;
+}
+
+.auth-title {
+  font-size: 1.15rem;
+  margin: 0 0 1rem;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.auth-label {
+  font-size: 0.85rem;
+  color: #334155;
+}
+
+.auth-input {
+  font: inherit;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+}
+
+.auth-input:focus {
+  outline: 2px solid #93c5fd;
+  outline-offset: -1px;
+}
+
+.auth-hint {
+  font-size: 0.78rem;
+  color: #64748b;
+}
+
+/* 項目ごとのエラー(バックエンドの fieldErrors)を入力欄の下に出す */
+.auth-field-error {
+  font-size: 0.8rem;
+  color: #dc2626;
+}
+
+/* 画面全体に対する 1 行のエラー */
+.auth-error {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.auth-notice {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  color: #15803d;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.auth-submit {
+  background: #1d4ed8;
+  color: #fff;
+  border: none;
+  border-radius: 999px;
+  padding: 0.5rem 1.1rem;
+  font: inherit;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+
+.auth-submit:disabled {
+  background: #93c5fd;
+  cursor: not-allowed;
+}
+
+.auth-links {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+}
+
+.auth-links a {
+  color: #1d4ed8;
+}
+
+/* エラーメッセージの中から押せる補助操作(確認メールの再送など) */
+.auth-inline-button {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  font-size: inherit;
+  color: #1d4ed8;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.auth-inline-button:disabled {
+  color: #93c5fd;
+  cursor: not-allowed;
+}
