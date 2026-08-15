@@ -12,7 +12,14 @@ const emit = defineEmits<{
 }>()
 
 const { deletePost } = usePosts()
+const auth = useAuthStore()
 const deleting = ref(false)
+
+/**
+ * 削除できるのは投稿者本人だけ(→ CONTEXT.md「投稿」)。
+ * 表示を隠すのは親切のためで、実際の防御はバックエンドの所有者チェック(403)が担う。
+ */
+const isOwnPost = computed(() => auth.user?.id === props.post.user.id)
 
 async function onDelete() {
   if (!confirm('この投稿を削除しますか?')) return
@@ -20,8 +27,8 @@ async function onDelete() {
   try {
     await deletePost(props.post.id)
     emit('deleted', props.post.id)
-  } catch {
-    alert('削除に失敗しました')
+  } catch (e) {
+    alert(apiErrorMessage(e, '削除に失敗しました'))
   } finally {
     deleting.value = false
   }
@@ -40,7 +47,7 @@ async function onDelete() {
     <NuxtLink v-else :to="`/posts/${post.id}`" class="post-body-link">
       <p class="post-body">{{ post.body }}</p>
     </NuxtLink>
-    <div class="post-actions">
+    <div v-if="isOwnPost" class="post-actions">
       <button class="post-delete" :disabled="deleting" @click="onDelete">削除</button>
     </div>
   </article>

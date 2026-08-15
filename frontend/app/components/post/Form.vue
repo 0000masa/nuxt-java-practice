@@ -31,13 +31,8 @@ async function onSubmit() {
     const post = await createPost(body.value, categoryId.value)
     body.value = ''
     emit('created', post)
-  } catch (e: any) {
-    // バックエンドの ErrorResponse(message / fieldErrors)を表示する
-    const data = e?.data
-    errorMessage.value =
-      (data?.fieldErrors && Object.values(data.fieldErrors as Record<string, string>)[0]) ||
-      data?.message ||
-      '投稿に失敗しました'
+  } catch (e) {
+    errorMessage.value = apiErrorMessage(e, '投稿に失敗しました')
   } finally {
     submitting.value = false
   }
