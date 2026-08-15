@@ -3,6 +3,7 @@ import type { Post } from '~/types/post'
 
 const { data: categories } = useCategories()
 const { fetchTimeline } = usePosts()
+const auth = useAuthStore()
 
 const posts = ref<Post[]>([])
 const nextCursor = ref<number | null>(null)
@@ -63,7 +64,16 @@ onBeforeUnmount(() => observer?.disconnect())
 
 <template>
   <div class="timeline">
-    <PostForm v-if="categories" :categories="categories" @created="onPostCreated" />
+    <!-- 投稿はログインが必要。タイムラインの閲覧そのものは未ログインでもできる(設計の決定1) -->
+    <PostForm
+      v-if="auth.isLoggedIn && categories"
+      :categories="categories"
+      @created="onPostCreated"
+    />
+    <p v-else-if="auth.resolved && !auth.isLoggedIn" class="timeline-signin">
+      <NuxtLink to="/login">ログイン</NuxtLink>
+      すると投稿できます
+    </p>
 
     <nav class="category-filter">
       <button
@@ -136,6 +146,20 @@ onBeforeUnmount(() => observer?.disconnect())
   text-align: center;
   color: #64748b;
   font-size: 0.9rem;
+}
+
+.timeline-signin {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 0.9rem 1rem;
+  margin: 0;
+  font-size: 0.9rem;
+  color: #334155;
+}
+
+.timeline-signin a {
+  color: #1d4ed8;
 }
 
 .sentinel {
