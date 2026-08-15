@@ -9,7 +9,8 @@ CSRF は Spring の概念ではない。**ブラウザが Cookie を「他サイ
 > **このメモの検証状況**
 > このプロジェクトに対する挙動は、**起動中の backend に実際にリクエストを送って確かめた**。本文中で `実測` と記した箇所がそれで、貼ってあるレスポンスは実物。
 > `csrf.spa()` の内部動作は、このプロジェクトが実際に使っている jar のソース(`spring-security-config` 7.1.0 / `spring-session-core` 4.1.0 の `-sources.jar`)を読んで確認した。該当箇所には `ソース確認` と記した。
-> 一方、**ブラウザ側の挙動(SameSite の判定、CORS のプリフライト、`<form>` が送れる Content-Type)は仕様に基づく一般論で、実際のブラウザで再現してはいない**。Laravel の記述も一般論。
+> §10 §11 のライブラリの挙動も、npm から取得した `axios` 1.19.0 と `@angular/common` 21.2.20 の実装を読んで確認した(**このプロジェクトの依存ではない**。比較のために取ってきただけ)。同じく `ソース確認` と記した。
+> 一方、**ブラウザ側の挙動(SameSite の判定、CORS のプリフライト、`<form>` が送れる Content-Type、`credentials` の既定値)は仕様に基づく一般論で、実際のブラウザで再現してはいない**。Laravel の記述も一般論。
 > **フィルタの列のどこに `CsrfFilter` がいるか**はこのメモの担当ではない → [security-filter-chain.md](../java/spring/security-filter-chain.md)。あちらが「列全体の地図」、こちらが「トークン 1 個の一生」。
 
 ## まず結論(3 行)
@@ -155,6 +156,8 @@ Cookie が発明されたとき、「どのページから送られたリクエ�
 
 だから JSON ボディを要求する API は、罠ページの `<form>` からは叩けない。「では `fetch` で送れば?」となるが、`Content-Type: application/json` を付けた時点で **CORS のプリフライト(事前確認の `OPTIONS` リクエスト)**が発生し、サーバーが明示的に許可していなければブラウザがリクエスト本体を送らない。
 
+(罠ページが使える送信手段と、それぞれに何ができるかの一覧は → §5「ヘッダを付けられるのは誰か」)
+
 △ にしているのは、これが**防御として設計されたものではない**から。API の仕様が変わった瞬間に消える。実際このアプリでも、ログインエンドポイントだけ `form-urlencoded` を受けるので穴が空いている(→ §9)。**副産物としての安全性に依存すると、仕様変更で静かに壊れる。**
 
 ### `SameSite` Cookie → ○
@@ -293,9 +296,59 @@ blog から app へのリクエストは「same-site」
 サーバー: Cookie にはあるがヘッダに無い → 不一致 → 403
 ```
 
-そもそも罠ページの `<form>` は**任意のヘッダを付けられない**(HTML の form にヘッダを指定する手段が無い)。`fetch` なら付けられるが、カスタムヘッダを付けた時点で CORS のプリフライトが走って止まる。
+そもそも罠ページの `<form>` は**任意のヘッダを付けられない**。`fetch` なら付けられるが、カスタムヘッダを付けた時点で CORS のプリフライトが走って止まる。
 
 **「Cookie を読む」と「カスタムヘッダを付ける」の 2 つが同時に必要で、罠ページはどちらもできない。**
+
+### ヘッダを付けられるのは誰か
+
+「罠ページはヘッダを付けられない」を、送信手段ごとに確かめる。罠ページが使える手段は 3 種類しかない。
+
+| 罠ページが使える手段 | 任意のヘッダ | 任意のメソッド | Content-Type | Cookie |
+|---|---|---|---|---|
+| `<form>` | ✗ 指定する構文が無い | ✗ `get` / `post` のみ | ✗ 3 種のみ(→ §3) | ○ 自動で付く |
+| `<img>` `<script>` `<link>` | ✗ | ✗ GET のみ | — | ○ 自動で付く |
+| `fetch` / `XMLHttpRequest` | △ 付けた時点でプリフライト | △ 同上 | △ 同上 | ○ `credentials: 'include'` で付く |
+
+`fetch` の △ は「**単純リクエスト**の範囲なら送れる」という意味。ヘッダ・メソッド・`Content-Type` のどれかがその範囲を超えると、ブラウザは先に `OPTIONS` で許可を確認し、許可が無ければ本体を送らない。逆に言えば、範囲内に収まる `fetch`(`form-urlencoded` の POST など)は `<form>` と同じくサーバーに届く。
+
+この表で見るべきは、**Cookie の列だけが全部 ○** になること。これが §2 の ambient authority の正体で、CSRF が成立する理由そのもの。他の列に ✗ と △ が並ぶから、そこに要求を置けば防御になる。
+
+`<form>` にヘッダを付けられないのは、実装の都合ではなく **HTML にその構文が無い**から。`<form>` に書けるのは `action` `method` `enctype` と入力フィールドだけで、任意のヘッダを差し込む属性は存在しない。攻撃者が JavaScript を自由に書ける自分のページであっても、`<form>` を経由する限りこの制限は外せない。
+
+#### `credentials: 'include'` は CSRF 対策ではない
+
+`fetch` の `credentials` を「付けておくと認証まわりが正しくなる設定」と読むと、方向を取り違える。これが決めるのは **Cookie を付けるかどうかだけ**で、CSRF トークンには一切関与しない。
+
+| 値 | 意味 |
+|---|---|
+| `omit` | Cookie を付けない |
+| `same-origin` | 同一オリジンなら付ける(**既定値**) |
+| `include` | 別オリジンでも付ける |
+
+重要なのは、**`credentials: 'include'` は防御側の設定ではなく、むしろ攻撃側が必要とする設定**だということ。罠ページは別オリジンにいるので、既定の `same-origin` のままでは `fetch` に Cookie が付かない。攻撃者は自分で `include` と書く。
+
+```js
+// 罠ページのコード。credentials は攻撃者が自分で書ける
+fetch('https://example.com/api/auth/login', {
+  method: 'POST',
+  credentials: 'include',   // ← これを書かないと Cookie が付かない
+  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+  body: 'email=attacker@evil.example&password=xxx',
+})
+```
+
+この例が単純リクエストの範囲に収まるよう `form-urlencoded` にしてあるのがポイント。`DELETE` にしたり `application/json` にしたりすると、`credentials` の指定に関係なくプリフライトで止まる(→ §9)。**`credentials` は届くかどうかを決めない。届いたときに Cookie が付いているかどうかだけを決める。**
+
+`credentials` は「Cookie を送る」という **CSRF の原因の側にある機能**で、対策の側には無い。
+
+ここから、この仕組みの性質が 1 つ見える。もしブラウザが「`XSRF-TOKEN` Cookie があれば自動でヘッダにも載せる」という仕様だったら、**この罠ページのリクエストにも自動で載ってしまい、防御は消滅する**。
+
+> **自動化されていないことが、防御が成り立つ条件。** 手作業に見えるが、手作業でしかあり得ない。
+
+「よくある処理なのにブラウザがやってくれないのは不便だ」と感じたら、その不便さがそのまま防御になっている、と読み替える。なお同じ処理を**ライブラリ**がやってくれることはある(→ §11)。ライブラリはアプリのコードの一部として動くので、罠ページには使えない。
+
+`<form>` には `credentials` に相当する指定が無く、Cookie は常に付く(`SameSite` の判定は別途かかる)。
 
 ### ⑥ の再発行を忘れると事故る
 
@@ -439,8 +492,23 @@ public CsrfConfigurer<H> spa() {
 }
 ```
 
-- `CookieCsrfTokenRepository.withHttpOnlyFalse()` … 正解を Cookie に置く(= Double Submit)。`HttpOnly` を外すのは **JavaScript に読ませるため**。「`HttpOnly` を外すのは危険では?」と思うところだが、**このトークンは秘密ではない**。秘密なのはセッション ID の方で、そちらは `HttpOnly` が付いている。
+- `CookieCsrfTokenRepository.withHttpOnlyFalse()` … 正解を Cookie に置く(= Double Submit)。`HttpOnly` を外すのは **JavaScript に読ませるため**(→ 次項)
 - `SpaCsrfTokenRequestHandler` … 送られてきた値の解釈方法(→ §8)
+
+### `HttpOnly` を外してよい理由 — 「誰に対する秘密か」
+
+「`HttpOnly` を外すのは危険では?」と思うところだが、危険ではない。ただし理由は**「このトークンは秘密ではないから」ではない**。§5 で見たとおり、罠ページがヘッダを作れないのは**値を知らないから**で、知られれば破られる。秘密である。
+
+`SESSION` と違うのは、**秘密にすべき相手**。
+
+| | 同一オリジンの JavaScript に見せてよいか | 別オリジンに漏れてよいか |
+|---|---|---|
+| `SESSION` | **✗** 盗まれると成りすまされる → `HttpOnly` を付ける | ✗ |
+| `XSRF-TOKEN` | **○** 読ませることが仕組みの前提 → `HttpOnly` を外す | **✗** 知られたら罠ページがヘッダを作れる |
+
+同一オリジンの JavaScript に読ませてよいのは、**そのページは既にそのオリジンの権限で好きなリクエストを送れるので、トークンを読ませても新しく渡るものが無い**から。逆に言えば XSS を通されればトークンも読まれて CSRF 対策は無意味になるが、それは CSRF ではなく XSS の敗北。守る相手が違う。
+
+一方、**別オリジンに対しては依然として秘密**。この一線をライブラリがどれだけ厳重に守っているかは §11 に実例がある。
 
 ### トークンはいつ発行されるか
 
@@ -518,6 +586,19 @@ public boolean matches(HttpServletRequest request) {
 
 **この「安全なメソッド」の定義が両側で一致していることが前提**になっていて、GET で状態を変える API を足すと前提が崩れる(→ §4 ①)。
 
+なお **GET を除外するかどうかはライブラリによって判断が分かれる**(axios は除外せず、全メソッドにヘッダを付ける)。つまりこの除外は CSRF 対策として必然なのではなく、**サーバーの実装に合わせた選択**だと分かる → §11。
+
+### `credentials` を指定していないのはなぜか
+
+`api.ts` には `credentials` の指定が無い。**同一オリジン構成なので、既定の `same-origin` で足りる**から(→ §5「`credentials: 'include'` は CSRF 対策ではない」)。
+
+- 開発時 … [nuxt.config.ts](../../../frontend/nuxt.config.ts) の `devProxy` が `/api` を `backend:8080` へ転送するので、ブラウザから見た宛先は Nuxt 開発サーバーと同じオリジン
+- 本番 … SSG の出力を Spring Boot の `static/` から配信する([CLAUDE.md](../../../CLAUDE.md) の決定 2)ので、やはり同じオリジン
+
+`$api` が `https://...` ではなく `/api/auth/me` という**相対パス**で呼んでいるのがその表れ。CORS の設定が一切要らないのも同じ理由で、これは §9 で攻撃が失敗する根拠にもなっている。
+
+**逆に言えば、フロントとバックエンドを別オリジンに置く構成にした瞬間、`credentials: 'include'` が必要になり、同時に CORS の設定も必要になる。** どちらか一方だけでは動かない。
+
 ## 8. なぜ `_csrf` パラメータだと通らないのか(ソース確認)
 
 `CsrfFilter` は本来、ヘッダだけでなく **`_csrf` というフォームパラメータ**でもトークンを受け取れる。ところがこのアプリでは通らない。
@@ -568,7 +649,7 @@ Spring Security の既定(`spa()` を使わない場合)は `XorCsrfTokenRequest
 
 ### `DELETE /api/posts/{id}` を狙う → ✗
 
-`<form>` の `method` に指定できるのは **`get` と `post` だけ**。`DELETE` は送れない。`fetch` なら送れるが、`DELETE` はプリフライトが必須のメソッドなので `OPTIONS` で止まる。
+`<form>` の `method` に指定できるのは **`get` と `post` だけ**。`DELETE` は送れない。`fetch` なら送れるが、`DELETE` はプリフライトが必須のメソッドなので `OPTIONS` で止まる(→ §5 の表)。
 
 ### `POST /api/posts` を狙う → ✗
 
@@ -626,7 +707,25 @@ Laravel から来ると、CSRF は「`@csrf` を書く」でほぼ終わる話�
 
 ### なぜ Cookie 名が同じなのか
 
-`XSRF-TOKEN` / `X-XSRF-TOKEN` という名前は、Spring と Laravel で偶然一致したわけではない。**AngularJS の `$http` がこの名前で自動送信する実装を持っていたのが広まり、事実上の標準になった**もの。今も axios が `xsrfCookieName: 'XSRF-TOKEN'` を既定に持っている。
+`XSRF-TOKEN` / `X-XSRF-TOKEN` という名前は、Spring と Laravel で偶然一致したわけではない。**AngularJS の `$http` がこの名前で自動送信する実装を持っていたのが広まり、事実上の標準になった**もの。
+
+**ソース確認** — 由来となった AngularJS はとうに役目を終えているが、名前だけは生き残っている。互換性を切って作り直された現行の Angular にも、axios にも、同じ文字列がそのまま入っている。
+
+```js
+// @angular/common 21.2.20
+const XSRF_DEFAULT_COOKIE_NAME = 'XSRF-TOKEN';
+const XSRF_DEFAULT_HEADER_NAME = 'X-XSRF-TOKEN';
+```
+
+```js
+// axios 1.19.0 lib/defaults/index.js
+xsrfCookieName: 'XSRF-TOKEN',
+xsrfHeaderName: 'X-XSRF-TOKEN',
+```
+
+Spring Security の `CookieCsrfTokenRepository` がこの名前を既定にしているのも、**フロント側に定着した慣習にサーバー側が合わせた結果**。規格で決まった名前ではなく、実装が先にあって後から標準になった類のもの。名前の出どころが妙に具体的で、仕様書を探しても見つからないときは、たいてい何かの実装の既定値が出典になっている。
+
+同じ名前を使っている 3 者の**中身の違い**は → §11。
 
 Laravel が `VerifyCsrfToken` で `XSRF-TOKEN` Cookie も併せて発行しているのはこのためで、**保管はセッション(Synchronizer)なのに、SPA 向けの受け取り口として Cookie も配る**というハイブリッドになっている。「Cookie がある = Double Submit」ではないので、そこで方式を判定すると読み違える(→ §6 の 3 軸)。
 
@@ -635,6 +734,78 @@ Laravel が `VerifyCsrfToken` で `XSRF-TOKEN` Cookie も併せて発行して�
 `@csrf` はサーバーが HTML をレンダリングする前提の仕組み。このアプリは `nuxt generate` で静的な HTML を作り置きしてから配るので、**HTML が作られる時点でリクエストも利用者も存在しない**。トークンを埋め込む余地が無い。
 
 Nuxt を SSR で動かしていれば埋め込みもできるが、この構成では選択肢に入らない。ただし §6 の 3 軸のとおり、**SSG が消したのは「hidden で配る」という配送手段だけ**。保管場所まで Cookie にする必要は無く、Laravel + axios のように「セッション保管 + Cookie 配送」も選べた。`csrf.spa()` を使っているのは、その組み合わせを自分で組むより楽だから。
+
+## 11. 自分で書くか、ライブラリに任せるか
+
+「Cookie を読んでヘッダに載せる」はどのアプリでも要る処理なので、**やってくれるライブラリは実在する**。設定ゼロで動く。
+
+- **axios** … `xsrfCookieName` / `xsrfHeaderName` を既定で持ち、`axios.post(...)` と書くだけでヘッダが付く。Laravel が axios を同梱しているのは、この組み合わせが前提だから(→ §10)
+- **Angular の `HttpClient`** … `xsrfInterceptorFn` が最初から組み込まれている。**無効化する**設定はあるが、有効化する設定は要らない
+
+一方 **`$fetch`(ofetch)には無い**。だからこのアプリは `api.ts` に自前で書いている。
+
+### 3 つの実装を並べる
+
+同じ目的の処理なのに、判断が食い違っている(`ソース確認`: `axios` 1.19.0 / `@angular/common` 21.2.20)。
+
+| | GET / HEAD を除外 | 別オリジンへ送るか | Cookie の読み直し |
+|---|---|---|---|
+| このアプリ [api.ts](../../../frontend/app/plugins/api.ts) | **する** | 相対パスしか渡さないので判定が無い | 毎回 |
+| axios 1.19.0 | **しない**(全メソッドに付ける) | 送らない。`withXSRFToken: true` で明示的に許可 | 毎回 |
+| Angular 21.2.20 | **する** | 送らない(オリジンを比較) | `document.cookie` が変わったときだけ再パース |
+
+#### ① GET を除外するかは、CSRF 対策として必然ではない
+
+axios は除外していない。GET にもヘッダが付く。サーバーが GET を照合対象外にしている(→ §7 の `CsrfFilter`)なら、付いていても無視されるだけで害が無いから。
+
+つまり `api.ts` の GET 除外は「そうしないと危ない」からではなく、**サーバーの実装に合わせた選択**。§7 が「この定義が両側で一致していることが前提」と書いているのは、揃えない実装もあり得るということ。
+
+#### ② 別オリジンへ送らないのは、トークンが秘密だから
+
+axios も Angular も、宛先が別オリジンなら**ヘッダを付けない**。付ければ、その別オリジンのサーバーにトークンを教えることになるから。教われば、そこから罠ページを作れる。
+
+axios の判定はこう書かれている。
+
+```js
+// axios 1.19.0 lib/helpers/resolveConfig.js
+// Strict boolean check — prevents proto-pollution gadgets (e.g. Object.prototype.withXSRFToken = 1)
+// and misconfigurations (e.g. "false") from short-circuiting the same-origin check and leaking
+// the XSRF token cross-origin.
+const shouldSendXSRF =
+  withXSRFToken === true || (withXSRFToken == null && isURLSameOrigin(newConfig.url));
+```
+
+`withXSRFToken` が**真偽値の `true` そのもの**であることまで確認している。`"false"` という文字列(JavaScript では真として扱われる)で同一オリジン判定をすり抜けさせない、という念の入れよう。**§7 の「トークンは別オリジンに対しては秘密」を、実装者が真に受けている証拠**。「このトークンは秘密ではない」という理解でいると、この 3 行が過剰防衛に見えてしまう。
+
+Angular も同じ判断をしている。
+
+```js
+// @angular/common 21.2.20 の xsrfInterceptorFn
+if (!inject(XSRF_ENABLED) || req.method === 'GET' || req.method === 'HEAD') {
+  return next(req);
+}
+// ... locationOrigin !== requestOrigin なら何もせず素通し
+```
+
+`api.ts` にこの判定が無いのは、**相対パスしか渡さない前提**だから(→ §7)。絶対 URL で外部 API を叩く行を 1 本足した瞬間、この前提は崩れて、そこにトークンが漏れる。**設定ではなく暗黙の約束で成り立っている**ので、壊しても警告は出ない。
+
+#### ③ Cookie の読み直し方
+
+Angular は `document.cookie` の文字列が前回と変わったときだけパースし直す。`api.ts` は毎回パースする。速度の違いだけで、**どちらも「起動時に 1 回だけ読む」ことはしない**。§5 ⑥ の再発行があるので、それをやると壊れる。
+
+独立に書かれた 3 つの実装が同じ結論に達しているので、これは好みではなく**要件**だと分かる。他人の実装を並べる価値はここにある — 1 つだけ見ていると、どこまでが必然でどこからが趣味なのか判別できない。
+
+### このアプリが自前で書いている理由
+
+axios を入れれば `api.ts` の CSRF 部分は消せる。それでもやらないのは、**通信経路が二重になる**から。
+
+`useFetch` / `useAsyncData` といった Nuxt の機能は `$fetch` と噛み合うようにできている(→ [data-fetching-and-ssg.md](../vue/data-fetching-and-ssg.md))。axios を足すと「`$fetch` を通る API」と「axios を通る API」が並立し、**CSRF ヘッダが付く経路と付かない経路が生まれる**。20 行を節約する代わりに、対策の抜けを作る余地を持ち込むことになる。
+
+そもそも ofetch が `onRequest` という差し込み口だけを用意して CSRF の実装を持たないのは、手抜きではない。**トークンの名前も渡し方もバックエンド次第**(`X-CSRF-TOKEN` のこともあれば、ヘッダではなくボディのこともある)なので、通信ライブラリの側で決め打ちできない。
+
+> **ライブラリが仕組みを提供し、アプリが方針を決める。**
+
+「便利機能が無い」のではなく「そこはアプリが決める場所だ」と言われている、と読む。逆に axios や Angular が既定値を持てるのは、`XSRF-TOKEN` という名前が §10 の経緯で事実上の標準になっていたからで、**規約が先にあったからライブラリが決め打ちできた**という順序になっている。
 
 ## つまずきポイント
 
@@ -648,7 +819,13 @@ Nuxt を SSR で動かしていれば埋め込みもできるが、この構成�
 `csrf.spa()` を使っている限り、パラメータ経由は XOR マスク済みの値を要求される。**ヘッダで送ること**(→ §8)。
 
 **`XSRF-TOKEN` Cookie の `HttpOnly` が無いのは意図的**
-JavaScript が読めなければ成立しない仕組みなので、外して正しい。秘密を守っているのは `SESSION` Cookie の方で、そちらには `HttpOnly` が付いている。**この 2 つの Cookie は役割が違う**。
+JavaScript が読めなければ成立しない仕組みなので、外して正しい。ただし**「秘密ではないから外している」ではない**。別オリジンに対しては秘密のままで、知られれば破られる。同一オリジンの JavaScript に見せても新しく渡るものが無いから外せる、という理屈(→ §7)。
+
+**`credentials: 'include'` を付けても CSRF は通らない**
+これは Cookie を付けるかどうかの設定で、トークンには関与しない。しかも同一オリジンなら既定で付く。403 が出ているときに見るのは**ヘッダの方**(→ §5)。
+
+**絶対 URL で外部 API を叩くと、トークンが外部に漏れる**
+`api.ts` にはオリジンの判定が無く、**相対パスしか渡さない前提**で成り立っている。axios も Angular もこの判定を持っている(→ §11)。前提を破っても警告は出ない。
 
 **「JSON API だから CSRF 不要」は成り立たない**
 成り立つのは `Authorization: Bearer` 方式のとき。Cookie でセッションを持つ構成では、ボディの形式に関係なく CSRF は成立しうる(→ §9 のログイン CSRF)。
@@ -675,10 +852,13 @@ JavaScript が読めなければ成立しない仕組みなので、外して正
 | **Double Submit Cookie** | 正解を Cookie に置き、Cookie とヘッダの一致だけを見る方式。サーバーの状態が不要。**このアプリ** |
 | **cookie tossing** | サブドメインから親ドメインの Cookie を上書きする攻撃。Double Submit の弱点を突く |
 | **プリフライト** | ブラウザが本体の送信前に `OPTIONS` で許可を確認する CORS の手順。カスタムヘッダや JSON の送信で発生する |
+| **単純リクエスト** | プリフライトが要らない範囲。メソッド・ヘッダ・`Content-Type` が限られる。**この範囲内なら罠ページからでもサーバーに届く**(→ §5) |
+| **`credentials`(fetch)** | `fetch` が Cookie を付けるかを決める設定。`omit` / `same-origin`(既定) / `include`。**CSRF 対策ではなく、攻撃側も使う**(→ §5) |
 | **BREACH** | 圧縮されたレスポンスのサイズ変化から秘密の値を推測する攻撃。XOR マスクはこれへの対策 |
 | **多層防御(defense in depth)** | 弱点の異なる対策を重ね、1 つ破られても残りが効く状態にする考え方 |
 | **`CsrfFilter`** | 照合を行う Spring Security のフィルタ。GET / HEAD / TRACE / OPTIONS は既定で対象外 |
 | **`CookieCsrfTokenRepository`** | トークンを Cookie に保管する実装。`csrf.spa()` が選ぶ |
+| **インターセプタ** | 通信ライブラリが送信前・受信後に処理を差し込ませる仕組み。axios / Angular の XSRF 対応も、`api.ts` の `onRequest` もこれ(→ §11) |
 
 ## 関連
 
