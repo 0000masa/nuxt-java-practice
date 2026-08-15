@@ -151,9 +151,14 @@ tasks.named('test') {
 | `PostRepositoryTest` | `@DataJpaTest` | 使う | 4 | カーソルページネーションの境界条件 |
 | `AuthTokenServiceTest` | `@DataJpaTest` | 使う | 7 | 使い捨てトークンの境界(期限切れ・使用済み・用途違い・ハッシュ保存・再発行での無効化) |
 | `AuthControllerTest` | `@WebMvcTest` | **不要** | 7 | 認証 API の入力チェックと `fieldErrors`、`/api/auth/me` が未ログインでも 200、パスワード変更が認可で弾かれること |
-| `AuthFlowTest` | `@SpringBootTest` | 使う | 2 | 登録 → 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと |
+| `AuthFlowTest` | `@SpringBootTest` | 使う | 3 | 登録 → 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと、Google ログインの入口が Google へ 302 すること |
+| `GoogleAccountServiceTest` | `@DataJpaTest` | 使う | 6 | Google ログインの分岐(既存ユーザーの特定・アカウントリンク・未確認アカウントの作り直し・新規作成の初期値・未確認メールの拒否・メール変更を取り込まないこと) |
+| `UsernameGeneratorTest` | `@DataJpaTest` | 使う | 3 | Google 由来ユーザーの username 生成(文字種の変換・衝突時の連番・使える文字が無いときの代替) |
+| `AppOidcUserTest` | 素の JUnit | **不要** | 1 | `getName()` がメールアドレスを返すこと(セッション無効化がメールを鍵に引くため) |
 
-合計 29 本。`@WebMvcTest` の 15 本は Service をモックに差し替えるので DB を使わない。
+合計 40 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` は DB を使わない。
+
+`AppOidcUserTest` の 1 本は他より重要度が高い。ここが OIDC の既定(`sub`)のままでも画面上は何も壊れず、「パスワードをリセットしたのに Google ログインのセッションだけ生き残る」という形でしか露見しないため、手で気づくのがほぼ不可能。
 
 テストの方針は「**要所に絞る**」(→ [implementation-progress.md](../development/implementation-progress.md))。網羅率を追わず、ページネーションのクエリ・認証の境界・いいねの重複防止のような**バグの温床**を優先する。
 

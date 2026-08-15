@@ -43,7 +43,7 @@
 
 ### パスワード未設定のアカウント
 
-`users.password_hash` が NULL のアカウント(Google 専用ユーザー)は照合する現在のパスワードが無いので、この経路では変更できない。その場合は [パスワードリセット](./request-password-reset.md)の経路で設定する。
+`users.password_hash` が NULL のアカウント([Google ログイン](./google-login.md)だけで作られたユーザー)は照合する現在のパスワードが無いので、この経路では変更できない。その場合は [パスワードリセット](./request-password-reset.md)の経路で設定する。画面側は [`GET /api/auth/me`](./get-me.md) の `hasPassword` を見て、この状態ならフォームを出さずに案内へ差し替える。
 
 ## 自分以外のセッションを消す
 

@@ -22,6 +22,8 @@
 | POST | `/api/auth/password-reset/request` | 不要 | パスワードリセットの申請 | [request-password-reset.md](./request-password-reset.md) |
 | POST | `/api/auth/password-reset/confirm` | 不要 | パスワードリセットの実行 | [confirm-password-reset.md](./confirm-password-reset.md) |
 | PUT | `/api/auth/password` | **必要** | ログイン中のパスワード変更 | [change-password.md](./change-password.md) |
+| GET | `/api/oauth2/authorization/google` | 不要 | Google ログインの入口(**ブラウザのページ遷移で叩く**) | [google-login.md](./google-login.md) |
+| GET | `/api/login/oauth2/code/google` | 不要 | Google からの戻り先(フロントは直接叩かない) | [google-login.md](./google-login.md) |
 
 ベース URL について:フロントエンドは相対パス `/api` を呼び、開発時は Nuxt の devProxy が backend コンテナへ転送する。詳細は `docs/development/` を参照。
 
@@ -31,6 +33,7 @@
 
 - **セッション Cookie 方式。** ログインすると `SESSION` Cookie(中身はセッション ID のみ)が発行され、セッションの実体は MySQL の `SPRING_SESSION` / `SPRING_SESSION_ATTRIBUTES` に保存される。**JWT は使わない**
 - **ログインの識別子はメールアドレス。** `users.username` は表示・検索用で、ログインには使わない
+- **ログイン手段は 2 つ。** メールアドレス + パスワードと、[Google ログイン](./google-login.md)。同じメールアドレスなら同一ユーザーに統合される(アカウントリンク → [ADR-0004](../adr/0004-google-account-linking.md))
 - **メール確認が済むまでログインできない。** 未確認のアカウントでログインを試みると 401 になり、他の失敗とは区別されたメッセージが返る
 - セッションのタイムアウトは 1 日
 

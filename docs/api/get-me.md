@@ -22,10 +22,13 @@
     "id": 20,
     "username": "taro",
     "displayName": "太郎",
-    "email": "taro@example.com"
+    "email": "taro@example.com",
+    "hasPassword": true
   }
 }
 ```
+
+`hasPassword` は**パスワードが設定されているか**。[Google ログイン](./google-login.md)だけで作られたユーザーは `false` になる。画面(`/settings/password`)はこれを見て、パスワード変更フォームの代わりに「[パスワードリセット](./request-password-reset.md)から設定してください」の案内を出す。フォームを出しても、照合する現在のパスワードが存在しないので必ず失敗するため。自分自身の情報なので、他人に何かが漏れる値ではない。
 
 未ログイン:
 
@@ -69,4 +72,4 @@
 登場するその他のファイル:
 
 - レスポンス定義: `com/example/app/auth/dto/MeResponse.java`
-- principal: `com/example/app/auth/AppUserDetails.java`
+- principal: `com/example/app/auth/AppUserDetails.java`(Google ログイン時は `AppOidcUser.java`)

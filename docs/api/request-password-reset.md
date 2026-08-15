@@ -39,7 +39,7 @@
 
 ### パスワード未設定のアカウントには許可する
 
-`users.password_hash` が NULL でも、`email_verified_at` が入っていればリセットできる。フェーズ4 の Google 専用ユーザーが**パスワードを新規に設定する手段**がこの経路になる。
+`users.password_hash` が NULL でも、`email_verified_at` が入っていればリセットできる。[Google ログイン](./google-login.md)だけで作られたユーザーが**パスワードを新規に設定する手段**がこの経路になる。
 
 開発時の余談として、`dev_user`(`dev@example.com`)はメール確認済みでパスワード未設定なので、この経路でパスワードを設定すればログインできるようになる(宛先が Mailpit なのでメールは受け取れる)。
 

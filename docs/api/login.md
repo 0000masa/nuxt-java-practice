@@ -69,7 +69,7 @@ Cookie が 2 つ返る。
 
 ### 「未登録」と「パスワード未設定」が同じ扱いになる理由
 
-`users.password_hash` が NULL のアカウント(フェーズ4 の Google 専用ユーザー、および `dev_user`)はパスワードログインできない。実装は `UsernameNotFoundException` を投げるだけで、Spring Security の `DaoAuthenticationProvider` が次の 2 つを自動で行う。
+`users.password_hash` が NULL のアカウント(Google ログインだけで作られたユーザー、および `dev_user`)はパスワードログインできない。そのユーザーは [Google ログイン](./google-login.md)を使う。実装は `UsernameNotFoundException` を投げるだけで、Spring Security の `DaoAuthenticationProvider` が次の 2 つを自動で行う。
 
 1. 既定の `hideUserNotFoundExceptions` により「資格情報が不正」に差し替え、未登録との区別をなくす
 2. ユーザーが見つからなかった場合もダミーのハッシュとの照合を走らせ、応答時間の差からアカウントの存在を推測されないようにする(タイミング攻撃対策)
