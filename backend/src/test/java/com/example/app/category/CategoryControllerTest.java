@@ -26,6 +26,7 @@ import org.springframework.context.annotation.Import; // 特定の設定クラ�
 import org.springframework.test.context.bean.override.mockito.MockitoBean; // 本物の Bean をモックに差し替える指示
 import org.springframework.test.web.servlet.MockMvc; // 実サーバーなしで HTTP リクエストを疑似送信する道具
 
+import com.example.app.auth.AppOidcUserService;
 import com.example.app.auth.AuthResponseWriter; // SecurityConfig が使う、認証エラーを JSON で返す役
 import com.example.app.category.dto.CategoryResponse; // カテゴリー1件を返すときのデータ(DTO)
 import com.example.app.config.SecurityConfig; // アプリ本体の認可ルール
@@ -87,6 +88,11 @@ class CategoryControllerTest {
 
 	@MockitoBean
 	AuthResponseWriter authResponseWriter;
+
+	// @MockitoBean AppOidcUserService … SecurityConfig の oauth2Login() が要求する部品(フェーズ4)。
+	//   Google ログインの経路はこのテストを通らないのでモックで足りる。
+	@MockitoBean
+	AppOidcUserService appOidcUserService;
 
 	// MockMvc … Tomcat を起動して TCP 通信することなく、Spring の内部だけで
 	//   「HTTP リクエストが来た」ことにして Controller を呼び出せるテスト用の道具。

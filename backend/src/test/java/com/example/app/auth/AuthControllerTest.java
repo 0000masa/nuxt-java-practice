@@ -45,6 +45,11 @@ class AuthControllerTest {
 	@MockitoBean
 	AuthResponseWriter authResponseWriter;
 
+	// @MockitoBean AppOidcUserService … SecurityConfig の oauth2Login() が要求する部品(フェーズ4)。
+	//   Google ログインの経路はこのテストを通らないのでモックで足りる。
+	@MockitoBean
+	AppOidcUserService appOidcUserService;
+
 	@Nested
 	@DisplayName("POST /api/auth/signup")
 	class Signup {

@@ -27,6 +27,7 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 import com.example.app.auth.AppUserDetails;
+import com.example.app.auth.AppOidcUserService;
 import com.example.app.auth.AuthResponseWriter;
 import com.example.app.common.exception.ForbiddenOperationException;
 import com.example.app.config.SecurityConfig;
@@ -57,6 +58,11 @@ class PostControllerTest {
 	// SecurityConfig が必要とする部品。認証エラー時の JSON 出力担当で、ここではモックで足りる。
 	@MockitoBean
 	AuthResponseWriter authResponseWriter;
+
+	// @MockitoBean AppOidcUserService … SecurityConfig の oauth2Login() が要求する部品(フェーズ4)。
+	//   Google ログインの経路はこのテストを通らないのでモックで足りる。
+	@MockitoBean
+	AppOidcUserService appOidcUserService;
 
 	// ログイン済みのユーザーとして振る舞わせる principal。id だけが Service に渡る。
 	private static final AppUserDetails LOGGED_IN_USER =
