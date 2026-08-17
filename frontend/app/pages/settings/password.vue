@@ -8,6 +8,14 @@
 definePageMeta({ middleware: 'auth' })
 
 const { changePassword } = useAuth()
+const auth = useAuthStore()
+
+/**
+ * Google ログインだけで作られたユーザーはパスワードを持たない。
+ * 照合する「現在のパスワード」が存在せず必ず失敗するので、フォーム自体を出さない。
+ * 設定したい場合はパスワードリセットの経路を使う(→ docs/api/request-password-reset.md)。
+ */
+const hasPassword = computed(() => auth.user?.hasPassword !== false)
 
 const currentPassword = ref('')
 const newPassword = ref('')
@@ -45,7 +53,14 @@ async function onSubmit() {
   <section class="auth-card">
     <h1 class="auth-title">パスワードの変更</h1>
 
-    <form class="auth-form" @submit.prevent="onSubmit">
+    <p v-if="!hasPassword" class="auth-notice">
+      このアカウントにはパスワードが設定されていません(Google ログインで作られたアカウントです)。
+      パスワードを設定するには
+      <NuxtLink to="/password-reset">パスワードの再設定</NuxtLink>
+      から手続きしてください。
+    </p>
+
+    <form v-else class="auth-form" @submit.prevent="onSubmit">
       <p v-if="errorMessage" class="auth-error">{{ errorMessage }}</p>
       <p v-if="done" class="auth-notice">
         パスワードを変更しました。この端末以外はログアウトされています。

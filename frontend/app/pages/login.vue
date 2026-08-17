@@ -3,6 +3,18 @@ const { login, resendVerification } = useAuth()
 const auth = useAuthStore()
 const route = useRoute()
 
+/**
+ * Google ログインが失敗したときに backend が付ける ?error= のコードと、画面に出す文言。
+ *
+ * URL にメッセージ本文を載せないのは、細工したリンクで任意の文言を表示させられるため。
+ * コードはバックエンドの GoogleLoginNotAllowedException と対応している。
+ */
+const GOOGLE_ERROR_MESSAGES: Record<string, string> = {
+  email_unverified:
+    'この Google アカウントはメールアドレスの確認が済んでいないため利用できません。メールアドレスとパスワードでログインしてください',
+  login_failed: 'Google ログインに失敗しました。時間をおいて試してください',
+}
+
 const email = ref('')
 const password = ref('')
 const submitting = ref(false)
@@ -18,11 +30,20 @@ const canSubmit = computed(
 
 /** ログイン後の戻り先。middleware が付けた ?redirect= があればそこへ */
 function destination() {
-  const redirect = route.query.redirect
-  if (typeof redirect !== 'string') return '/'
-  // `//evil.com` はプロトコル相対 URL として外部サイトに解決される。自サイト内のパスだけ通す
-  return redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/'
+  return safeInternalPath(route.query.redirect)
 }
+
+// Google ログインから戻された失敗の表示。パスワードログインの入力を邪魔しないよう、
+// 文言を出すだけで ?error= は消さない(再読み込みしても同じ状態が再現できる)。
+// onMountedはvueが用意している関数でコンポーネントが DOM に取り付けられた(マウントされた)ときに呼ばれる関数。
+//普段 import を書いていないのは、Nuxt が onMounted などの Vue の API を自動 import しているからです。
+// 自動 import は「onMounted という名前で使う」前提で効いているので、別名にしたい場合はその仕組みから外れることになり、
+// 自分で import { onMounted as afterMount } from 'vue' と書く必要があります。
+onMounted(() => {
+  const code = route.query.error
+  if (typeof code !== 'string') return
+  errorMessage.value = GOOGLE_ERROR_MESSAGES[code] ?? GOOGLE_ERROR_MESSAGES.login_failed!
+})
 
 // 既にログインしているなら留まる意味がない
 watchEffect(() => {
@@ -102,6 +123,10 @@ async function onResend() {
 
       <button type="submit" class="auth-submit" :disabled="!canSubmit">ログイン</button>
     </form>
+
+    <p class="auth-divider">または</p>
+
+    <AuthGoogleButton :redirect-to="destination()" />
 
     <div class="auth-links">
       <NuxtLink to="/signup">アカウントを作る</NuxtLink>

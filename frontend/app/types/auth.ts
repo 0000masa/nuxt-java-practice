@@ -4,6 +4,11 @@ export interface CurrentUser {
   username: string
   displayName: string
   email: string
+  /**
+   * パスワードが設定されているか。Google ログインだけで作られたユーザーは false になる。
+   * false のときパスワード変更フォームは出さない(現在のパスワードが存在せず、必ず失敗するため)。
+   */
+  hasPassword: boolean
 }
 
 /**

@@ -100,6 +100,11 @@ async function onSubmit() {
         <button type="submit" class="auth-submit" :disabled="!canSubmit">登録する</button>
       </form>
 
+      <p class="auth-divider">または</p>
+
+      <!-- Google 経由なら確認メールを踏む必要がない(Google が所有権を確認済みのため) -->
+      <AuthGoogleButton label="Google で登録 / ログイン" />
+
       <div class="auth-links">
         <NuxtLink to="/login">すでにアカウントを持っている</NuxtLink>
       </div>

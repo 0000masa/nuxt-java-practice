@@ -135,3 +135,38 @@ body {
   color: #93c5fd;
   cursor: not-allowed;
 }
+
+/* Google ログインの入口。button ではなく a なので、見た目だけ auth-submit に寄せる */
+.auth-google {
+  display: block;
+  text-align: center;
+  background: #fff;
+  color: #1f2937;
+  border: 1px solid #d1d5db;
+  border-radius: 999px;
+  padding: 0.5rem 1.1rem;
+  font-size: 0.9rem;
+  text-decoration: none;
+}
+
+.auth-google:hover {
+  background: #f9fafb;
+}
+
+/* 「または」を挟む区切り線 */
+.auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 1rem 0;
+  color: #9ca3af;
+  font-size: 0.8rem;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: #e5e7eb;
+}

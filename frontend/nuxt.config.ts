@@ -12,6 +12,13 @@ export default defineNuxtConfig({
     },
   },
   nitro: {
+    prerender: {
+      // ビルド時のクローラは、生成した HTML の <a href> を辿って次に静的化するページを探す。
+      // Google ログインのボタンは <a href="/api/oauth2/authorization/google"> なので、
+      // そのまま Nuxt のページとして静的化しようとして 404 になる(ビルド時にバックエンドは居ない)。
+      // /api 配下は常に Spring Boot が受けるもので Nuxt のルートではないため、まとめて対象外にする。
+      ignore: ['/api'],
+    },
     // 開発時: /api を Spring Boot コンテナに転送(CORS 不要にする)
     devProxy: {
       '/api': {
