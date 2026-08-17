@@ -63,9 +63,9 @@ public class GoogleAccountService {
 		if (sameEmail.isPresent()) {
 			User user = sameEmail.get();
 			if (user.getEmailVerifiedAt() != null) {
-				// アカウントリンク。id はそのままなので、投稿もいいねも引き継がれる。
+				// Googleアカウントとリンク。id はそのままなので、投稿もいいねも引き継がれる。
 				//
-				// 既に別の google_sub が入っていた場合は上書きになる。同じメールアドレスの
+				// もし既に別の google_sub が入っていた場合は上書きになる。同じメールアドレスの
 				// 所有権を確認済みの Google アカウントが 2 つある状況なので同一人物とみなす。
 				// 弾くと「どちらの Google でもログインできない」という戻れない状態を作る。
 				//なぜ弾かないのか
