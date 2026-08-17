@@ -47,7 +47,7 @@ docker compose exec backend sh ./gradlew test
 docker compose exec backend sh ./gradlew test --tests '*PostRepositoryTest*'
 
 # メソッド単位で絞る
-docker compose exec backend sh ./gradlew test --tests '*PostRepositoryTest.returnsNewestFirst'
+docker compose exec backend sh ./gradlew test --tests '*PostRepositoryTest$FindTimeline.returnsNewestFirst'
 
 # @Nested の中のメソッドを絞る(内部クラスは $ でつなぐ。$ を展開させないためシングルクォート必須)
 docker compose exec backend sh ./gradlew test --tests '*PostControllerTest$CreatePost.returnsBadRequestWhenBodyIsBlank'
@@ -96,7 +96,7 @@ class PostControllerTest {
 }
 ```
 
-現状では `PostControllerTest`(投稿の作成・削除・タイムライン)と `AuthControllerTest`(登録・メール確認・現在ユーザー・パスワード変更)が該当する。`CategoryControllerTest` は `GET /api/categories` のみ、`PostRepositoryTest` は `findTimeline` のみ、`AuthTokenServiceTest` はトークンの発行と検証のみなのでフラットに書いている。
+現状では `PostControllerTest`(投稿の作成・削除・タイムライン)、`AuthControllerTest`(登録・メール確認・現在ユーザー・パスワード変更)、`PostRepositoryTest`(`findTimeline` と投稿の保存)が該当する。`CategoryControllerTest` は `GET /api/categories` のみ、`AuthTokenServiceTest` はトークンの発行と検証のみなのでフラットに書いている。
 
 トップレベルのクラスを分ける手もあるが、`@WebMvcTest` と `@MockitoBean` の定型宣言がクラスごとに複製される。`@Nested` なら外側の `@BeforeEach` とフィールドをそのまま共有でき、グループ固有の前提だけ内側の `@BeforeEach` に足せる。
 
@@ -148,17 +148,24 @@ tasks.named('test') {
 | `ApplicationTests` | `@SpringBootTest` | 使う | 1 | アプリ全体が起動できること(Bean 配線・Flyway・`ddl-auto: validate`) |
 | `PostControllerTest` | `@WebMvcTest` | **不要** | 6 | 投稿 API のステータスコードとバリデーションエラーの形、principal の id が Service に渡ること |
 | `CategoryControllerTest` | `@WebMvcTest` | **不要** | 2 | カテゴリー一覧 API の順序と 0 件時の挙動 |
-| `PostRepositoryTest` | `@DataJpaTest` | 使う | 4 | カーソルページネーションの境界条件 |
+| `PostRepositoryTest` | `@DataJpaTest` | 使う | 6 | カーソルページネーションの境界条件、新規保存で id / created_at が埋まり DB に行が入ること |
 | `AuthTokenServiceTest` | `@DataJpaTest` | 使う | 7 | 使い捨てトークンの境界(期限切れ・使用済み・用途違い・ハッシュ保存・再発行での無効化) |
 | `AuthControllerTest` | `@WebMvcTest` | **不要** | 7 | 認証 API の入力チェックと `fieldErrors`、`/api/auth/me` が未ログインでも 200、パスワード変更が認可で弾かれること |
 | `AuthFlowTest` | `@SpringBootTest` | 使う | 3 | 登録 → 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと、Google ログインの入口が Google へ 302 すること |
 | `GoogleAccountServiceTest` | `@DataJpaTest` | 使う | 6 | Google ログインの分岐(既存ユーザーの特定・アカウントリンク・未確認アカウントの作り直し・新規作成の初期値・未確認メールの拒否・メール変更を取り込まないこと) |
 | `UsernameGeneratorTest` | `@DataJpaTest` | 使う | 3 | Google 由来ユーザーの username 生成(文字種の変換・衝突時の連番・使える文字が無いときの代替) |
 | `AppOidcUserTest` | 素の JUnit | **不要** | 1 | `getName()` がメールアドレスを返すこと(セッション無効化がメールを鍵に引くため) |
+| `AppOidcUserServiceTest` | 素の JUnit + Mockito | **不要** | 4 | Google のクレームをアプリの言葉に翻訳する部分(`email_verified` の 3 値変換・拒否の `OAuth2AuthenticationException` への翻訳・principal の組み立て) |
 
-合計 40 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` は DB を使わない。
+合計 46 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` / `AppOidcUserServiceTest` は DB を使わない。
 
 `AppOidcUserTest` の 1 本は他より重要度が高い。ここが OIDC の既定(`sub`)のままでも画面上は何も壊れず、「パスワードをリセットしたのに Google ログインのセッションだけ生き残る」という形でしか露見しないため、手で気づくのがほぼ不可能。
+
+### `AppOidcUserService` の delegate を差し替える方法
+
+`AppOidcUserService` は `private final OidcUserService delegate = new OidcUserService()` を握っており、そのまま呼ぶと Google と実通信してしまう。`@InjectMocks` は効かない(引数付きコンストラクタでの生成が先に成功するため、フィールド注入まで進まない)ので、`ReflectionTestUtils.setField(service, "delegate", mock)` で差し込む。**テストの都合で本番コードに差し替え用のコンストラクタを足さない**方針。代償として、`delegate` をリネームするとコンパイルは通ったままこのテストだけが実行時に落ちる。
+
+Google が返す `OidcUser` も `mock(OidcUser.class)` で足りる。`ClientRegistration` や署名済み ID トークンを組み立てる必要はない。ただし `thenReturn(googleUser(...))` のようにヘルパーを `when(...)` の内側で呼ぶと `UnfinishedStubbingException` になるため、戻り値は必ず変数に受けてから渡す。
 
 テストの方針は「**要所に絞る**」(→ [implementation-progress.md](../development/implementation-progress.md))。網羅率を追わず、ページネーションのクエリ・認証の境界・いいねの重複防止のような**バグの温床**を優先する。
 

@@ -74,7 +74,7 @@
 | GET | `/api/oauth2/authorization/google` | 公開 | Google へ送り出す入口。**ブラウザのページ遷移で叩く**(fetch 不可) |
 | GET | `/api/login/oauth2/code/google` | 公開 | Google からの戻り先。フロントは直接叩かない・叩けない(`state` が無いと通らない) |
 
-どちらも `SecurityConfig` の認可ルールで明示的に `permitAll` する必要がある。これが無いと `.requestMatchers("/api/**").authenticated()` に食われ、**まだ認証が成立していないコールバックが弾かれる**。
+どちらも `SecurityConfig` の認可ルールに `permitAll` として列挙する。ただしこれは**公開される URL の一覧として読めるようにするため**で、動作上は必須ではない。ログイン/ログアウトと同じく、認可を行う `AuthorizationFilter` より手前の `OAuth2AuthorizationRequestRedirectFilter` / `OAuth2LoginAuthenticationFilter` が処理して後続へ進まないので、`permitAll` を外しても入口・戻り先とも同じレスポンスを返す(実機で確認済み)。
 
 既存エンドポイントの変更は `GET /api/auth/me` のレスポンスに `hasPassword` が増えるのみ。
 
@@ -188,7 +188,7 @@ spring:
 
 `AppOidcUserTest` の 1 本は他より重要度が高い。決定8 を外しても画面上は何も壊れず、「パスワードリセットしたのに Google のセッションだけ生き残る」という形でしか露見しないため。
 
-`AuthFlowTest` の 1 本は決定1(`baseUri` の変更)と `permitAll` の追加を同時に守る。どちらを忘れても Google の画面まで到達しない。
+`AuthFlowTest` の 1 本は決定1(`baseUri` の変更)を守る。既定に戻すと Google の画面まで到達しないが、原因は画面からは分からない。
 
 **書かないもの**: Google とのトークン交換(外部依存。モックしても Spring Security の内部を写経するだけ)、フロントエンド(テスト基盤が無い)。
 
