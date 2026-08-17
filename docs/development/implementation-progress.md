@@ -12,7 +12,7 @@
 | 1 | DB 基盤 | Flyway 導入、全テーブルのマイグレーション(V1)、categories マスタ投入(V2)、パッケージを `com.example.app` に整理 | 完了 |
 | 2 | 投稿・タイムライン | posts/categories の API(作成・削除・詳細・タイムライン=カーソルページネーション)+ フロント(タイムライン・投稿詳細・無限スクロール)。認証は未導入のため開発用ユーザーで代用 | 完了 |
 | 3 | 認証(パスワード) | Spring Security + Spring Session JDBC(セッションテーブルは V3)。会員登録 → 確認メール(Mailpit)→ メール確認、ログイン/ログアウト、パスワードリセット、**パスワード変更**。フェーズ2の開発用ユーザーを実認証に置き換え。**設計 → [2026-08-05-phase3-auth-design.md](../superpowers/specs/2026-08-05-phase3-auth-design.md)** | 完了 |
-| 4 | 認証(Google) | `oauth2Login()` による Google ログイン、同一メールのアカウントリンク(`google_sub` 紐づけ)。**設計 → [2026-08-15-phase4-google-auth-design.md](../superpowers/specs/2026-08-15-phase4-google-auth-design.md)** | 作業中 |
+| 4 | 認証(Google) | `oauth2Login()` による Google ログイン、同一メールのアカウントリンク(`google_sub` 紐づけ)。**設計 → [2026-08-15-phase4-google-auth-design.md](../superpowers/specs/2026-08-15-phase4-google-auth-design.md)** | 完了 |
 | 5 | いいね | トグル API、タイムライン/詳細でのいいね数・自分のいいね状態表示(N+1 を解決する形で) | 未着手 |
 | 6 | 画像 | 投稿画像(最大4枚)・プロフィール画像のアップロード(MinIO/S3)と配信、投稿削除時のオブジェクト削除 | 未着手 |
 | 7 | プロフィール | プロフィールページ(ユーザー情報 + 投稿一覧)、本人による編集(表示名・bio・画像) | 未着手 |
@@ -34,7 +34,14 @@
 
 ## 完了メモ
 
-- **フェーズ4 作業中**(2026-08-15): [設計](../superpowers/specs/2026-08-15-phase4-google-auth-design.md) §9 のステップ 0〜5・7 が完了。**残りはステップ6(実際の Google アカウントでの通し確認)のみで、これは Google Cloud Console の設定が要るため利用者側の作業待ち**。テスト 40 本すべて成功。
+- **フェーズ4 完了**(2026-08-17): [設計](../superpowers/specs/2026-08-15-phase4-google-auth-design.md) §9 の 7 ステップすべて完了。テスト 46 本すべて成功。**実際の Google アカウントで 4 経路すべて確認済み**(下記)。
+  - **実機での確認結果(ステップ6)**:
+    - **新規作成**: Google 初回ログインで users に 1 行できる。`masanori.basketball@gmail.com` → username `masanori_basketball` が自動生成され、`display_name` は Google の名前、`password_hash` は NULL、`email_verified_at` は作成時刻(確認メールは飛ばない)
+    - **`SPRING_SESSION.PRINCIPAL_NAME` がメールアドレスになっている**ことを実データで確認。決定8(`AppOidcUser#getName()` の上書き)が効いている証拠。OIDC の既定のままなら `sub` が入る
+    - **アカウントリンク**: `UPDATE users SET google_sub = NULL WHERE id = 28` で「確認済み・パスワード未設定・Google 未連携」の状態を作り、同じ Google アカウントで再ログイン → **users の件数と最大 id が変わらず、`google_sub` が元の値に復活**。`created_at` は据え置きで `updated_at` だけ動いたので、新規作成ではなく **UPDATE が走った = 既存行に紐づいた**と確定できた(この日時の差が一番わかりやすい判定材料)
+    - **2 回目以降のログイン**: `sub` ヒットの経路。users に行が増えない
+    - **`hasPassword: false` の画面分岐**: `/settings/password` で変更フォームではなくパスワード再設定への案内が出る
+    - **戻り先の復元**: 未ログインで `/settings/password` → `/login?redirect=/settings/password` → Google ボタン → **`/settings/password` に着地**。`sessionStorage` + `/auth/callback` の経路(決定11・12)が効いている
   - **ステップ0**: 設計書と [ADR-0004](../adr/0004-google-account-linking.md)(自動アカウントリンク)、`CONTEXT.md` に「Google ログイン」「アカウントリンク」を追加
   - **ステップ1**: `spring-boot-starter-oauth2-client` 追加、`application.yml` に Google の登録、`SecurityConfig` に `oauth2Login()`(`baseUri` を 2 つとも `/api` 配下へ)+ `permitAll` 2 行 + `NullRequestCache`。`.env.example` に `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`。**スキーマ変更なし**(`users.google_sub` は V1 で作成済み)
   - **ステップ2〜3**: `UsernameGenerator` / `GoogleAccountService` / `GoogleLoginNotAllowedException` / `AppOidcUser` / `AppOidcUserService`、`AuthResponseWriter` に `onOAuth2LoginSuccess` `onOAuth2LoginFailure` を追加
@@ -47,7 +54,10 @@
   - **SSG ビルドで見つかった問題と対処**: Nitro のクローラが生成 HTML の `<a href>` を辿るため、Google ボタンの `/api/oauth2/authorization/google` を Nuxt のページとして静的化しようとして**ビルドが 404 で落ちた**。`nuxt.config.ts` に `nitro.prerender.ignore: ['/api']` を追加して解決(フェーズ11 でも効いてくる設定)
   - **既存テストへの波及**: `SecurityConfig` が `AppOidcUserService` を要求するようになったため、`@Import(SecurityConfig.class)` を使う `@WebMvcTest` 3 クラス(`PostControllerTest` / `CategoryControllerTest` / `AuthControllerTest`)に `@MockitoBean AppOidcUserService` の追加が必要だった。フェーズ3 の `AuthResponseWriter` と同じ事情
   - **残っている開発データの訂正**: フェーズ3 のメモにある `masa@example.com` / `resetpass123` は**もう通らない**(401)。後のセッションでパスワードが変わったとみられる。新規登録 → メール確認 → ログインの経路は curl で通ることを確認済みなので、動作確認には新しいユーザーを作るのが早い。`dev_user` は「メール確認済み・パスワード未設定」のまま残っており、アカウントリンクの検証データとして使える
-  - **ステップ6 に必要な利用者側の作業**: Google Cloud Console で OAuth クライアント ID を作り、リダイレクト URI に `http://localhost:3000/api/login/oauth2/code/google` を登録、同意画面が「テスト」なら自分のアカウントをテストユーザーに追加、`.env` に 2 つの値を記入 → 手順は [docs/setup/google-oauth.md](../setup/google-oauth.md)
+  - **`permitAll` は動作上は不要だった**(設計時の想定と違った点): `SecurityConfig` に足した `/api/oauth2/authorization/*` と `/api/login/oauth2/code/*` の `permitAll` は、外しても入口・戻り先とも同じレスポンスを返す(実機で確認)。`OAuth2AuthorizationRequestRedirectFilter` / `OAuth2LoginAuthenticationFilter` がどちらも `AuthorizationFilter` より手前でレスポンスを書いて後続に進まないため、`formLogin` / `logout` とまったく同じ理屈。**公開される URL の一覧として読めるように残してある**
+  - **Google Cloud Console 側の設定**(新しい PC では再度必要): OAuth クライアント ID(ウェブアプリケーション)、リダイレクト URI に `http://localhost:3000/api/login/oauth2/code/google`(完全一致・**8080 ではなく 3000**)、同意画面が「テスト」ならログインに使うアカウントをテストユーザーに追加、`.env` に 2 つの値 → 手順は [docs/setup/google-oauth.md](../setup/google-oauth.md)
+  - **残っている開発データ**: id 28 `masanori_basketball` / `masanori.basketball@gmail.com` が **Google 連携済み・パスワード未設定**の状態で残っている。`hasPassword: false` の画面や「パスワードログインできないアカウント」の検証にそのまま使える。`dev_user` も同じくパスワード未設定(Google 未連携)
+  - **フェーズ5 への申し送り**: いいねは**公開エンドポイントで principal を受ける**ことになるが、`AppOidcUser` が `AppUserDetails` を継承しているので **`@AuthenticationPrincipal AppUserDetails` の 1 種類で両方のログイン手段を受けられる**(ログイン方法による分岐は不要)。未ログイン時に `null` が入る点だけフェーズ3 と同じ扱いにすればよい
 - **フェーズ3 完了**(2026-08-06): [設計](../superpowers/specs/2026-08-05-phase3-auth-design.md) §9 の 7 ステップすべて完了。テスト 29 本すべて成功。
   - **ステップ4**: パスワードリセット(申請 → メール → 実行)、ログイン中のパスワード変更、セッション無効化。`UserSessionManager` が `FindByIndexNameSessionRepository#findByPrincipalName` でそのユーザーのセッションを引いて削除する(`SPRING_SESSION.PRINCIPAL_NAME` の index を使う)。リセットは全件削除、パスワード変更は操作中のセッション以外を削除。あわせて未使用のリセットトークンも失効させる
   - **ステップ5**: 認可を確定(公開: 閲覧系 GET と認証系 / 認証必須: `POST /api/posts`、`DELETE /api/posts/{id}`、`PUT /api/auth/password`)。**`CurrentUserProvider` / `DevCurrentUserProvider` を削除**し `@AuthenticationPrincipal` に置き換え。`PostService` は `create(request, userId)` / `delete(id, userId)` に変更

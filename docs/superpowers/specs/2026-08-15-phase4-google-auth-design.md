@@ -1,7 +1,7 @@
 # フェーズ4 設計: Google ログイン(OIDC + アカウントリンク)
 
 日付: 2026-08-15
-ステータス: 承認済み(未実装)
+ステータス: 実装済み(2026-08-17 完了)
 
 [実装フェーズ計画](../../development/implementation-progress.md) のフェーズ4 の設計。全体像は [設計概要](./2026-07-19-app-design-overview.md)、用語は [CONTEXT.md](../../../CONTEXT.md)、前提となる認証基盤は [フェーズ3 設計](./2026-08-05-phase3-auth-design.md) を正とする。
 
@@ -185,6 +185,8 @@ spring:
 | `AuthFlowTest`(追加) | 1 | `GET /api/oauth2/authorization/google` が `accounts.google.com` への 302 を返す |
 
 合計 11 本。既存 29 本と合わせて **40 本**。
+
+> 実装時に `AppOidcUserServiceTest` 4 本(`email_verified` の 3 値変換、アプリ例外 → `OAuth2AuthenticationException` の翻訳、principal の組み立て)と `PostRepositoryTest` 2 本を追加したため、実際は **46 本**。最新の一覧は [docs/test/README.md](../../test/README.md) を正とする。
 
 `AppOidcUserTest` の 1 本は他より重要度が高い。決定8 を外しても画面上は何も壊れず、「パスワードリセットしたのに Google のセッションだけ生き残る」という形でしか露見しないため。
 

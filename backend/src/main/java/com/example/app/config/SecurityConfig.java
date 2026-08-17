@@ -49,8 +49,6 @@ public class SecurityConfig {
 								"/api/auth/password-reset/request", "/api/auth/password-reset/confirm",
 								"/api/auth/login", "/api/auth/logout")
 						.permitAll()
-						// Google ログインの入口と戻り先。この 2 行が無いと下の /api/** に食われ、
-						// まだ認証が成立していないコールバックが弾かれてログインが完結しない。
 						// Google ログインの入口と戻り先。上のログイン/ログアウトと同じく、これらも
 						// 認可より手前のフィルタ(OAuth2AuthorizationRequestRedirectFilter /
 						// OAuth2LoginAuthenticationFilter)が処理して後続へ進まないため、この列挙が
