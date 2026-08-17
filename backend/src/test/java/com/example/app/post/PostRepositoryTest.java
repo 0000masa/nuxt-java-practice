@@ -8,6 +8,7 @@ import java.util.List;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 // Spring Boot 4 でテストアノテーションのパッケージが技術別モジュールに移動している(Boot 3 の記事とは import が異なる)
@@ -20,8 +21,14 @@ import com.example.app.category.CategoryRepository;
 import com.example.app.user.User;
 import com.example.app.user.UserRepository;
 
+import jakarta.persistence.EntityManager;
+
 /**
- * カーソルページネーションのクエリ検証(バグの温床になりやすい境界条件を押さえる)。
+ * PostRepository の検証。検証対象が 2 つあるので @Nested で分けている(→ docs/test/README.md の命名規約)。
+ * <ul>
+ * <li>{@link FindTimeline} … カーソルページネーションのクエリ(バグの温床になりやすい境界条件を押さえる)</li>
+ * <li>{@link SavePost} … 新規保存で id と created_at が埋まり、DB に行が入ること</li>
+ * </ul>
  * テスト専用 database app_test の MySQL に対して実行し、各テスト後にロールバックされる
  * (接続先の切り替えは backend/build.gradle の test タスク)。
  *
@@ -66,9 +73,14 @@ class PostRepositoryTest {
 	@Autowired
 	UserRepository userRepository;
 
+	// 使うのは SavePost.readsBackSavedPost の 1 本だけ。用途はそこのコメントに書いてある。
+	@Autowired
+	EntityManager entityManager;
+
 	// setUp() で作ったデータを各テストメソッドから参照するための置き場。
-	// 4 本のテストが同じフィールドを共有しているが、前のテストの値は残らない。JUnit 5 はテストメソッドごとに
+	// 6 本のテストが同じフィールドを共有しているが、前のテストの値は残らない。JUnit 5 はテストメソッドごとに
 	//   テストクラスのインスタンスを作り直すので、フィールドは毎回 null から始まり @BeforeEach が埋め直す。
+	// @Nested の内側クラスからそのまま参照できる(内部クラスは外側のインスタンスに属するため)。
 	User user;
 	Category category1;
 	Category category2;
@@ -79,6 +91,7 @@ class PostRepositoryTest {
 	Post post5;
 
 	// @BeforeEach … 各テストメソッドの直前に毎回実行される。テストごとに同じ前提を作り直すための下準備。
+	// 外側に置いた @BeforeEach は @Nested の内側のテストの前にも走る。
 	@BeforeEach
 	void setUp() {
 		// 前提を固定するため既存の投稿を消す。これが無いと、DB に他の投稿が残っていた場合に
@@ -111,64 +124,125 @@ class PostRepositoryTest {
 		post5 = postRepository.save(new Post(user, category1, "投稿5"));
 	}
 
-	// @Test … 「このメソッドはテストです」の目印。付け忘れると実行されないまま成功扱いになる。
-	// @DisplayName … レポートに表示される名前。メソッド名は英語 camelCase で動詞始まり、内容は @DisplayName に
-	//   日本語 1 文で書く(命名規約 → docs/test/README.md)。
-	// 以降の 4 本は書き方がほぼ同じなので、共通の説明はこの 1 本目にまとめてある。
-	@Test
-	@DisplayName("タイムラインは新しい順に返る")
-	void returnsNewestFirst() {
-		// 引数は (cursor, categoryId, pageable)。null, null は「カーソルなし = 先頭ページ」「絞り込みなし」の意味。
-		// PageRequest.of(0, 10) … Pageable(取得件数や並び順の指定)を作る。「0 ページ目・1 ページ 10 件」で、
-		//   Spring Data JPA がこれを見て SQL に LIMIT 10 を付ける。
-		List<Post> result = postRepository.findTimeline(null, null, PageRequest.of(0, 10));
+	// @Nested … テストをグループにまとめる JUnit 5 の仕組み。内部クラスは非 static で書く決まりで、
+	//   そのおかげで外側のフィールド(user, post1 など)と @BeforeEach をそのまま共有できる。
+	//   Gradle で 1 グループだけ絞るときは $ でつなぐ → --tests '*PostRepositoryTest$FindTimeline'
+	@Nested
+	@DisplayName("findTimeline")
+	class FindTimeline {
 
-		// assertThat(result) … result について主張する(AssertJ = 検証用ライブラリ)。
-		// .extracting(Post::getId) … 各要素から getId() の結果だけを抜き出し、id のリストに変換する。
-		//   Post::getId の :: は「メソッドを呼ばずに値として渡す」記法(JS の p => p.getId() に相当)
-		//   → docs/notes/functions-as-values.md
-		//   Post 自体を比較しないのは equals を実装していないため。オブジェクト比較は同一インスタンス判定になる。
-		// .containsExactly(...) … この値がこの順番でぴったり含まれること。順序に厳しい。
-		//   並び順そのものが検証対象なので、順序を無視する contains ではなくこちらを使う。
-		// この 1 本が守るのは order by p.id desc(→ PostRepository.java:41)。昇順に変えられると落ちる。
-		assertThat(result).extracting(Post::getId)
-				.containsExactly(post5.getId(), post4.getId(), post3.getId(), post2.getId(), post1.getId());
+		// @Test … 「このメソッドはテストです」の目印。付け忘れると実行されないまま成功扱いになる。
+		// @DisplayName … レポートに表示される名前。メソッド名は英語 camelCase で動詞始まり、内容は @DisplayName に
+		//   日本語 1 文で書く(命名規約 → docs/test/README.md)。
+		// 以降の 4 本は書き方がほぼ同じなので、共通の説明はこの 1 本目にまとめてある。
+		@Test
+		@DisplayName("タイムラインは新しい順に返る")
+		void returnsNewestFirst() {
+			// 引数は (cursor, categoryId, pageable)。null, null は「カーソルなし = 先頭ページ」「絞り込みなし」の意味。
+			// PageRequest.of(0, 10) … Pageable(取得件数や並び順の指定)を作る。「0 ページ目・1 ページ 10 件」で、
+			//   Spring Data JPA がこれを見て SQL に LIMIT 10 を付ける。
+			List<Post> result = postRepository.findTimeline(null, null, PageRequest.of(0, 10));
+
+			// assertThat(result) … result について主張する(AssertJ = 検証用ライブラリ)。
+			// .extracting(Post::getId) … 各要素から getId() の結果だけを抜き出し、id のリストに変換する。
+			//   Post::getId の :: は「メソッドを呼ばずに値として渡す」記法(JS の p => p.getId() に相当)
+			//   → docs/notes/functions-as-values.md
+			//   Post 自体を比較しないのは equals を実装していないため。オブジェクト比較は同一インスタンス判定になる。
+			// .containsExactly(...) … この値がこの順番でぴったり含まれること。順序に厳しい。
+			//   並び順そのものが検証対象なので、順序を無視する contains ではなくこちらを使う。
+			// この 1 本が守るのは order by p.id desc(→ PostRepository.java:41)。昇順に変えられると落ちる。
+			assertThat(result).extracting(Post::getId)
+					.containsExactly(post5.getId(), post4.getId(), post3.getId(), post2.getId(), post1.getId());
+		}
+
+		@Test
+		@DisplayName("カーソルより新しい投稿は返らない")
+		void excludesPostsNewerThanCursor() {
+			// カーソル = 前ページ最後の投稿の id。それ「より小さい」id だけが返る(カーソル自身は含まない)
+			// この 1 本が守るのは JPQL の p.id < :cursor を <= にしないこと(→ PostRepository.java:39)。
+			// <= だと post3 自身が含まれ、ページの境目で同じ投稿が 2 回表示される不具合になる。
+			List<Post> result = postRepository.findTimeline(post3.getId(), null, PageRequest.of(0, 10));
+
+			assertThat(result).extracting(Post::getId)
+					.containsExactly(post2.getId(), post1.getId());
+		}
+
+		@Test
+		@DisplayName("カテゴリー絞り込みとカーソルを併用できる")
+		void filtersByCategoryWithCursor() {
+			// この 1 本が守るのは 2 つの条件が両方効くこと。category1 は post1, post3, post5 →
+			// カーソル post5 で post5 自身が外れ → 残る post3, post1 を id 降順。
+			// and で結んだ categoryId 条件が抜けると post4, post3, post2, post1 になり落ちる。
+			List<Post> result = postRepository.findTimeline(post5.getId(), category1.getId(), PageRequest.of(0, 10));
+
+			assertThat(result).extracting(Post::getId)
+					.containsExactly(post3.getId(), post1.getId());
+		}
+
+		@Test
+		@DisplayName("limit で件数が制限される")
+		void limitsResultCount() {
+			// この 1 本が守るのは Pageable が SQL の LIMIT に変換されていること。@Query を自分で書いたクエリでは
+			// Pageable の引数を足し忘れてもコンパイルが通り、件数制限だけが静かに効かなくなる。
+			// あわせて join fetch と LIMIT の併用が安全なことの確認にもなる(user / category は to-one なので
+			// SQL 側で LIMIT が効く。to-many だと Hibernate が全件をメモリに読んでから絞る → PostRepository.java:23)。
+			List<Post> result = postRepository.findTimeline(null, null, PageRequest.of(0, 2));
+
+			assertThat(result).extracting(Post::getId)
+					.containsExactly(post5.getId(), post4.getId());
+		}
 	}
 
-	@Test
-	@DisplayName("カーソルより新しい投稿は返らない")
-	void excludesPostsNewerThanCursor() {
-		// カーソル = 前ページ最後の投稿の id。それ「より小さい」id だけが返る(カーソル自身は含まない)
-		// この 1 本が守るのは JPQL の p.id < :cursor を <= にしないこと(→ PostRepository.java:39)。
-		// <= だと post3 自身が含まれ、ページの境目で同じ投稿が 2 回表示される不具合になる。
-		List<Post> result = postRepository.findTimeline(post3.getId(), null, PageRequest.of(0, 10));
+	@Nested
+	@DisplayName("投稿の保存")
+	class SavePost {
 
-		assertThat(result).extracting(Post::getId)
-				.containsExactly(post2.getId(), post1.getId());
-	}
+		@Test
+		@DisplayName("保存すると id と createdAt が入り、タイムラインの先頭に来る")
+		void savesNewPost() {
+			Post saved = postRepository.save(new Post(user, category1, "新しい投稿"));
 
-	@Test
-	@DisplayName("カテゴリー絞り込みとカーソルを併用できる")
-	void filtersByCategoryWithCursor() {
-		// この 1 本が守るのは 2 つの条件が両方効くこと。category1 は post1, post3, post5 →
-		// カーソル post5 で post5 自身が外れ → 残る post3, post1 を id 降順。
-		// and で結んだ categoryId 条件が抜けると post4, post3, post2, post1 になり落ちる。
-		List<Post> result = postRepository.findTimeline(post5.getId(), category1.getId(), PageRequest.of(0, 10));
+			// ここで entityManager.flush() は要らない。id は DB の AUTO_INCREMENT が採番するので
+			// (→ Post.java:30 の GenerationType.IDENTITY)、Hibernate は INSERT を発行しないと id を
+			// 埋められない。つまり save() を抜けた時点で INSERT は DB に届いている。
+			// GoogleAccountServiceTest が flush を必要としたのは DELETE の話。削除は永続化コンテキストに
+			// 溜まるだけなので、明示的に流さないとロールバックで終わり SQL が一度も発行されない。
+			assertThat(saved.getId()).isNotNull();
+			// createdAt は引数で渡していない。@PrePersist の付いた onCreate() が INSERT 直前に入れる
+			// (→ Post.java:72-75)。これが外れると created_at に null が送られ NOT NULL 違反になる。
+			assertThat(saved.getCreatedAt()).isNotNull();
 
-		assertThat(result).extracting(Post::getId)
-				.containsExactly(post3.getId(), post1.getId());
-	}
+			// 新しい投稿が id 降順の先頭に来る = カーソルページネーションの前提が保たれている。
+			List<Post> timeline = postRepository.findTimeline(null, null, PageRequest.of(0, 10));
+			assertThat(timeline).extracting(Post::getId)
+					.containsExactly(saved.getId(), post5.getId(), post4.getId(),
+							post3.getId(), post2.getId(), post1.getId());
+		}
 
-	@Test
-	@DisplayName("limit で件数が制限される")
-	void limitsResultCount() {
-		// この 1 本が守るのは Pageable が SQL の LIMIT に変換されていること。@Query を自分で書いたクエリでは
-		// Pageable の引数を足し忘れてもコンパイルが通り、件数制限だけが静かに効かなくなる。
-		// あわせて join fetch と LIMIT の併用が安全なことの確認にもなる(user / category は to-one なので
-		// SQL 側で LIMIT が効く。to-many だと Hibernate が全件をメモリに読んでから絞る → PostRepository.java:23)。
-		List<Post> result = postRepository.findTimeline(null, null, PageRequest.of(0, 2));
+		@Test
+		@DisplayName("保存した投稿を DB から読み直せる")
+		void readsBackSavedPost() {
+			Post saved = postRepository.save(new Post(user, category2, "読み直す投稿"));
 
-		assertThat(result).extracting(Post::getId)
-				.containsExactly(post5.getId(), post4.getId());
+			// flush で溜まっている変更を DB へ送り、clear で永続化コンテキスト(一次キャッシュ)を空にする。
+			// clear が無いと、findByIdWithDetails は SELECT を発行しても「同じ id には同じインスタンス」の
+			// 決まりに従って上の saved をそのまま返す。それでは Java 側にオブジェクトがあることしか
+			// 確かめられず、DB に行が入ったかの検証にならない。
+			// これが保存のテストで EntityManager が要る唯一の場面(INSERT を届けるためではない)。
+			entityManager.flush();
+			entityManager.clear();
+
+			Post reloaded = postRepository.findByIdWithDetails(saved.getId()).orElseThrow();
+
+			// 別インスタンス = DB から読み直した証拠。中身が同じかどうかは一切見ていません。
+			assertThat(reloaded).isNotSameAs(saved);
+			assertThat(reloaded.getBody()).isEqualTo("読み直す投稿");
+			// join fetch が効いているので、LAZY の user / category も追加 SQL なしで触れる。
+			assertThat(reloaded.getUser().getId()).isEqualTo(user.getId());
+			assertThat(reloaded.getCategory().getId()).isEqualTo(category2.getId());
+			// createdAt は saved と厳密には一致しない。LocalDateTime.now() はナノ秒まで持つが
+			// DATETIME(6) はマイクロ秒までなので、往復で下位桁が落ちる。だから値の一致は見ない。
+			assertThat(reloaded.getCreatedAt()).isNotNull();
+		}
 	}
 }
