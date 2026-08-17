@@ -12,7 +12,7 @@
 | 1 | DB 基盤 | Flyway 導入、全テーブルのマイグレーション(V1)、categories マスタ投入(V2)、パッケージを `com.example.app` に整理 | 完了 |
 | 2 | 投稿・タイムライン | posts/categories の API(作成・削除・詳細・タイムライン=カーソルページネーション)+ フロント(タイムライン・投稿詳細・無限スクロール)。認証は未導入のため開発用ユーザーで代用 | 完了 |
 | 3 | 認証(パスワード) | Spring Security + Spring Session JDBC(セッションテーブルは V3)。会員登録 → 確認メール(Mailpit)→ メール確認、ログイン/ログアウト、パスワードリセット、**パスワード変更**。フェーズ2の開発用ユーザーを実認証に置き換え。**設計 → [2026-08-05-phase3-auth-design.md](../superpowers/specs/2026-08-05-phase3-auth-design.md)** | 完了 |
-| 4 | 認証(Google) | `oauth2Login()` による Google ログイン、同一メールのアカウントリンク(`google_sub` 紐づけ) | 未着手 |
+| 4 | 認証(Google) | `oauth2Login()` による Google ログイン、同一メールのアカウントリンク(`google_sub` 紐づけ)。**設計 → [2026-08-15-phase4-google-auth-design.md](../superpowers/specs/2026-08-15-phase4-google-auth-design.md)** | 作業中 |
 | 5 | いいね | トグル API、タイムライン/詳細でのいいね数・自分のいいね状態表示(N+1 を解決する形で) | 未着手 |
 | 6 | 画像 | 投稿画像(最大4枚)・プロフィール画像のアップロード(MinIO/S3)と配信、投稿削除時のオブジェクト削除 | 未着手 |
 | 7 | プロフィール | プロフィールページ(ユーザー情報 + 投稿一覧)、本人による編集(表示名・bio・画像) | 未着手 |
@@ -34,6 +34,20 @@
 
 ## 完了メモ
 
+- **フェーズ4 作業中**(2026-08-15): [設計](../superpowers/specs/2026-08-15-phase4-google-auth-design.md) §9 のステップ 0〜5・7 が完了。**残りはステップ6(実際の Google アカウントでの通し確認)のみで、これは Google Cloud Console の設定が要るため利用者側の作業待ち**。テスト 40 本すべて成功。
+  - **ステップ0**: 設計書と [ADR-0004](../adr/0004-google-account-linking.md)(自動アカウントリンク)、`CONTEXT.md` に「Google ログイン」「アカウントリンク」を追加
+  - **ステップ1**: `spring-boot-starter-oauth2-client` 追加、`application.yml` に Google の登録、`SecurityConfig` に `oauth2Login()`(`baseUri` を 2 つとも `/api` 配下へ)+ `permitAll` 2 行 + `NullRequestCache`。`.env.example` に `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`。**スキーマ変更なし**(`users.google_sub` は V1 で作成済み)
+  - **ステップ2〜3**: `UsernameGenerator` / `GoogleAccountService` / `GoogleLoginNotAllowedException` / `AppOidcUser` / `AppOidcUserService`、`AuthResponseWriter` に `onOAuth2LoginSuccess` `onOAuth2LoginFailure` を追加
+  - **ステップ4**: `MeResponse.CurrentUser` に `hasPassword`。`/settings/password` は false ならフォームを出さずパスワードリセットへ案内
+  - **ステップ5**: `components/auth/GoogleButton.vue`(素の `<a href>`)、`utils/postLoginRedirect.ts`、`pages/auth/callback.vue`、`/login` の `?error=` 対応表、`/signup` にもボタン
+  - **動作確認済み(curl / ビルド)**:
+    - `GET /api/oauth2/authorization/google` が Google へ 302。`redirect_uri` は Host ではなく `APP_BASE_URL` 由来の `http://localhost:3000/api/login/oauth2/code/google`、`scope=openid profile email`、PKCE 付き。**devProxy 経由(3000 番)でも同じ**
+    - 資格情報がダミーのままでもアプリが起動し、既存の公開 GET・登録・メール確認・ログインがすべて従来どおり動く。`/api/auth/me` に `hasPassword` が乗る
+    - 8 ページすべて 200(`/auth/callback` を含む)、**SSG ビルドは 18 ルートのプリレンダ成功**
+  - **SSG ビルドで見つかった問題と対処**: Nitro のクローラが生成 HTML の `<a href>` を辿るため、Google ボタンの `/api/oauth2/authorization/google` を Nuxt のページとして静的化しようとして**ビルドが 404 で落ちた**。`nuxt.config.ts` に `nitro.prerender.ignore: ['/api']` を追加して解決(フェーズ11 でも効いてくる設定)
+  - **既存テストへの波及**: `SecurityConfig` が `AppOidcUserService` を要求するようになったため、`@Import(SecurityConfig.class)` を使う `@WebMvcTest` 3 クラス(`PostControllerTest` / `CategoryControllerTest` / `AuthControllerTest`)に `@MockitoBean AppOidcUserService` の追加が必要だった。フェーズ3 の `AuthResponseWriter` と同じ事情
+  - **残っている開発データの訂正**: フェーズ3 のメモにある `masa@example.com` / `resetpass123` は**もう通らない**(401)。後のセッションでパスワードが変わったとみられる。新規登録 → メール確認 → ログインの経路は curl で通ることを確認済みなので、動作確認には新しいユーザーを作るのが早い。`dev_user` は「メール確認済み・パスワード未設定」のまま残っており、アカウントリンクの検証データとして使える
+  - **ステップ6 に必要な利用者側の作業**: Google Cloud Console で OAuth クライアント ID を作り、リダイレクト URI に `http://localhost:3000/api/login/oauth2/code/google` を登録、同意画面が「テスト」なら自分のアカウントをテストユーザーに追加、`.env` に 2 つの値を記入 → 手順は [docs/setup/google-oauth.md](../setup/google-oauth.md)
 - **フェーズ3 完了**(2026-08-06): [設計](../superpowers/specs/2026-08-05-phase3-auth-design.md) §9 の 7 ステップすべて完了。テスト 29 本すべて成功。
   - **ステップ4**: パスワードリセット(申請 → メール → 実行)、ログイン中のパスワード変更、セッション無効化。`UserSessionManager` が `FindByIndexNameSessionRepository#findByPrincipalName` でそのユーザーのセッションを引いて削除する(`SPRING_SESSION.PRINCIPAL_NAME` の index を使う)。リセットは全件削除、パスワード変更は操作中のセッション以外を削除。あわせて未使用のリセットトークンも失効させる
   - **ステップ5**: 認可を確定(公開: 閲覧系 GET と認証系 / 認証必須: `POST /api/posts`、`DELETE /api/posts/{id}`、`PUT /api/auth/password`)。**`CurrentUserProvider` / `DevCurrentUserProvider` を削除**し `@AuthenticationPrincipal` に置き換え。`PostService` は `create(request, userId)` / `delete(id, userId)` に変更
