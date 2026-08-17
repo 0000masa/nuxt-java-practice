@@ -4,10 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.mockito.Mockito.verify;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.redirectedUrlPattern;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -24,6 +28,7 @@ import org.springframework.mail.SimpleMailMessage;
 import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
 
 import com.example.app.user.UserRepository;
 
@@ -132,6 +137,35 @@ class AuthFlowTest {
 				.content("{\"body\":\"未ログインからの投稿\",\"categoryId\":1}"))
 				.andExpect(status().isUnauthorized())
 				.andExpect(jsonPath("$.message").value("ログインが必要です"));
+	}
+
+	@Test
+	@DisplayName("Google ログインの入口が Google へ 302 する")
+	void redirectsToGoogle() throws Exception {
+		// このテストが守っているのは、認可エンドポイントの baseUri を /api 配下に移してあること
+		// (設計の決定1)。既定に戻すと devProxy に乗らず、フェーズ11 で Nuxt の /login ページと
+		// 衝突する。外しても Google の画面まで到達しないが、原因は画面からは分からない。
+		MvcResult result = mockMvc.perform(get("/api/oauth2/authorization/google"))
+				.andExpect(status().is3xxRedirection())
+				.andExpect(redirectedUrlPattern("https://accounts.google.com/**"))
+				.andReturn();
+
+		// 決定1 のもう半分。redirect_uri は Google に「ここへ戻して」と伝える値で、
+		// application.yml の spring.security.oauth2.client.registration.google.redirect-uri が載る。
+		// 受け取る側の redirectionEndpoint(SecurityConfig.java:111)と一致していなければ、
+		// 戻ってきたリクエストを誰も処理できない。既定の /login/oauth2/code/* に戻すと、
+		// フェーズ11 で Nuxt の /login ページともぶつかる。
+		// クエリパラメータなので URL エンコードされて載る。デコードしてから比べる。
+		// ホスト部は APP_BASE_URL 次第で変わるため、パスだけを見る。
+		//レスポンスのどの値を見ているか
+		// 返ってきたレスポンスは、HTTP で書くとこういう形です。この部分のredirect_uriというクエリパラメータを見てる。
+		// HTTP/1.1 302
+		// Location: https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id=dummy-client-id
+		//           &scope=openid profile email&state=AO_AR6Aa3Gg...
+		//           &redirect_uri=http://localhost:3000/api/login/oauth2/code/google
+		//           &nonce=I5RDTCUY3Fpc...&code_challenge=aHmGrqlW...&code_challenge_method=S256
+		String location = URLDecoder.decode(result.getResponse().getRedirectedUrl(), StandardCharsets.UTF_8);
+		assertThat(location).contains("/api/login/oauth2/code/google");
 	}
 
 	private String captureTokenFromSentMail() {
