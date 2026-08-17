@@ -14,6 +14,25 @@ spring:
     jdbc:
       initialize-schema: never # セッションテーブルは Flyway(V3)が作る。既定の embedded だと MySQL では何も作られず、無いまま動かして落ちる
       # cleanup-cron の既定は毎分実行(0 * * * * *)。期限切れセッションの掃除は Spring Session に任せる
+  security:
+    oauth2:
+      client:
+        registration:
+          google:
+            # 資格情報が無くても起動できるようダミーを既定値にしている(設計の決定13)。
+            # 空文字だと ClientRegistration を作れず起動に失敗し、クローンしただけの人・
+            # @SpringBootTest・CI が全部止まるため。実際に使うには .env に本物を入れる
+            # → docs/setup/google-oauth.md
+            client-id: ${GOOGLE_CLIENT_ID:dummy-client-id}
+            client-secret: ${GOOGLE_CLIENT_SECRET:dummy-client-secret}
+            # 既定値は {baseUrl}/login/oauth2/code/{registrationId} だが、{baseUrl} は
+            # リクエストの Host から組み立てられる。Nuxt の devProxy は changeOrigin: true なので
+            # Host が backend:8080 になり、Google に登録した URI と一致せず redirect_uri_mismatch になる。
+            # 本番も ALB が TLS を終端するので https にならない。APP_BASE_URL から作れば
+            # 「Google Console に登録する文字列」と「アプリの設定値」が常に同一になる(決定9)。
+            redirect-uri: ${APP_BASE_URL:http://localhost:3000}/api/login/oauth2/code/google
+            # スコープ・各エンドポイント・ユーザー情報の取り出し方は Spring Security が
+            # CommonOAuth2Provider.GOOGLE として持っているので書かない(openid / profile / email)
   mail:
     host: ${SMTP_HOST:localhost} # 開発は Mailpit、本番は SES
     port: ${SMTP_PORT:1025}
