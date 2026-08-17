@@ -41,6 +41,19 @@ class AuthTokenServiceTest {
 	//   @Autowired 無しならフィールドが null のまま実行時に NullPointerException になる。
 	// 下の Repository 2 つに @Import が要らないのは @DataJpaTest が登録済みだから。
 	//   登録経路は違っても受け取りには @Autowired が要る、というのがこの 2 つが別物である証拠。
+
+	//@DataJpaTest が載せるもの／載せないものを分けるとこうなります。
+	// 載る（自動で用意される）
+	// - DataSource（DB 接続）、EntityManager、トランザクションマネージャ
+	// - @Entity の付いたクラス（User など）のスキャン
+	// - Spring Data JPA のリポジトリ（UserRepository など）
+	// - Flyway / Liquibase などマイグレーション関連の自動設定
+	// 載らない
+	// - 自分で書いた @Service / @Component / @RestController（＝ GoogleAccountService、UsernameGenerator）
+	// - @ConfigurationProperties の付いたクラス
+	//@SpringBootTest にすればアプリ全体が起動するので @Import は不要になりますが、
+	// 起動が遅くなり、無関係な設定ミスでも落ちるようになるため、必要な 2 つだけを名指しするこの書き方のほうが適切です。
+
 	@Autowired
 	AuthTokenService authTokenService;
 
