@@ -42,6 +42,11 @@ class UsernameGeneratorTest {
 	@Test
 	@DisplayName("既に使われていたら末尾に連番を振る")
 	void avoidsCollision() {
+		//IDENTITY は「id の採番を DB の AUTO_INCREMENT に任せる」設定です。Hibernate は INSERT を実行しないと採番された id を知りようがないので、
+		// この戦略のときは save() の時点で INSERT を DB へ送らざるを得ません。溜めておくことができないのです。
+		// つまりここでは save() に変えても INSERT は届き、テストは通ります。flush の部分は実質的に空振りしています。
+		// とはいえ、これを「無駄だから消すべき」とは考えません。読む人が IDENTITY かどうかを確認しなくても
+		// 「DB に反映してから次へ行きたいんだな」と分かりますし、将来 id の採番方式が変わっても壊れません。テストコードでは、性能より意図の明示を優先してよい場面です。
 		userRepository.saveAndFlush(new User("taken", "先客", "taken-1@example.com"));
 		assertThat(usernameGenerator.generateFrom("taken@example.com")).isEqualTo("taken_2");
 
