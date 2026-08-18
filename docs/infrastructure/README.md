@@ -68,6 +68,7 @@ CloudFormation で管理するもの / しないものを、ライフサイク�
 |---|---|---|
 | **Route53 ホストゾーン** | **手動**(作成済み) | 削除して作り直すと **NS レコードが変わり、X-Server 側の再設定と DNS 伝播待ちが発生する**。撤収のたびにこれをやるのは現実的でない |
 | **ECR リポジトリ** | **手動** | スタック作成時にタスク定義がイメージを参照するため、**スタックより先に存在していないと push もデプロイもできない** |
+| **IAM の OIDC プロバイダ + GitHub Actions 用ロール** | **手動** | ECR に push するロールをスタックに入れると**循環依存**になる。push にはロールが要る → ロールを作るスタックは ECS がイメージを引けず ROLLBACK → 作られかけたロールごと消える、で永久に push できない。作成手順 → [github-actions-oidc.md](./github-actions-oidc.md) |
 | ACM 証明書 | CloudFormation | ホストゾーンが Route53 にあるため DNS 検証はすぐ通る。撤収のたびに作り直しても実用上の問題は出ない |
 | Route53 の A レコード(ALB 向け) | CloudFormation | ゾーンは手動管理のまま、**中身のレコードだけ**をスタックが出し入れする |
 | 上記以外すべて | CloudFormation | VPC / サブネット / NAT GW / SG / ALB / ECS / RDS / S3 / CloudFront / IAM ロール |
@@ -109,6 +110,13 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 - ワークフローは `aws-actions/configure-aws-credentials` でそのロールを AssumeRole する
 - 長期クレデンシャルを GitHub Secrets に置かなくて済む
 
+**ロールは用途ごとに分ける。** CloudFormation でこの構成を作るロールは `iam:CreateRole` / `iam:PassRole` を含む実質管理者権限になるため、「イメージを push するだけ」のワークフローには持たせない。OIDC プロバイダだけはアカウントに 1 つで共有する。
+
+| 用途 | IAM ロール名 | GitHub Secrets 名 | 状態 |
+|---|---|---|---|
+| ECR にイメージを push | `nuxt-java-practice-gha-ecr-push` | `AWS_ECR_PUSH_ROLE_ARN` | 作成手順 → [github-actions-oidc.md](./github-actions-oidc.md) |
+| CloudFormation スタックの作成 / 削除 | 未定 | 未定 | フェーズ13 で決める |
+
 ### スタック構成
 
 **使い捨て部分は 1 スタックにまとめる。** VPC・サブネット・NAT GW・SG・ALB・ACM・ECS・RDS・S3・CloudFront・Route53 の A レコード・IAM ロールを 1 本のテンプレートに置く。
@@ -127,8 +135,11 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 ```
 [環境を建てるとき]
-1. アプリのイメージをビルドして ECR に push(ECR は手動作成済み)
+1. workflow_dispatch で「ECR へイメージを push」を実行(.github/workflows/ecr-push.yml)
+   - タグはコミットの短縮 SHA。ジョブサマリに出るタグを控える
+   - 同じコミットで既に push 済みならビルドを飛ばして終わる
 2. workflow_dispatch でスタックを作成・更新
+   - 1 で控えたイメージタグをパラメータに渡す
    - Change Set で差分を確認 → 実行
 3. 検証する
 
