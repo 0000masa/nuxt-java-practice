@@ -67,6 +67,15 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 
 このリポジトリは **Dev Container 方式**を採用した。VS Code で backend コンテナの中に入って開発すると(`.devcontainer/devcontainer.json`)、コンテナ内の Java 拡張が保存時に自動コンパイルして①を務め、devtools(②)がそれを拾って再起動する。CMD は `sh ./gradlew bootRun` のままなので、VS Code を開いていないときは方法 1(restart)に自然に戻るだけで壊れない。候補に挙がった他の手法(継続ビルド常駐・ホスト IDE など)との比較と選定理由は [java-dev-env-comparison.md](./java-dev-env-comparison.md) を参照。
 
+#### ①が働くのは「Dev Container の VS Code で保存したとき」だけ
+
+ここでいう自動コンパイルのトリガーは **VS Code エディタ上の保存操作**であって、ワークスペースのファイル変更検知ではない。そのため**ホスト側のエディタや Claude がファイルを書き換えた場合(バインドマウントでコンテナ内のソースは更新される)でも、①は働かない**。
+
+- Dev Container を起動したまま、ホスト側から `Application.java` を書き換えて 40 秒待っても `build/classes/java/main/.../Application.class` の更新時刻は変わらなかった(新しい .class はどこにも書き出されない)
+- 変更通知自体はコンテナまで届いている。コンテナ内で Java の `WatchService`(Linux では inotify)にソースディレクトリを監視させると、ホスト側の編集で `ENTRY_MODIFY` が発火する。届かないのではなく、言語サーバーが保存操作以外ではビルドを起動しない
+
+.class が更新されないので devtools(②)も拾うものがなく、アプリは再起動しない。ホスト側から編集したときは `docker compose exec backend sh ./gradlew classes`(または `docker compose restart backend`)で①を代行する必要がある。CLAUDE.md にある「Claude が backend の Java を編集したら `gradlew classes` を実行する」ルールはこのため。
+
 ## `bootRun` タスクと Gradle Wrapper
 
 - **`./gradlew`（Gradle Wrapper）** — Gradle 本体をインストールしていなくても、初回に正しいバージョンを自動ダウンロードして実行するスクリプト。ダウンロードした本体は docker-compose の `gradle-cache` ボリュームに保存され、コンテナを作り直しても再ダウンロードされない（Gradle そのものと キャッシュの置き場所の詳細 → [gradle-basics.md](./gradle-basics.md)）
