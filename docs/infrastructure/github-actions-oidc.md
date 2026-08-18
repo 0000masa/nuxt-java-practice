@@ -183,13 +183,26 @@ repo:0000masa@134136756/nuxt-java-practice@1303585339:ref:refs/heads/main
 
 これは制約ではなく利点でもある。名前ではなく ID で縛るので、**リポジトリを改名しても信頼ポリシーを直す必要がなく**、逆に「リポジトリを消した後に他人が同じ名前を取って、このロールを使う」という乗っ取りも成立しない。
 
-**ID の取り方**。オーナー ID は公開 API で引ける。
+**ID の取り方**。**正式な手段は API のみで、GitHub の画面に ID を表示する欄は無い**(リポジトリの Settings にも無い)。オーナー ID は公開 API で引ける。
 
 ```bash
 curl -s https://api.github.com/users/0000masa | jq '.id'
 ```
 
-リポジトリ ID は private リポジトリだと未認証では引けないので、実際に発行されたトークンの `sub` を見るのが確実(手順は「§8 トラブルシューティング」の `sub` 確認方法)。認証できるなら `gh api repos/0000masa/nuxt-java-practice --jq '.id'` でもよい。
+リポジトリ ID は private リポジトリだと未認証では引けないので、認証して引く。
+
+```bash
+gh api repos/0000masa/nuxt-java-practice --jq '.id'
+```
+
+いずれにせよ**最終的に信頼ポリシーと突き合わせるべきなのは、実際に発行されたトークンの `sub`**(手順は「§8 トラブルシューティング」の `sub` 確認方法)。API で引いた ID を書いたのに AssumeRole が通らないときは、推測せずトークンの実物を見る。
+
+> **画面から読み取る裏技もあるが、当てにしないこと。** リポジトリのトップページの HTML には
+> `<meta name="octolytics-dimension-repository_id" content="...">`、プロフィール画像の URL には
+> `https://avatars.githubusercontent.com/u/<オーナーID>` という形で ID が埋まっているので、
+> ソース表示や DevTools で読める(ログイン中なら private リポジトリでも見える)。
+> ただしこれらは **GitHub 社内のアナリティクス用の非公開実装**で、ドキュメント化も互換性の保証もされておらず、
+> 予告なく消えたり名前が変わったりする。**手順として採用せず、API か `sub` の実物を使う。**
 
 **`sub` クレームの形**は実行のされ方でも変わる。以下は `R` を `0000masa@134136756/nuxt-java-practice@1303585339` の略とする。
 
