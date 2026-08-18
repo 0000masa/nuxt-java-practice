@@ -1,0 +1,48 @@
+# 本番イメージ(docker/app/Dockerfile)のビルドコンテキストから除外するもの。
+# このイメージは frontend と backend の両方を材料にするため、ビルドコンテキストは
+# リポジトリ直下になる。除外しないとリポジトリ全体が Docker デーモンに送られる。
+#
+# 【効く範囲】ここに書いたものはビルドコンテキストに含まれない。つまり Dockerfile の
+# COPY / ADD から参照できない。書き忘れて COPY したら入ってしまう、ではなく
+# 「そもそも送らない」ので参照しようがない、という関係になる。
+# これが実際に効くのは本番イメージのビルドで、CI では
+# .github/workflows/ecr-push.yml の「ビルドして push」ステップが context: . を
+# 渡している(= リポジトリ直下がコンテキスト)。
+#
+# 【効かない範囲】docker-compose.yml のバインドマウント(./backend:/app、
+# ./frontend:/app)には影響しない。あちらは実行時にホストのフォルダをそのまま
+# コンテナに見せる仕組みで、ビルドとは別の話。実際、下で除外している
+# backend/build と backend/.gradle は開発コンテナの中には存在するし、
+# 無ければ bootRun がコンパイル結果を書き出せず動かない。.env も同じで、
+# 除外していても開発では compose の env_file から読み込まれている。
+
+# --- 秘密情報(最重要) ---
+# .env には DB パスワードと Google のクライアントシークレットが入っている。
+# COPY し忘れれば入らない、ではなく「コンテキストに含めない」ことで事故を防ぐ。
+.env
+.env.*
+
+# --- 巨大で不要なもの ---
+.git
+.github
+**/node_modules
+
+# --- ビルド生成物(イメージの中で作り直すので持ち込まない) ---
+# ホスト側の生成物を持ち込むと、ホストとイメージでビルド結果が混ざる
+frontend/.nuxt
+frontend/.output
+frontend/.nitro
+frontend/.data
+frontend/.cache
+frontend/dist
+backend/build
+backend/.gradle
+backend/bin
+
+# --- 実行に関係しないもの ---
+docs
+cloudformation
+.devcontainer
+.vscode
+.claude
+docker-compose.yml
