@@ -1,6 +1,6 @@
 # Java の実行環境とビルドの仕組み — eclipse-temurin、JVM、bootRun
 
-`docker/backend/Dockerfile` のベースイメージ `eclipse-temurin:21-jdk` とは何か、Java の「ビルドしてから動かす」は開発中どうなるのか、についての学習メモ。PHP / Node 出身者向け。
+`docker/backend/Dockerfile` のベースイメージ `eclipse-temurin:21-jdk` とは何か、Java の「ビルドしてから動かす」は開発中どうなるのか、そして開発と本番でビルド・起動のコマンドがどう違うのか、についての学習メモ。PHP / Node 出身者向け。
 
 ## eclipse-temurin とは — 「Java 公式」が一枚岩ではない話
 
@@ -82,10 +82,92 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 - **`bootRun`** — Spring Boot の Gradle プラグインが提供するタスク。「コンパイル → 組み込み Tomcat ごとアプリを起動」まで一気にやる。ポート 8080 で待ち受け（EXPOSE 8080 / compose の `"8080:8080"`）
 - CMD の先頭に `sh` が付いている理由（実行権限の保険）は [docker-dev-containers.md](./docker-dev-containers.md) を参照
 
+## 開発と本番 — 4 つのコマンドの違い
+
+ビルドと起動には、開発と本番でそれぞれ別のコマンドを使う。組み合わせは 4 つ。
+
+| | 開発 | 本番 |
+|---|---|---|
+| **ビルド** | `./gradlew classes` | `./gradlew bootJar` |
+| **起動** | `./gradlew bootRun` | `java -jar app.jar` |
+
+このリポジトリでの実際の打ち方:
+
+```bash
+# 開発(リポジトリ直下から。コンテナ内で実行される)
+docker compose exec backend sh ./gradlew classes   # 反映だけ。アプリは止めない
+docker compose up -d backend                       # 起動(CMD が bootRun)
+
+# 本番(docker/app/Dockerfile の中で走る)
+sh ./gradlew bootJar        # ステージ2
+java -jar /app/app.jar      # ステージ3(ENTRYPOINT)
+```
+
+### 開発のビルド — `./gradlew classes`
+
+コンパイルとリソースのコピーだけを行い、起動はしない。中身は 2 つのタスクの束:
+
+```
+compileJava      src/main/java/**/*.java  → build/classes/java/main/
+processResources src/main/resources/**    → build/resources/main/
+```
+
+`classes` はこの 2 つをまとめた集約タスクで、それ自体は何もしない。**`src/main/resources/` の中身は .java ではないのでコンパイルされず、そのままコピーされるだけ**という点に注意(`application.yml` や `static/` がこれにあたる)。
+
+差分コンパイルなので、変更したファイルだけが再コンパイルされる。上の①(コンパイル係)を手で代行するのがこのコマンドで、`.class` さえ更新すれば②の devtools が拾って再起動するため、**アプリを止める必要はない**。
+
+### 開発の起動 — `./gradlew bootRun`
+
+`classes` を実行してから、Gradle が JVM を子プロセスとして起動する。渡されるクラスパスは 3 種類:
+
+```
+build/classes/java/main/       ← ばらの .class(フォルダのまま)
+build/resources/main/          ← application.yml, static/ など
+~/.gradle/caches/.../*.jar     ← 依存ライブラリ(gradle-cache ボリューム)
+```
+
+**jar は作らない。** ばらのフォルダと、キャッシュに散らばった依存 jar を直接クラスパスに並べているだけで、`bootRun` しか使っていない限り `backend/build/libs/` には何も生まれない。
+
+devtools は `developmentOnly` スコープなのでこのクラスパスに含まれ、常駐して `build/classes` を監視する。
+
+### 本番のビルド — `./gradlew bootJar`
+
+`classes` の結果を 1 個の**実行可能 jar**(`build/libs/app-0.0.1-SNAPSHOT.jar`)に梱包する。依存ライブラリまで同梱されるので、これ 1 つで起動できる(jar の中身の詳細 → [backend-project-files.md](./backend-project-files.md))。
+
+`docker/app/Dockerfile` が `build` ではなく `bootJar` を使っているのには理由が 2 つある。
+
+- **`build` は `test` タスクに依存している。** ビルドコンテナに MySQL が居ないのでテストが接続エラーで落ち、イメージが作れなくなる(テストは専用の `app_test` データベースを使う → [../test/README.md](../test/README.md))
+- **`build` は jar を 2 個作る。** 実行可能 jar に加えて自分のクラスだけの `-plain.jar` も生成されるため、Dockerfile の `COPY .../build/libs/*.jar` がどちらを拾うか曖昧になる。`bootJar` なら 1 個しかできない
+
+### 本番の起動 — `java -jar app.jar`
+
+Gradle は一切登場しない。実行イメージも `21-jre` でコンパイラが無い。JVM が jar 内の `MANIFEST.MF` を読み、Spring Boot の loader が同梱の依存ごとクラスパスを組み立てて起動する。
+
+`ENTRYPOINT` が `sh -c "exec java ..."` になっているのは、`exec` で `java` を PID 1 にするため。付けないと `sh` が PID 1 になり、ECS がタスクを止めるときの SIGTERM が `java` に届かない。
+
+### 違いのまとめ
+
+| 観点 | 開発 | 本番 |
+|---|---|---|
+| JVM を起動するのは | Gradle(子プロセスとして) | 直接 |
+| クラスパスの形 | ばらのフォルダ + キャッシュ内の jar | jar 1 個の内部 |
+| `classpath:/static/` の実体 | `build/resources/main/static/` | jar 内の `BOOT-INF/classes/static/` |
+| 依存ライブラリの置き場 | `~/.gradle/caches/`(gradle-cache ボリューム) | jar に同梱 |
+| devtools | 有効(自動再起動) | 含まれない |
+| 必要なもの | JDK + Gradle + ソース | JRE + jar だけ |
+| コード変更の反映 | `classes` → devtools が再起動 | イメージ再ビルド |
+
+開発は道具一式を持ち歩き、本番は成果物だけを持っていく、という違い。`docker/app/Dockerfile` のステージ 3 が `21-jre` で、ソースも Gradle も残っていないのがその現れ。
+
+### 注意点
+
+- **`backend/src/main/resources/static/` は開発では空。** Nuxt の SSG 出力が入るのは `docker/app/Dockerfile` の `COPY --from=frontend` の瞬間だけ。そのため `backend/src/main/java/com/example/app/config/StaticResourceConfig.java` の静的リソース配信設定が実際に働くのは本番 jar でだけで、開発時のフロントは nuxt コンテナ(devProxy 経由)が担当する
+- **`build.gradle` を変えたときは `classes` では足りない。** 依存のクラスパスは起動時に固定されるので `docker compose restart backend` が必要(→ [java-dev-env-comparison.md](./java-dev-env-comparison.md))
+
 ## 落とし穴
 
 - **初回の `docker compose up` はかなり待たされる。** Gradle 本体のダウンロード → 依存ライブラリ全取得 → 全ファイルコンパイル → 起動、と続くため。2 回目以降は gradle-cache が効いて速くなる。「壊れた?」と思う前にログを見る
-- **devtools は本番に入らない。** `developmentOnly` スコープのおかげで `./gradlew build` の本番用 Jar には含まれない。スコープ（[gradle-dependencies.md](./gradle-dependencies.md) 参照）が「開発用の仕掛けを本番に紛れさせない」仕事をしている例
+- **devtools は本番に入らない。** `developmentOnly` スコープのおかげで `./gradlew bootJar`（`build`）で作る本番用 jar には含まれない。スコープ（[gradle-dependencies.md](./gradle-dependencies.md) 参照）が「開発用の仕掛けを本番に紛れさせない」仕事をしている例
 - **`21-jre` にすると開発コンテナは動かない。** コンパイラがないので bootRun のコンパイル段階で失敗する。JRE が活きるのは実行だけを行う本番イメージ
 
 ## 用語集
@@ -100,6 +182,10 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 - **spring-boot-devtools** — クラス（.class）の変化を検知してアプリを高速再起動する開発ツール。ソースは見ていない
 - **bootRun** — コンパイル + Spring Boot アプリ起動を行う Gradle タスク。実行時に一回だけ働き、ファイル監視はしない
 - **compileJava** — コンパイルだけを行う Gradle タスク（bootRun はこれ + 起動を含む上位タスク）
+- **processResources** — `src/main/resources` の中身をコンパイルせず `build/resources/main` へコピーする Gradle タスク
+- **classes** — compileJava + processResources をまとめた集約タスク。「ビルドだけして起動はしない」がこれ
+- **bootJar** — 依存ライブラリごと 1 個に固めた実行可能 jar を作る Spring Boot の Gradle タスク
+- **実行可能 jar（fat jar）** — 依存ライブラリまで同梱していて `java -jar` 単体で起動できる jar。Spring Boot が作るのはこれ
 - **継続ビルド（`--continuous`）** — ソースを監視し、変化のたびに指定タスクを自動再実行する Gradle のモード
 - **マルチステージビルド** — 「ビルド用イメージ」と「実行用イメージ」を分ける Dockerfile の書き方
 
@@ -107,5 +193,6 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 
 - Dockerfile・CMD・マウントの設計 → [docker-dev-containers.md](./docker-dev-containers.md)
 - build.gradle と依存管理・スコープ → [gradle-dependencies.md](./gradle-dependencies.md)
+- jar の正体（.class を固めた zip）と、成果物 jar / wrapper jar の違い → [backend-project-files.md](./backend-project-files.md)
 - ①コンパイル係を誰に任せるかの手法比較と Dev Container 採用理由 → [java-dev-env-comparison.md](./java-dev-env-comparison.md)
 - 言語でビルドの要否・補完の仕組みが変わる理由(PHP / Node との比較の続き) → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md)
