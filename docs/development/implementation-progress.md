@@ -19,7 +19,7 @@
 | 8 | 検索ラボ | 検索 API(対象・一致方法・カテゴリー・方式/件数切り替え、安全上限)、実行時間計測、EXPLAIN 返却、フロント(条件フォーム・プリセット・計測表示) | 未着手 |
 | 9 | シードタスク | タスクモード(`--app.task=seed`)実装。users 1万 / posts 100万 / likes 300万 をセットベース SQL で投入 | 未着手 |
 | 10 | index 実験 | 検索ラボで実験用 index(複合・FULLTEXT)の before/after を検証し、結果を `docs/notes/` に記録 | 未着手 |
-| 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 作業中 |
+| 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 完了 |
 | 12 | AWS 運用 | `db-task.yml`(ECS Run Task で migrate/seed)、SES/S3 の本番設定。CloudFormation テンプレート側の作業と合わせて別途設計 | 未着手 |
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)の作成。**ファイル分割・環境差分の共通化方式は未確定で、着手前に別セッションで設計を議論する**。方針 → [ADR-0001](../adr/0001-cloudformation-yaml-over-terraform.md) と [infrastructure/README.md](../infrastructure/README.md) | 未着手 |
 
@@ -34,8 +34,7 @@
 
 ## 完了メモ
 
-- **フェーズ11 作業中**(2026-08-17): **フェーズ5〜10(いいね・画像・プロフィール・検索ラボ・シード・index 実験)を飛ばして着手した。** アプリの最低限の機能が揃ったので、機能を増やす前に「AWS にデプロイできる形」を先に通しておくため。飛ばしたフェーズは後で戻って実施する。
-  - **リポジトリ側の作業は完了。残っているのは AWS 側の手作業と、ワークフローの初回実行**(下記「残作業」)
+- **フェーズ11 完了**(2026-08-18): **フェーズ5〜10(いいね・画像・プロフィール・検索ラボ・シード・index 実験)を飛ばして着手した。** アプリの最低限の機能が揃ったので、機能を増やす前に「AWS にデプロイできる形」を先に通しておくため。飛ばしたフェーズは後で戻って実施する。
   - **作ったもの**:
     - `docker/app/Dockerfile` — 3 ステージ(Node 22 で `npm run generate` → Temurin 21 JDK で SSG 出力を `static/` に入れて `bootJar` → Temurin 21 JRE で実行)。**ビルドコンテキストはリポジトリ直下**(frontend と backend の両方を材料にするため)
     - `.dockerignore`(新規) — `.git` / `node_modules` / 各種ビルド生成物、そして **`.env`**。`.env` には DB パスワードと Google のクライアントシークレットが入っているので、コンテキストに含めないことで焼き込み事故を防ぐ
@@ -55,9 +54,15 @@
     - `/api/categories` は 200 + JSON、`/api/nosuchpath` は未ログイン 401 / ログイン中 404(いずれも JSON)
   - **ワークフローの設計**: タグが不変(ECR が IMMUTABLE)なので、**同じ SHA が既にあればビルド前にスキップして成功終了**する。5〜8 分かけてから `ImageTagAlreadyExists` で落ちるのを避けるため。存在チェックは `ImageNotFoundException` かどうかで分岐しており、権限不足などを「無いからビルドしよう」と取り違えない
   - **キャッシュは buildx の `type=gha,mode=max`。** `mode=max` が必須で、既定の `min` だと最終イメージに残る層しか書き出されず、マルチステージの中間層(`npm ci` と Gradle の依存解決)がまったくキャッシュされない
-  - **信頼ポリシーは `StringLike` で `repo:0000masa/nuxt-java-practice:*`**(別ブランチからも push したいため)。**この選択の代償として、このロールを使うワークフローに `pull_request` トリガーを足してはいけない**(fork からの PR でも `sub` がこのパターンに一致するため)。ワークフローとドキュメントの両方に注意書きを入れてある
+  - **信頼ポリシーは `StringLike` で `repo:0000masa@134136756/nuxt-java-practice@1303585339:*`**(別ブランチからも push したいため。`@` 以降の数値は下記のとおり GitHub の仕様)。**この選択の代償として、このロールを使うワークフローに `pull_request` トリガーを足してはいけない**(fork からの PR でも `sub` がこのパターンに一致するため)。ワークフローとドキュメントの両方に注意書きを入れてある
   - **テストは書いていない。** `@WebMvcTest` はリソースハンドラを載せず、`static/` はリポジトリ上は空(Docker ビルド時にだけ埋まる)なのでテスト用の静的ファイルを別途用意する必要があり、割に合わないと判断した。代わりに上記の `docker run` + curl の実測で確認している
-  - **残作業(ユーザー側)**: ① AWS で OIDC プロバイダと IAM ロール `nuxt-java-practice-gha-ecr-push` を作成 ② ECR にライフサイクルポリシー(直近 10 個)を設定 ③ GitHub Secrets に `AWS_ECR_PUSH_ROLE_ARN` を登録 ④ ワークフローを初回実行 → 手順はすべて [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)
+  - **AWS 側のセットアップと通し確認が完了**(2026-08-18): OIDC プロバイダ・IAM ロール `nuxt-java-practice-gha-ecr-push`・ライフサイクルポリシー(直近 10 個)・GitHub Secrets `AWS_ECR_PUSH_ROLE_ARN` を作成し、ワークフローで **push 成功**(`nuxt-java-practice-ecs:34f5509` の 1 タグのみ。`unknown/unknown` が並んでいないので `provenance: false` が効いている)。**2 回目の実行が事前チェックでスキップ**されることも確認し、存在チェックの両分岐が実データで通った
+  - **手順書に無かった落とし穴が 4 つあった**(いずれも [github-actions-oidc.md](../infrastructure/github-actions-oidc.md) の §8 にエラーメッセージから引ける形で追記済み):
+    - **IAM のロールの `--description` に日本語が使えない**。`[\u0009\u000A\u000D\u0020-\u007E\u00A1-\u00FF]*` の制約があり ASCII と Latin-1 補助のみ。コンソールの説明欄も同じ。一方 **ECR のライフサイクルポリシーの `description` は日本語で通る**ので、「AWS だから英数字だけ」と一般化しないこと
+    - **`--query`(JMESPath)のキー名に日本語が使えない**。引用符なしの識別子は `[A-Za-z_][A-Za-z0-9_]*` のみで、AWS に届く前にクライアント側で失敗する
+    - **`sub` クレームにオーナー ID とリポジトリ ID が入る**。`repo:0000masa@134136756/nuxt-java-practice@1303585339:ref:refs/heads/main` の形。GitHub の「不変サブジェクトクレーム」で、**2026-07-15 以降に作られたリポジトリに自動適用**される。ウェブ上の記事はほぼすべて旧形式 `repo:<owner>/<repo>:*` で書かれているのでそのまま真似すると必ず `Not authorized to perform sts:AssumeRoleWithWebIdentity` になる。ID で縛るほうが改名に強く乗っ取りにも耐えるので、戻さず受け入れた
+    - **push に `ecr:BatchGetImage` が要る**。`docker buildx build --push` はマニフェストを PUT する前に GET するため。AWS のドキュメントが「push に必要」として挙げる 5 アクションは素の `docker push` の話で、**buildx は 1 手多い**。当初「pull の権限は不要」と書いていた判断が誤りだった
+  - **原因の切り分け方**: OIDC の失敗は推測せず、ワークフローに一時的なステップを足して**実際のトークンのクレーム**(`sub` / `aud` / `iss`)を出すのが早い。クレームは公開情報なのでログに出して問題ない(秘密なのは署名)。Secret も値そのものはマスクされるが長さや分解した部分は出せる。手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md) §8「`sub` を実際に確認する」
   - **フェーズ13 への申し送り**: ALB のヘルスチェックに使えるエンドポイントは現状 **`/`(SSG の index.html を 200 で返す)のみ**。actuator は入れていないので、`/actuator/health` を使いたければ依存追加が必要。またイメージタグは CloudFormation の `ImageTag` パラメータとして渡す前提で、ワークフローのジョブサマリに出力している
   - **残っている開発データ**: 検証用に `spa_check` / `spa-check@example.com` / パスワード `password123`(メール確認済み)を作成した。そのままログイン確認に使える
 - **フェーズ4 完了**(2026-08-17): [設計](../superpowers/specs/2026-08-15-phase4-google-auth-design.md) §9 の 7 ステップすべて完了。テスト 46 本すべて成功。**実際の Google アカウントで 4 経路すべて確認済み**(下記)。
