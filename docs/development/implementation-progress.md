@@ -19,7 +19,7 @@
 | 8 | 検索ラボ | 検索 API(対象・一致方法・カテゴリー・方式/件数切り替え、安全上限)、実行時間計測、EXPLAIN 返却、フロント(条件フォーム・プリセット・計測表示) | 未着手 |
 | 9 | シードタスク | タスクモード(`--app.task=seed`)実装。users 1万 / posts 100万 / likes 300万 をセットベース SQL で投入 | 未着手 |
 | 10 | index 実験 | 検索ラボで実験用 index(複合・FULLTEXT)の before/after を検証し、結果を `docs/notes/` に記録 | 未着手 |
-| 11 | SSG 統合 | `nuxt generate` → Spring Boot `static/` 配置の本番形を確認。SPA フォールバック設定 | 未着手 |
+| 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 作業中 |
 | 12 | AWS 運用 | `db-task.yml`(ECS Run Task で migrate/seed)、SES/S3 の本番設定。CloudFormation テンプレート側の作業と合わせて別途設計 | 未着手 |
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)の作成。**ファイル分割・環境差分の共通化方式は未確定で、着手前に別セッションで設計を議論する**。方針 → [ADR-0001](../adr/0001-cloudformation-yaml-over-terraform.md) と [infrastructure/README.md](../infrastructure/README.md) | 未着手 |
 
@@ -34,6 +34,32 @@
 
 ## 完了メモ
 
+- **フェーズ11 作業中**(2026-08-17): **フェーズ5〜10(いいね・画像・プロフィール・検索ラボ・シード・index 実験)を飛ばして着手した。** アプリの最低限の機能が揃ったので、機能を増やす前に「AWS にデプロイできる形」を先に通しておくため。飛ばしたフェーズは後で戻って実施する。
+  - **リポジトリ側の作業は完了。残っているのは AWS 側の手作業と、ワークフローの初回実行**(下記「残作業」)
+  - **作ったもの**:
+    - `docker/app/Dockerfile` — 3 ステージ(Node 22 で `npm run generate` → Temurin 21 JDK で SSG 出力を `static/` に入れて `bootJar` → Temurin 21 JRE で実行)。**ビルドコンテキストはリポジトリ直下**(frontend と backend の両方を材料にするため)
+    - `.dockerignore`(新規) — `.git` / `node_modules` / 各種ビルド生成物、そして **`.env`**。`.env` には DB パスワードと Google のクライアントシークレットが入っているので、コンテキストに含めないことで焼き込み事故を防ぐ
+    - `config/StaticResourceConfig.java` — SSG 出力を配信するためのリソースリゾルバ(下記)
+    - `.github/workflows/ecr-push.yml` — `workflow_dispatch` のみ。タグはコミットの短縮 SHA
+    - `docs/infrastructure/github-actions-oidc.md` — IAM の作成手順(コンソール / CLI 併記)と、信頼ポリシー・権限ポリシーの逐条解説
+    - `.gitignore` に `backend/src/main/resources/static/*` を追加(手元検証で置いた生成物を誤ってコミットしないため)
+  - **設計時の想定と違った点(実測で判明)**: **`/` 以外の 8 ページすべてが 404 になる。** 当初は「動的ルート `/posts/{id}` だけ SPA フォールバックが要る」と考えていたが、Nuxt は `login/index.html` という「ディレクトリ + index.html」形式で出力するのに対し、**Spring の `ResourceHttpRequestHandler` はディレクトリに `index.html` を補う機能を持たない**(`/` だけが welcome-page として特別扱いされている)。そのためプリレンダ済みのページも配信されない
+  - **`StaticResourceConfig` の解決順序**(3 段): ① 実ファイルがあれば返す ② 拡張子が無く `path/index.html` があれば返す ③ 拡張子が無く `/api` 配下でもなければ `200.html`。それ以外は 404 のまま
+    - **`/api` を除外しているのが要点。** 未マッチの `/api/**` は未ログインなら Spring Security が先に 401 を返すが、**ログイン中は 404 として MVC まで届く**ため、除外しないと JSON を期待している呼び出し元に HTML が返る。ログイン済みセッションで `/api/nosuchpath` が **404 + `application/json`** になることを実測で確認済み
+    - **拡張子付きを除外しているのも同じ理由。** `/_nuxt/missing.js` が HTML を返すと、壊れた JS として読み込まれる
+    - エラーページ方式(404 を `200.html` に飛ばす)を採らなかったのは、**プリレンダ済み HTML が一度も使われなくなる**ため。実測で `/login` は 3,951 バイト(ログインフォームまで描画済み)、`200.html` は 1,080 バイトの空 HTML
+  - **動作確認済み(`docker build` + `docker run`、compose の MySQL に接続)**:
+    - イメージサイズ **405 MB**、実行ユーザーは **uid 999(非 root)**、**PID 1 が java**(`docker stop` が 0.8 秒で完了 = SIGTERM が届いている。届かないと 10 秒待たされる)
+    - **9 ページすべて 200**。プリレンダ済みの 8 ページはそれぞれ異なるサイズの完成 HTML、`/posts/1` と `/nosuchpage` は 1,080 バイトの `200.html`
+    - `/favicon.ico` と HTML が参照している `/_nuxt/*.js` は 200、`/_nuxt/missing.js` は 404
+    - `/api/categories` は 200 + JSON、`/api/nosuchpath` は未ログイン 401 / ログイン中 404(いずれも JSON)
+  - **ワークフローの設計**: タグが不変(ECR が IMMUTABLE)なので、**同じ SHA が既にあればビルド前にスキップして成功終了**する。5〜8 分かけてから `ImageTagAlreadyExists` で落ちるのを避けるため。存在チェックは `ImageNotFoundException` かどうかで分岐しており、権限不足などを「無いからビルドしよう」と取り違えない
+  - **キャッシュは buildx の `type=gha,mode=max`。** `mode=max` が必須で、既定の `min` だと最終イメージに残る層しか書き出されず、マルチステージの中間層(`npm ci` と Gradle の依存解決)がまったくキャッシュされない
+  - **信頼ポリシーは `StringLike` で `repo:0000masa/nuxt-java-practice:*`**(別ブランチからも push したいため)。**この選択の代償として、このロールを使うワークフローに `pull_request` トリガーを足してはいけない**(fork からの PR でも `sub` がこのパターンに一致するため)。ワークフローとドキュメントの両方に注意書きを入れてある
+  - **テストは書いていない。** `@WebMvcTest` はリソースハンドラを載せず、`static/` はリポジトリ上は空(Docker ビルド時にだけ埋まる)なのでテスト用の静的ファイルを別途用意する必要があり、割に合わないと判断した。代わりに上記の `docker run` + curl の実測で確認している
+  - **残作業(ユーザー側)**: ① AWS で OIDC プロバイダと IAM ロール `nuxt-java-practice-gha-ecr-push` を作成 ② ECR にライフサイクルポリシー(直近 10 個)を設定 ③ GitHub Secrets に `AWS_ECR_PUSH_ROLE_ARN` を登録 ④ ワークフローを初回実行 → 手順はすべて [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)
+  - **フェーズ13 への申し送り**: ALB のヘルスチェックに使えるエンドポイントは現状 **`/`(SSG の index.html を 200 で返す)のみ**。actuator は入れていないので、`/actuator/health` を使いたければ依存追加が必要。またイメージタグは CloudFormation の `ImageTag` パラメータとして渡す前提で、ワークフローのジョブサマリに出力している
+  - **残っている開発データ**: 検証用に `spa_check` / `spa-check@example.com` / パスワード `password123`(メール確認済み)を作成した。そのままログイン確認に使える
 - **フェーズ4 完了**(2026-08-17): [設計](../superpowers/specs/2026-08-15-phase4-google-auth-design.md) §9 の 7 ステップすべて完了。テスト 46 本すべて成功。**実際の Google アカウントで 4 経路すべて確認済み**(下記)。
   - **実機での確認結果(ステップ6)**:
     - **新規作成**: Google 初回ログインで users に 1 行できる。`masanori.basketball@gmail.com` → username `masanori_basketball` が自動生成され、`display_name` は Google の名前、`password_hash` は NULL、`email_verified_at` は作成時刻(確認メールは飛ばない)

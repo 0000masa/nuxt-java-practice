@@ -1,0 +1,117 @@
+# 本番イメージをビルドして ECR に push する(フェーズ11)。
+#
+# 前提となる AWS / GitHub 側のセットアップ手順 → docs/infrastructure/github-actions-oidc.md
+#
+# 手動トリガーのみ。このリポジトリは環境を常時公開せず、検証したいときだけ
+# CloudFormation でスタックを建てる運用なので、main に積むたびに作っても受け取り手がいない。
+#
+# 【重要】このワークフローに pull_request トリガーを足してはいけない。
+# IAM ロールの信頼ポリシーが repo:0000masa/nuxt-java-practice:* を許可しており、
+# fork からの PR でもこのパターンに一致しうるため。
+name: ECR へイメージを push
+
+on:
+  workflow_dispatch:
+
+env:
+  AWS_REGION: ap-northeast-1
+  ECR_REPOSITORY: nuxt-java-practice-ecs
+
+# OIDC でトークンを発行するために id-token: write が要る。これが無いと AssumeRole できない。
+permissions:
+  id-token: write
+  contents: read
+
+# 同じイメージを同時に作らないようにする(タグが不変なので後発が必ず失敗する)
+concurrency:
+  group: ecr-push
+  cancel-in-progress: false
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+
+    steps:
+      # チェックアウトより先にタグを決める。既に push 済みならこの後すぐ抜けるので、
+      # 無駄なチェックアウトもビルドもしないで済む。
+      - name: イメージタグを決める(コミットの短縮 SHA)
+        id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: AWS に AssumeRole する(OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # ECR リポジトリはタグの上書きを禁止(IMMUTABLE)しているので、同じタグへの push は
+      # 必ず失敗する。ビルドに 5〜8 分かけてから失敗するのは無駄なので先に調べる。
+      #
+      # 「見つからない」以外のエラー(権限不足・リポジトリ名の間違いなど)を
+      # 「無いからビルドしよう」と取り違えないよう、例外の種類で分けている。
+      - name: 同じタグが既に存在するか調べる
+        id: exists
+        run: |
+          if error=$(aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --image-ids imageTag="${{ steps.tag.outputs.tag }}" 2>&1 >/dev/null); then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif echo "$error" | grep -q 'ImageNotFoundException'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$error" >&2
+            exit 1
+          fi
+
+      - name: チェックアウト
+        if: steps.exists.outputs.exists == 'false'
+        uses: actions/checkout@v4
+
+      - name: ECR にログイン
+        id: ecr
+        if: steps.exists.outputs.exists == 'false'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # type=gha のキャッシュを使うには buildx が要る(素の docker build では使えない)
+      - name: buildx を用意する
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v3
+
+      - name: ビルドして push
+        if: steps.exists.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/app/Dockerfile
+          push: true
+          tags: ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.tag.outputs.tag }}
+          # Fargate は既定が X86_64。ARM64 にすると、イメージとタスク定義の runtimePlatform を
+          # 両方揃える必要があり、片方だけだと exec format error で起動しない。
+          platforms: linux/amd64
+          # runner は毎回まっさらなので、キャッシュを外から持ち込まないとレイヤーが 1 つも当たらない。
+          # mode=max が必須。既定の min は最終イメージに残る層しか書き出さないため、
+          # マルチステージの中間層(npm ci と Gradle の依存解決)がまったくキャッシュされない。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 既定では provenance 用のマニフェストが付いてイメージインデックスになり、
+          # ECR の一覧に unknown/unknown の成果物が並ぶ。単一プラットフォームなので付けない。
+          provenance: false
+
+      - name: 結果をサマリに出す
+        run: |
+          {
+            if [ "${{ steps.exists.outputs.exists }}" = "true" ]; then
+              echo "### 既に push 済みのためスキップしました"
+              echo ""
+              echo "同じコミットのイメージが ECR にあります。下のタグをそのまま使えます。"
+            else
+              echo "### push しました"
+            fi
+            echo ""
+            echo '```'
+            echo "リポジトリ: $ECR_REPOSITORY"
+            echo "イメージタグ: ${{ steps.tag.outputs.tag }}"
+            echo '```'
+            echo ""
+            echo "CloudFormation スタックのパラメータには、このイメージタグを渡す。"
+          } >> "$GITHUB_STEP_SUMMARY"

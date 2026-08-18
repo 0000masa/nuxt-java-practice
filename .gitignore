@@ -1,2 +1,8 @@
 # 環境変数(テンプレートは .env.example をコミットする)
 .env
+
+# Nuxt の SSG 出力の置き場(フェーズ11)。
+# 中身が入るのは docker/app/Dockerfile のビルド中だけで、リポジトリ上は常に空。
+# 手元で npm run generate の結果を置いて動作確認することがあるので、
+# その生成物を誤ってコミットしないように無視する。
+backend/src/main/resources/static/*
