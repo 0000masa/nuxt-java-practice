@@ -6,8 +6,10 @@
 # CloudFormation でスタックを建てる運用なので、main に積むたびに作っても受け取り手がいない。
 #
 # 【重要】このワークフローに pull_request トリガーを足してはいけない。
-# IAM ロールの信頼ポリシーが repo:0000masa/nuxt-java-practice:* を許可しており、
-# fork からの PR でもこのパターンに一致しうるため。
+# IAM ロールの信頼ポリシーが
+#   repo:0000masa@134136756/nuxt-java-practice@1303585339:*
+# を許可しており、fork からの PR でもこのパターンに一致しうるため。
+# (sub にオーナー ID とリポジトリ ID が入るのは GitHub の仕様。詳細は上記の手順書 4-1)
 name: ECR へイメージを push
 
 on:

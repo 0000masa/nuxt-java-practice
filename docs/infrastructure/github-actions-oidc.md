@@ -4,6 +4,11 @@
 
 コンソール操作と AWS CLI の両方を載せる。**どちらか片方をやればよい。**
 
+> **2026-08-18 に一連の手順を実際に通して確認済み**(push 成功、および 2 回目の実行が事前チェックでスキップされることまで)。 その過程で 4 か所直している
+> (IAM の `--description` に日本語が使えない / `--query` のキー名に日本語が使えない /
+> `sub` に不変 ID が入る / push に `ecr:BatchGetImage` が要る)。いずれも §8 のトラブルシューティングに
+> エラーメッセージから引けるよう載せてある。
+
 関連: [インフラ構成(AWS)](./README.md) / [GitHub Actions で自動テスト](../notes/ci-with-github-actions.md)
 
 ---
@@ -74,6 +79,9 @@ ECR に push したい → push 用の IAM ロールが要る
 export AWS_REGION=ap-northeast-1
 export AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 export GITHUB_REPO=0000masa/nuxt-java-practice
+# 信頼ポリシーに使う不変 ID(取り方は 4-1)。名前ではなくこの数値が本体になる
+export GITHUB_OWNER_ID=134136756
+export GITHUB_REPO_ID=1303585339
 export ROLE_NAME=nuxt-java-practice-gha-ecr-push
 export ECR_REPOSITORY=nuxt-java-practice-ecs
 
@@ -143,7 +151,7 @@ cat > /tmp/trust-policy.json <<EOF
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:${GITHUB_REPO}:*"
+          "token.actions.githubusercontent.com:sub": "repo:0000masa@${GITHUB_OWNER_ID}/nuxt-java-practice@${GITHUB_REPO_ID}:*"
         }
       }
     }
@@ -161,27 +169,52 @@ EOF
 | `aud` の条件 | トークンの宛先が STS であること。**省略してはいけない。** 他サービス向けに発行されたトークンの流用を防ぐ |
 | `sub` の条件 | **どのリポジトリの、どの実行か。** これが実質的な「鍵」 |
 
-**`sub` クレームの形**は実行のされ方で変わる。
+#### `sub` に不変 ID が入る(ここを間違えると必ず AssumeRole に失敗する)
+
+**リポジトリ名だけを書いた `repo:<owner>/<repo>:*` では一致しない。** GitHub は 2026-07-15 以降に作られたリポジトリ(およびそれ以降に改名・移管したリポジトリ)で、`sub` に**オーナー ID とリポジトリ ID を `@` 区切りで付ける**ようになった。
+
+```
+repo:0000masa@134136756/nuxt-java-practice@1303585339:ref:refs/heads/main
+     ~~~~~~~~ ~~~~~~~~~ ~~~~~~~~~~~~~~~~~~ ~~~~~~~~~~
+     オーナー名 オーナーID  リポジトリ名        リポジトリID
+```
+
+区切りが `@` なのは、GitHub のユーザー名とリポジトリ名に `@` を使えないため。OIDC の仕様が「`sub` は再利用してはならない」と定めているのに対し、名前は改名・移管・削除後の再取得で使い回せてしまうので、**一度採番したら二度と再利用されない数値**を足して同一性を保証する仕組み。
+
+これは制約ではなく利点でもある。名前ではなく ID で縛るので、**リポジトリを改名しても信頼ポリシーを直す必要がなく**、逆に「リポジトリを消した後に他人が同じ名前を取って、このロールを使う」という乗っ取りも成立しない。
+
+**ID の取り方**。オーナー ID は公開 API で引ける。
+
+```bash
+curl -s https://api.github.com/users/0000masa | jq '.id'
+```
+
+リポジトリ ID は private リポジトリだと未認証では引けないので、実際に発行されたトークンの `sub` を見るのが確実(手順は「§8 トラブルシューティング」の `sub` 確認方法)。認証できるなら `gh api repos/0000masa/nuxt-java-practice --jq '.id'` でもよい。
+
+**`sub` クレームの形**は実行のされ方でも変わる。以下は `R` を `0000masa@134136756/nuxt-java-practice@1303585339` の略とする。
 
 | 実行のされ方 | `sub` の値 |
 |---|---|
-| ブランチで実行(`workflow_dispatch` / `push`) | `repo:0000masa/nuxt-java-practice:ref:refs/heads/main` |
-| タグで実行 | `repo:0000masa/nuxt-java-practice:ref:refs/tags/v1.0` |
-| Environment 経由 | `repo:0000masa/nuxt-java-practice:environment:production` |
-| **fork からの pull_request** | `repo:0000masa/nuxt-java-practice:pull_request` |
+| ブランチで実行(`workflow_dispatch` / `push`) | `repo:R:ref:refs/heads/main` |
+| タグで実行 | `repo:R:ref:refs/tags/v1.0` |
+| Environment 経由 | `repo:R:environment:production` |
+| **fork からの pull_request** | `repo:R:pull_request` |
 
-このリポジトリでは **`repo:0000masa/nuxt-java-practice:*`(`StringLike`)** を採った。**別ブランチからもイメージを push したい**ため。
+このリポジトリでは **`repo:R:*`(`StringLike`)** を採った。**別ブランチからもイメージを push したい**ため。
 
 絞り方の選択肢と、採らなかった理由:
 
 | 書き方 | 効果 | 採否 |
 |---|---|---|
-| `StringEquals` で `...:ref:refs/heads/main` | main からのみ。ワイルドカードが 1 つも無く最も厳格 | **別ブランチで作業できないため不採用** |
-| **`StringLike` で `repo:<owner>/<repo>:*`** | このリポジトリのあらゆる実行 | **採用** |
-| `StringLike` で `repo:<owner>/*` | オーナー配下の**全リポジトリ**。危険 | 不採用 |
+| `StringEquals` で `repo:R:ref:refs/heads/main` | main からのみ。ワイルドカードが 1 つも無く最も厳格 | **別ブランチで作業できないため不採用** |
+| **`StringLike` で `repo:R:*`** | このリポジトリのあらゆる実行 | **採用** |
+| `StringLike` で `repo:0000masa@134136756/*` | オーナー配下の**全リポジトリ**。危険 | 不採用 |
+| `StringLike` で `repo:*/nuxt-java-practice@*:*` | ID を効かせていないので改名・再取得に耐えない。書く意味がない | 不採用 |
 | 条件を書かない | **世界中の GitHub リポジトリ**が対象。事故 | 論外 |
 
-> **この選択に伴う制約:** このロールを AssumeRole するワークフローに **`pull_request` トリガーを足してはいけない。** 上の表のとおり fork からの PR でも `sub` が `repo:0000masa/nuxt-java-practice:*` に一致するため、外部の人が PR を出すだけでロールを使えてしまう。`.github/workflows/ecr-push.yml` の先頭にも同じ注意を書いてある。
+> **この選択に伴う制約:** このロールを AssumeRole するワークフローに **`pull_request` トリガーを足してはいけない。** 上の表のとおり fork からの PR でも `sub` が `repo:R:*` に一致するため、外部の人が PR を出すだけでロールを使えてしまう。`.github/workflows/ecr-push.yml` の先頭にも同じ注意を書いてある。
+
+> **古い記事との食い違いに注意。** ウェブ上の OIDC 設定例はほぼすべて `repo:<owner>/<repo>:*` の形で書かれている。2026-07-15 より前に作られたリポジトリはいまもその形式なので記事が間違っているわけではないが、**このリポジトリを含む新しいリポジトリではそのまま使うと必ず失敗する**。組織またはリポジトリの設定で従来形式に戻すこともできるが、その場合 ID による同一性の保証を捨てることになる。
 
 ### 4-2. 権限ポリシー(何ができるか)
 
@@ -201,6 +234,7 @@ cat > /tmp/permission-policy.json <<EOF
       "Effect": "Allow",
       "Action": [
         "ecr:DescribeImages",
+        "ecr:BatchGetImage",
         "ecr:BatchCheckLayerAvailability",
         "ecr:InitiateLayerUpload",
         "ecr:UploadLayerPart",
@@ -220,6 +254,7 @@ EOF
 |---|---|
 | `ecr:DescribeImages` | ワークフロー冒頭の「同じタグが既にあるか」チェック |
 | `ecr:GetAuthorizationToken` | `docker login` 用の一時パスワードを取得(`amazon-ecr-login` が呼ぶ) |
+| `ecr:BatchGetImage` | **push の途中で** buildx がマニフェストを読みに行く(`GET /v2/<repo>/manifests/<ref>` に相当)。「push なのに読み取り権限が要る」ので見落としやすい |
 | `ecr:BatchCheckLayerAvailability` | 各レイヤーが既にレジストリにあるか問い合わせ、**無いものだけ**アップロードする |
 | `ecr:InitiateLayerUpload` | レイヤー 1 つのアップロード開始 |
 | `ecr:UploadLayerPart` | レイヤーの中身を分割送信 |
@@ -228,7 +263,16 @@ EOF
 
 **`GetAuthorizationToken` だけ `Resource: "*"` になっている理由**: この操作はリポジトリ単位ではなく**レジストリ(アカウント)単位**で、対象となるリソース ARN が存在しない。`*` にせざるを得ない仕様で、緩めているわけではない。
 
-**含めていないもの**: `ecr:BatchGetImage` と `ecr:GetDownloadUrlForLayer`(= pull の権限)は入れていない。ビルドキャッシュは ECR ではなく GitHub Actions のキャッシュに置いており、このロールが pull する場面が無いため。**ECS がイメージを pull する権限は別のロール**(タスク実行ロール。CloudFormation 側で作る)が持つ。
+**`ecr:BatchGetImage` が要る理由**: 「push しかしないのだから読み取り権限は不要」と考えると足りなくなる。`docker buildx build --push` はマニフェストを PUT する前に**同じ参照のマニフェストを GET して確認する**ため、レジストリ API の読み取り = `ecr:BatchGetImage` が必要になる。無いと push の最終段でこう落ちる。
+
+```
+denied: User: arn:aws:sts::...:assumed-role/... is not authorized to perform:
+ecr:BatchGetImage on resource: arn:aws:ecr:...:repository/nuxt-java-practice-ecs
+```
+
+AWS のドキュメントが「push に必要なアクション」として挙げているのは `BatchCheckLayerAvailability` / `InitiateLayerUpload` / `UploadLayerPart` / `CompleteLayerUpload` / `PutImage` の 5 つで、素の `docker push` ならそれで足りる。**buildx は素の push より 1 手多い**、というのがここのずれ。
+
+**含めていないもの**: `ecr:GetDownloadUrlForLayer`(レイヤーの実体をダウンロードする権限)は入れていない。ベースイメージは Docker Hub から取り、ビルドキャッシュは ECR ではなく GitHub Actions のキャッシュ(`type=gha`)に置いているので、このロールが ECR から**レイヤーの中身**を読む場面が無いため。`cache-to: type=registry` に切り替えるならこれが必要になる。**ECS がイメージを pull する権限は別のロール**(タスク実行ロール。CloudFormation 側で作る)が持つ。
 
 ### 4-3. ロールを作る
 
@@ -326,9 +370,9 @@ aws ecr start-lifecycle-policy-preview \
 aws ecr get-lifecycle-policy-preview --repository-name "$ECR_REPOSITORY"
 ```
 
-> ライフサイクルポリシーの `description` は日本語のままにしてある。IAM のロールの説明と違い、
-> ECR 側は公式ドキュメントに文字種の制約が書かれていない(型が `string` とだけある)。
-> もし同じ `ValidationError` が出たら、ここも英語に変える。
+> ライフサイクルポリシーの `description` は**日本語で通る**(実機で確認済み)。IAM のロールの説明とは
+> 違って文字種の制約が無い。AWS の API はフィールドごとに制約が違うので、「AWS だから英数字だけ」と
+> 一般化しないこと。
 
 コンソールなら ECR → リポジトリ → **ライフサイクルポリシー** → ルールを作成。
 
@@ -387,7 +431,7 @@ aws ecr list-images --repository-name "$ECR_REPOSITORY"
 
 | エラー | 原因 | 対処 |
 |---|---|---|
-| `Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity` | 信頼ポリシーの `sub` が実行時の値と合っていない | 実行ログの `sub` を確認して条件と突き合わせる。組織名・リポジトリ名の綴りも確認 |
+| `Could not assume role with OIDC: Not authorized to perform sts:AssumeRoleWithWebIdentity` | ① 信頼ポリシーの `sub` が実行時の値と合っていない(**`sub` に不変 ID が入っているのを見落としているのが最も多い** → 4-1)② `role-to-assume` に渡した ARN が別のロールを指している ③ 信頼ポリシーが参照する OIDC プロバイダが存在しない | 下の「`sub` を実際に確認する」で実物と突き合わせる。②は Secret の値、③は `aws iam list-open-id-connect-providers` |
 | `Credentials could not be loaded` / `Unable to get ACTIONS_ID_TOKEN_REQUEST_URL` | ワークフローに `permissions: id-token: write` が無い | ワークフローの `permissions` を確認 |
 | `InvalidIdentityToken: Incorrect token audience` | ID プロバイダの Audience か、信頼ポリシーの `aud` 条件が `sts.amazonaws.com` になっていない | 手順1 と 4-1 を確認 |
 | `EntityAlreadyExists`(プロバイダ作成時) | OIDC プロバイダは既に存在する | 手順1 を飛ばす |
@@ -395,8 +439,42 @@ aws ecr list-images --repository-name "$ECR_REPOSITORY"
 | `Bad jmespath expression: Unknown token`(AWS に届く前に失敗する) | `--query` のキー名に日本語を使った | キー名を英数字にする(手順3 の注記) |
 | `AccessDeniedException ... ecr:DescribeImages` | 権限ポリシーの ARN・リージョンが実物と違う | `aws ecr describe-repositories` の `repositoryUri` と突き合わせる |
 | `denied: ... not authorized to perform: ecr:InitiateLayerUpload` | 同上(push 系の権限) | 4-2 のアクション一覧が揃っているか確認 |
+| `denied: ... not authorized to perform: ecr:BatchGetImage`(push の最終段) | buildx はマニフェストを PUT する前に GET する。「push だけなら読み取りは不要」という思い込みで抜けやすい | 権限ポリシーに `ecr:BatchGetImage` を足す(4-2) |
 | `ImageTagAlreadyExists` | 同じタグが既にある(タグ不変) | ワークフロー経由なら事前チェックで起きない。手で push したときに出る |
 | ECR の一覧に `unknown/unknown` の成果物が並ぶ | buildx の provenance 添付 | ワークフローで `provenance: false` にしてある。手で `docker buildx build` するときは `--provenance=false` |
+
+### `sub` を実際に確認する
+
+信頼ポリシーの条件が合っているかは、推測せず**発行されたトークンの中身**を見るのが早い。ワークフローに一時的にこのステップを足す。
+
+```yaml
+      - name: OIDC トークンのクレームを見る
+        run: |
+          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value')
+          payload=$(echo "$token" | cut -d. -f2)
+          padded="${payload//-/+}"; padded="${padded//_//}"
+          while [ $(( ${#padded} % 4 )) -ne 0 ]; do padded="${padded}="; done
+          echo "$padded" | base64 -d | jq '{iss, aud, sub, repository, ref}'
+```
+
+JWT は `ヘッダ.ペイロード.署名` の 3 つを `.` で繋いだもので、2 番目だけを取り出して base64url をデコードしている。**クレームをログに出すのは問題ない**(秘密なのは署名で、クレーム自体は改ざんできないことが保証されているだけの公開情報)。ただしトークン全体は出さないこと。
+
+**`sub` が `repo:<owner>@<数字>/<repo>@<数字>:...` の形なら、信頼ポリシー側も同じ形にする必要がある**(→ 4-1)。
+
+Secret に入れた ARN が正しいかも同じ要領で確かめられる。値そのものは `***` にマスクされるが、長さや分解した部分は出せる。
+
+```yaml
+        env:
+          ARN: ${{ secrets.AWS_ECR_PUSH_ROLE_ARN }}
+        run: |
+          echo "長さ: ${#ARN}"
+          echo "アカウント: $(echo "$ARN" | cut -d: -f5)"
+          echo "リソース部: $(echo "$ARN" | cut -d: -f6)"
+          case "$ARN" in *[[:space:]]*) echo "::error::空白または改行が含まれている" ;; esac
+```
+
+なお **ログに `role-to-assume: ***` と出ていれば Secret は存在し空でもない**(空の Secret はマスクされず何も表示されない)。「登録し忘れ」「名前の間違い」はこれで切り分けられる。
 
 ### 同じコミットで作り直したいとき
 
