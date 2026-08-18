@@ -1,6 +1,6 @@
 # Java の実行環境とビルドの仕組み — eclipse-temurin、JVM、bootRun
 
-`docker/backend/Dockerfile` のベースイメージ `eclipse-temurin:21-jdk` とは何か、Java の「ビルドしてから動かす」は開発中どうなるのか、そして開発と本番でビルド・起動のコマンドがどう違うのか、についての学習メモ。PHP / Node 出身者向け。
+`docker/backend/Dockerfile` のベースイメージ `eclipse-temurin:21-jdk` とは何か、Java の「ビルドしてから動かす」は開発中どうなるのか、開発と本番でビルド・起動のコマンドがどう違うのか、テストコードがなぜ成果物に入らないのか、についての学習メモ。PHP / Node 出身者向け。
 
 ## eclipse-temurin とは — 「Java 公式」が一枚岩ではない話
 
@@ -91,6 +91,8 @@ Java:        ソースコード(.java) ──コンパイル──→ バイト�
 | **ビルド** | `./gradlew classes` | `./gradlew bootJar` |
 | **起動** | `./gradlew bootRun` | `java -jar app.jar` |
 
+ただしこの 4 つは独立したコマンドではない。**開発の起動(`bootRun`)はビルドを内包しているが、本番の起動(`java -jar`)は一切ビルドしない**。この非対称は後述する。
+
 このリポジトリでの実際の打ち方:
 
 ```bash
@@ -118,7 +120,14 @@ processResources src/main/resources/**    → build/resources/main/
 
 ### 開発の起動 — `./gradlew bootRun`
 
-`classes` を実行してから、Gradle が JVM を子プロセスとして起動する。渡されるクラスパスは 3 種類:
+**`bootRun` は `classes` に依存しているので、コンパイルも自分でやる。** 起動前に `classes` を別途打つ必要はない。`--dry-run`(タスクを実行せず、実行予定のタスクだけを表示するオプション)で確かめられる:
+
+```
+$ ./gradlew bootRun --dry-run
+:compileJava :processResources :classes :resolveMainClassName :bootRun
+```
+
+コンパイルが済んだあと、Gradle が JVM を子プロセスとして起動する。渡されるクラスパスは 3 種類:
 
 ```
 build/classes/java/main/       ← ばらの .class(フォルダのまま)
@@ -132,7 +141,12 @@ devtools は `developmentOnly` スコープなのでこのクラスパスに含�
 
 ### 本番のビルド — `./gradlew bootJar`
 
-`classes` の結果を 1 個の**実行可能 jar**(`build/libs/app-0.0.1-SNAPSHOT.jar`)に梱包する。依存ライブラリまで同梱されるので、これ 1 つで起動できる(jar の中身の詳細 → [backend-project-files.md](./backend-project-files.md))。
+こちらも `classes` に依存していて、コンパイルしてから 1 個の**実行可能 jar**(`build/libs/app-0.0.1-SNAPSHOT.jar`)に梱包する。依存ライブラリまで同梱されるので、これ 1 つで起動できる(jar の中身の詳細 → [backend-project-files.md](./backend-project-files.md))。
+
+```
+$ ./gradlew bootJar --dry-run
+:compileJava :processResources :classes :resolveMainClassName :bootJar
+```
 
 `docker/app/Dockerfile` が `build` ではなく `bootJar` を使っているのには理由が 2 つある。
 
@@ -141,9 +155,26 @@ devtools は `developmentOnly` スコープなのでこのクラスパスに含�
 
 ### 本番の起動 — `java -jar app.jar`
 
-Gradle は一切登場しない。実行イメージも `21-jre` でコンパイラが無い。JVM が jar 内の `MANIFEST.MF` を読み、Spring Boot の loader が同梱の依存ごとクラスパスを組み立てて起動する。
+**`bootJar` は実行しない。というより実行できない。** Gradle は一切登場せず、実行イメージ `21-jre` にはコンパイラも Gradle も入っていない。JVM が jar 内の `MANIFEST.MF` を読み、Spring Boot の loader が同梱の依存ごとクラスパスを組み立てて起動するだけ。
 
 `ENTRYPOINT` が `sh -c "exec java ..."` になっているのは、`exec` で `java` を PID 1 にするため。付けないと `sh` が PID 1 になり、ECS がタスクを止めるときの SIGTERM が `java` に届かない。
+
+### ビルドと起動は開発と本番で非対称
+
+「ビルド」と「起動」を 2×2 に並べたが、**開発側は起動コマンドがビルドを含み、本番側は含まない**。
+
+```
+開発: ./gradlew bootRun ──▶ classes(コンパイル)──▶ アプリ起動    1 コマンドで両方やる
+
+本番: ./gradlew bootJar ──▶ classes ──▶ jar 生成                 ステージ2でここまで
+      java -jar app.jar ──────────────────▶ アプリ起動           ステージ3。ビルドしない
+```
+
+この違いから次のことが言える。
+
+- **開発で `classes` を単独で打つ場面は限られる。** 起動だけなら `bootRun` に任せればよい。`classes` を手で打つのは、**動いているアプリを止めずに①(コンパイル係)を代行したいとき**だけ。だから CLAUDE.md のルールは「編集したら `classes`」であって「restart しろ」ではない
+- **本番は「作る」と「動かす」が別のイメージに分かれている。** `docker/app/Dockerfile` のステージ2(`21-jdk`)が jar を作り、ステージ3(`21-jre`)は完成品を受け取って起動するだけ。ステージ3 には Gradle もソースも無いので、そもそもビルドしようがない
+- 「起動時にビルドが走らない」ことは本番では利点になる。**コンテナが起動するたびにコンパイルが走ったら、起動が遅くなるうえに、イメージが同じでも実行のたびに結果が変わりうる**。ビルド済みの成果物を配る形にすることで、どのタスクも同じバイトコードを動かすことが保証される
 
 ### 違いのまとめ
 
@@ -163,6 +194,85 @@ Gradle は一切登場しない。実行イメージも `21-jre` でコンパイ
 
 - **`backend/src/main/resources/static/` は開発では空。** Nuxt の SSG 出力が入るのは `docker/app/Dockerfile` の `COPY --from=frontend` の瞬間だけ。そのため `backend/src/main/java/com/example/app/config/StaticResourceConfig.java` の静的リソース配信設定が実際に働くのは本番 jar でだけで、開発時のフロントは nuxt コンテナ(devProxy 経由)が担当する
 - **`build.gradle` を変えたときは `classes` では足りない。** 依存のクラスパスは起動時に固定されるので `docker compose restart backend` が必要(→ [java-dev-env-comparison.md](./java-dev-env-comparison.md))
+
+## テストコードは成果物に入るのか
+
+`src/test/java/` のテストは、開発・本番どちらの成果物にも入らない。ただし「ビルド時に含まれない」は 2 つに分けて考える必要がある。
+
+| | テストコードは |
+|---|---|
+| コンパイル | **される**(`./gradlew test` や `build` のとき) |
+| jar への梱包 | **されない**(どのコマンドでも) |
+
+### sourceSet による二重の分離
+
+Gradle の `java` プラグインは `main` と `test` という 2 つの **sourceSet**(ソースの区分)を持ち、**出力先が最初から別**になっている。
+
+```
+src/main/java  ──compileJava──────▶ build/classes/java/main/   ← bootJar が梱包するのはここ
+src/test/java  ──compileTestJava──▶ build/classes/java/test/   ← 梱包対象外
+```
+
+分離はもう 1 段ある。`build.gradle` の依存スコープ:
+
+```groovy
+implementation     'org.springframework.boot:spring-boot-starter-webmvc'       // 本番にも入る
+testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'  // テスト時だけ
+```
+
+`testImplementation` で宣言したものは `runtimeClasspath` に載らないため、JUnit や Mockito は jar に同梱されない。**テストコード本体とテスト用ライブラリが、別々の仕組みで弾かれている**。
+
+### どのコマンドが test を触るか
+
+| コマンド | test をコンパイルするか |
+|---|---|
+| `classes` / `bootRun` / `bootJar` | しない |
+| `test` / `build` | する |
+
+`--dry-run` で確認できる。`build` だけがテスト側のタスクを含む:
+
+```
+$ ./gradlew build --dry-run
+:compileJava :processResources :classes :resolveMainClassName :bootJar
+:jar :assemble :compileTestJava :processTestResources :testClasses :test :check :build
+```
+
+ここに `jar`(= `-plain.jar` を作るタスク)も見えている。前述の「`build` は jar を 2 個作るので Dockerfile では `bootJar` を使う」の裏付けでもある。
+
+### 実測
+
+手元の jar で確認できる。
+
+```
+$ unzip -l build/libs/*.jar | grep -ic test                      → 0 件
+$ unzip -l build/libs/*.jar | grep -icE "junit|mockito|assertj"  → 0 件
+$ unzip -l build/libs/*.jar | grep -c "BOOT-INF/lib/"            → 71 件(すべて本番用)
+$ find build/classes/java/test -name "*.class"                   → 存在する(過去の build で生成)
+```
+
+`build/classes/java/test/` に `.class` は確かにあるのに、jar には 1 つも入っていない。
+
+このリポジトリの本番ビルドでは、`docker/app/Dockerfile` が `COPY backend/src ./src` で **`src/test/` ごとコンテナに送っている**。それでもステージ2 で走るのは `bootJar` なのでテストはコンパイルすらされず、ステージ3 は jar だけを受け取るので痕跡が残らない。
+
+### 他の言語ではどうか
+
+どれも本番の成果物には入らないが、**「入らない理由」の仕組みが違う**。
+
+- **Vitest / Hono(バンドルする場合)** — esbuild や Vite、Wrangler は**エントリポイントから import を辿って到達できたファイルだけ**を成果物に入れる。`app.test.ts` はアプリ側から import されないので自然に落ちる。`vitest` 自体は `devDependencies` なので `npm ci --omit=dev` でも消える。**分離の根拠が「フォルダの区分」ではなく「import の到達可能性」**である点が Java と違い、アプリ側からテスト用ヘルパーを import すればバンドルに入ってしまう
+- **tsc でビルドする場合** — バンドラを使わず `dist/` に出す構成だと、`tsconfig.json` の `exclude` に `**/*.test.ts` を書き忘れると `dist/` にテストのコンパイル結果が混ざる。設定次第で漏れる
+- **Laravel / PHP** — そもそもビルド段階が無く、`.php` がそのまま実行される。守っているのは ①`composer install --no-dev` で PHPUnit が `vendor/` に入らない ②`autoload-dev`(`Tests\` 名前空間)が本番のオートローダーに登録されない ③ドキュメントルートが `public/` なので `tests/` を Web から直接叩けない、の 3 点。ただし**リポジトリを丸ごとデプロイすれば `tests/` のファイル自体はサーバーに残る**。消したければ `.gitattributes` の `export-ignore` などで明示的に落とす必要がある
+- **このリポジトリの frontend** — 現状テストも vitest も無い(`frontend/package.json` の依存は nuxt / vue / pinia のみ)。追加した場合は 1 番目に該当し、`nuxt generate` の出力 `.output/public/` には入らない
+
+まとめると:
+
+| | 分離の仕組み | 分離される場所 | 漏れる可能性 |
+|---|---|---|---|
+| Java / Gradle | sourceSet(フォルダの区分)+ 依存スコープ | ビルドツールが構造として保証 | ほぼ無い |
+| JS(バンドル) | import の到達可能性 + devDependencies | バンドル時 | import すれば入る |
+| JS(tsc) | tsconfig の `exclude` | コンパイル時 | 設定漏れで入る |
+| PHP / Laravel | `--no-dev` と `autoload-dev` | インストール・デプロイ時 | ファイル自体は残りうる |
+
+Java が一番厳格なのは、**ビルドツールがテストを「別の sourceSet」という一級の概念として持っている**から。JS と PHP では、テストの分離は規約と設定に支えられている(言語ごとのビルドの違いの続き → [build-and-tooling-by-language.md](./build-and-tooling-by-language.md))。
 
 ## 落とし穴
 
@@ -186,6 +296,9 @@ Gradle は一切登場しない。実行イメージも `21-jre` でコンパイ
 - **classes** — compileJava + processResources をまとめた集約タスク。「ビルドだけして起動はしない」がこれ
 - **bootJar** — 依存ライブラリごと 1 個に固めた実行可能 jar を作る Spring Boot の Gradle タスク
 - **実行可能 jar（fat jar）** — 依存ライブラリまで同梱していて `java -jar` 単体で起動できる jar。Spring Boot が作るのはこれ
+- **sourceSet** — Gradle がソースを `main` / `test` に分ける単位。出力先も依存スコープも別々になる
+- **compileTestJava / testClasses** — テスト側のコンパイルタスク。`bootRun` / `bootJar` からは呼ばれない
+- **`--dry-run`** — タスクを実行せず、実行される予定のタスクグラフだけを表示する Gradle のオプション。依存関係を調べるのに使える
 - **継続ビルド（`--continuous`）** — ソースを監視し、変化のたびに指定タスクを自動再実行する Gradle のモード
 - **マルチステージビルド** — 「ビルド用イメージ」と「実行用イメージ」を分ける Dockerfile の書き方
 
