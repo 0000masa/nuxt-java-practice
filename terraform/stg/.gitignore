@@ -1,0 +1,21 @@
+# === Terraform関連 ===
+
+# Terraform作業ディレクトリ（プロバイダなどが入る）
+.terraform/
+
+# 状態ファイル（tfstate）
+terraform.tfstate
+terraform.tfstate.backup
+
+# モジュールキャッシュ（外部モジュールをダウンロードしたもの）
+.terraform/modules/
+
+# プランファイル（planコマンドで出力したファイル）
+*.tfplan
+
+# ローカル環境用変数ファイル（機密情報が含まれる可能性あり）
+# *.tfvars
+# *.tfvars.json
+
+# Lambda用の一時ファイル（モジュール内）
+../modules/app-infrastructure/.tmp/
