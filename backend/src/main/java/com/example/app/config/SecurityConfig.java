@@ -37,6 +37,12 @@ public class SecurityConfig {
 				// そのため「公開するものを列挙 → 残りの /api/** は認証必須」という順序にしてある。
 				// 逆順にすると全部公開になってしまう。
 				.authorizeHttpRequests(auth -> auth
+						// ALB のヘルスチェック。ALB は資格情報を持たないので公開が必須。
+						// liveness だけを開ける。DB の状態を含む readiness と、集約の
+						// /api/actuator/health は開けない(外から DB の生死を観測させない)。
+						// なぜ liveness を使うのか → docs/superpowers/specs/2026-08-19-phase13 の決定6
+						.requestMatchers(HttpMethod.GET, "/api/actuator/health/liveness")
+						.permitAll()
 						// 未ログインでも見られるもの。
 						.requestMatchers(HttpMethod.GET,
 								"/api/posts", "/api/posts/*", "/api/categories", "/api/auth/me")
