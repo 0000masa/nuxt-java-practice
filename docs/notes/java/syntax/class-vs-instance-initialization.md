@@ -400,6 +400,7 @@ Spring も同じ役割をコンテナが担うが、Spring のコンテナはア
 ## 関連
 
 - コンストラクタの見分け方(`new` で何が呼ばれるか = インスタンス初期化の入口) → [constructor-declaration.md](./constructor-declaration.md)
+- `static` **メソッド**の話(static ファクトリメソッド、interface の static メソッド) → [static-methods-and-factory-methods.md](./static-methods-and-factory-methods.md)
 - オブジェクトとクラスの違い、3 言語での立ち位置 → [../../object-and-class-by-language.md](../../object-and-class-by-language.md)
 - クラス自体を値として持つ(`Post.class` / `Post::class`) → [class-literal.md](./class-literal.md)
 - 数値リテラルと整数型(`TOKEN_BYTES` のような定数の型の話) → [numeric-literals-and-integer-types.md](./numeric-literals-and-integer-types.md)

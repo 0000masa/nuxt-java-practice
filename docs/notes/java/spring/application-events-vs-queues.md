@@ -361,6 +361,7 @@ DI コンテナを持つフレームワークは「部品同士の結合を緩�
 
 ## 関連
 
+- **預かった依頼を誰が送るのか**(開発の SMTP と本番の SES をどこで切り替えているか) → [mail-sending-and-transport-switching.md](./mail-sending-and-transport-switching.md)
 - `AuthMailSender` の本文組み立て・リンク生成の詳細 → [AuthMailSender.java](../../../../backend/src/main/java/com/example/app/auth/AuthMailSender.java) のコメント
 - なぜ生のトークンをイベントで運ぶ必要があるのか(DB にはハッシュしか無い) → [AuthTokenService.java](../../../../backend/src/main/java/com/example/app/auth/AuthTokenService.java) のコメント
 - メール送信をコミット後にするという設計判断(決定 7) → [2026-08-05-phase3-auth-design.md](../../../superpowers/specs/2026-08-05-phase3-auth-design.md)

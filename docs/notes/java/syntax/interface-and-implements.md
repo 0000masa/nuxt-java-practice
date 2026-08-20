@@ -364,6 +364,7 @@ class Dog extends Animal {
 ## 関連
 
 - TypeScript 側の深掘り(interface vs type・クラスの型・instanceof) → [../../typescript/syntax/interface-vs-type.md](../../typescript/syntax/interface-vs-type.md)
+- interface の `static` メソッド(`default` との違い、継承されないこと、`SesV2Client.create()`) → [static-methods-and-factory-methods.md](./static-methods-and-factory-methods.md)
 - オブジェクトとクラスの違い、3 言語での立ち位置、TS がクラスを使わない理由 → [../../object-and-class-by-language.md](../../object-and-class-by-language.md)
 - 今回のきっかけになった Spring の interface → `backend/.../user/UserRepository.java` と [PostRepository.java](../../../../backend/src/main/java/com/example/app/post/PostRepository.java)
 - コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)
