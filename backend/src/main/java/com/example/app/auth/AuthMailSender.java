@@ -6,8 +6,8 @@ import java.nio.charset.StandardCharsets;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.mail.MailException;
+import org.springframework.mail.MailSender;
 import org.springframework.mail.SimpleMailMessage;
-import org.springframework.mail.javamail.JavaMailSender;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
@@ -20,6 +20,8 @@ import com.example.app.config.AppProperties;
  * <p>本文はプレーンテキスト。送るのが 2 種類だけなのでテンプレートエンジンは導入していない。
  *
  * <p>開発では Mailpit が受け取る。ブラウザで http://localhost:8025 を開くと届いたメールが見られる。
+ * 本番は SES の API 経路。<b>どちらが注入されるかは {@link com.example.app.config.MailSenderConfig} が決める</b>ので、
+ * ここは MailSender インターフェースだけを知っていればよい。
  */
 //これを付けておくと、Spring は起動時にこのクラスを見つけて インスタンスを 1 個だけ自動で作り、以後アプリの中で使い回します。
 @Component
@@ -27,10 +29,10 @@ class AuthMailSender {
 
 	private static final Logger log = LoggerFactory.getLogger(AuthMailSender.class);
 
-	private final JavaMailSender mailSender;
+	private final MailSender mailSender;
 	private final AppProperties appProperties;
 
-	AuthMailSender(JavaMailSender mailSender, AppProperties appProperties) {
+	AuthMailSender(MailSender mailSender, AppProperties appProperties) {
 		this.mailSender = mailSender;
 		this.appProperties = appProperties;
 	}
