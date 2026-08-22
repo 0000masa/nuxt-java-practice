@@ -25,7 +25,12 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-security' // 認証・認可(フェーズ3)
 	implementation 'org.springframework.boot:spring-boot-starter-session-jdbc' // セッションを MySQL に保存する(→ docs/adr/0002)。素の spring-session-jdbc ではなくこの starter を使う(Flyway と同じくこちらに自動設定が入っている)
 	implementation 'org.springframework.boot:spring-boot-starter-oauth2-client' // Google ログイン(フェーズ4)。OIDC のクライアント側を担う
-	implementation 'org.springframework.boot:spring-boot-starter-mail' // 確認メール・パスワードリセットメールの送信
+	implementation 'org.springframework.boot:spring-boot-starter-mail' // 確認メール・パスワードリセットメールの送信(開発は Mailpit 宛ての SMTP)
+	implementation 'org.springframework.boot:spring-boot-starter-actuator' // ALB のヘルスチェックに使う /api/actuator/health/liveness(フェーズ13)
+	// AWS SDK。Spring Boot の依存管理は AWS SDK を見ないのでバージョンを自分で決める必要があり、
+	// BOM を入れて個別の artifact からはバージョンを省く(フェーズ6 で s3 を足すときも版が揃う)。
+	implementation platform('software.amazon.awssdk:bom:2.54.0')
+	implementation 'software.amazon.awssdk:sesv2' // 本番のメール送信。SMTP 認証(= IAM ユーザーの長期クレデンシャル)を持たず、タスクロールだけで送れる(設計 → specs/2026-08-19-phase13 の決定4)
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	runtimeOnly 'org.flywaydb:flyway-mysql' // MySQL 8 対応(flyway-core だけでは MySQL に接続できない)
 	runtimeOnly 'com.mysql:mysql-connector-j'

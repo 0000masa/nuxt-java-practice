@@ -5,6 +5,18 @@ spring:
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:app}
     username: ${DB_USER:app}
     password: ${DB_PASSWORD:password}
+  flyway:
+    # 開発は起動時にマイグレーションする(既定)。
+    # AWS では ECS サービスを false にし、専用の Run Task(SPRING_MAIN_WEB_APPLICATION_TYPE=none)だけが
+    # true で起動して DDL 権限を持つ migrate ユーザーで流す。理由 → docs/adr/0005
+    enabled: ${FLYWAY_ENABLED:true}
+    # 接続に使うユーザーを datasource と別にできる。AWS では Run Task 側に migrate ユーザーを渡す。
+    # 既定は datasource と同じ値なので、開発では接続先も接続ユーザーも変わらない。
+    # なお user が設定されていると、Spring は datasource の URL とドライバだけを引き継いだ
+    # 非プールの DataSource を Flyway 用に作る(FlywayAutoConfiguration#getMigrationDataSource)。
+    # datasource の Hikari プールがそのまま使われるのは user が未設定のときだけ。
+    user: ${FLYWAY_DB_USER:${DB_USER:app}}
+    password: ${FLYWAY_DB_PASSWORD:${DB_PASSWORD:password}}
   jpa:
     hibernate:
       ddl-auto: validate # スキーマは Flyway(db/migration)が管理。エンティティとの不一致は起動時エラーで検出する
@@ -38,8 +50,49 @@ spring:
     port: ${SMTP_PORT:1025}
 server:
   port: 8080
+management:
+  health:
+    # メールのヘルス指標を切る。理由は 2 つ。
+    #  1. 有効だと集約の /api/actuator/health を叩くたびに SMTP 接続を試みる。本番の送信経路は
+    #     SES の API なので、そもそも意味のある確認にならない
+    #  2. @SpringBootTest のコンテキストで mailHealthContributor の生成が
+    #     'beans' must not be empty で失敗し、テスト 3 本が落ちた(実測)。
+    #     指標を作る側が具象型 JavaMailSenderImpl で Bean を探すのに対し、AuthFlowTest が
+    #     @MockitoBean JavaMailSender で差し替えたモックはインターフェースの実装でしかないため
+    #     0 件になる → docs/notes/java/spring/mail-sending-and-transport-switching.md
+    mail:
+      enabled: false
+  endpoints:
+    web:
+      # 既定は /actuator だが、フロントは SSG の静的ファイルとして配信されるので
+      # 「/api 配下が API」という取り決め(設計概要のアーキテクチャ決定4)に合わせる。
+      # SPA フォールバック(StaticResourceConfig)が /api を除外しているのも同じ理由で、
+      # ここを /api の外に出すと未マッチ時に HTML が返ってしまう。
+      base-path: /api/actuator
+      exposure:
+        include: health # health だけ公開する。env / beans / configprops などは出さない
+  endpoint:
+    health:
+      # 応答は status だけ。DB のホスト名やバージョンを外に出さない
+      show-details: never
+      # ALB のヘルスチェックには liveness(DB を含まない)を使う。
+      # DB を含む health をヘルスチェックに使うと、RDS が一時的に落ちたときに
+      # 全タスクが unhealthy になって入れ替わり続ける → docs/superpowers/specs/2026-08-19-phase13 の決定6
+      group:
+        liveness:
+          include: ping
+        readiness:
+          include: db
 # アプリ固有の設定(型付きで受け取る → config/AppProperties)
 app:
   base-url: ${APP_BASE_URL:http://localhost:3000} # メール本文のリンクの組み立てに使う
   mail:
     from: ${MAIL_FROM:no-reply@example.com}
+    # smtp(開発の Mailpit)か ses(本番)。実体の切り替えは config/MailSenderConfig
+    transport: ${MAIL_TRANSPORT:smtp}
+  # app.task(タスクモード)は<b>ここに書かない</b>。
+  # 環境変数 APP_TASK だけで与える。ここに task: ${APP_TASK:} と書くと、未指定でも
+  # 「空文字のプロパティが存在する」状態になり、config/TaskRunner の
+  # @ConditionalOnProperty("app.task") が成立して通常起動でも即終了してしまう
+  # (@ConditionalOnProperty は「値が false 以外なら成立」する判定なので、空文字も成立扱い)。
+  # 取りうる値: migrate。フェーズ9 で seed を足す。
