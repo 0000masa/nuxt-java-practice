@@ -294,7 +294,7 @@ Terraform で当たり前に使う `data` ブロックに、CloudFormation は�
 | `terraform plan` | refresh した state と、設定 | **○ 既定で読む** |
 | Change Set(既定) | **前回のテンプレート**と、今回のテンプレート | **✕ 読まない** |
 | drift 検出 | テンプレートの定義と、実物 | ○(明示的に実行) |
-| drift-aware change set | 三方(前回・今回・実物) | ○(`--deployment-mode REVERT_DRIFT`) |
+| drift-aware change set | 三方(前回・今回・実物) | ○(`--deployment-mode REVERT_DRIFT`)。**`deploy` からは使えない** |
 
 **仕様:** Terraform 側は [`terraform plan` のドキュメント](https://developer.hashicorp.com/terraform/cli/commands/plan)にこうある。
 
@@ -353,6 +353,94 @@ aws cloudformation execute-change-set --stack-name X --change-set-name Y
 **`aws cloudformation deploy` はこの 3 手をまとめてやってくれる。** `--no-execute-changeset` を付ければ 2 手目で止まる。このリポジトリのワークフローは `dry_run` の input でこれを切り替えている(設計書 決定15)。
 
 **落とし穴:** `create-change-set` を直に叩くときは `--tags` を省略すると**スタックのタグが失われる**(`deploy` が毎回渡していたものを自分で渡す必要がある。設計書 §8-13)。
+
+### Change Set の 2 つの「モード」指定
+
+`create-change-set` には名前の似た指定が 2 つあるが、**軸が違う。**
+
+| オプション | 何を指定するか | 値 | 既定 |
+|---|---|---|---|
+| `--change-set-type` | **何のための変更セットか** | `CREATE` / `UPDATE` / `IMPORT` | `UPDATE` |
+| `--deployment-mode` | **差分をどう出すか** | `REVERT_DRIFT` | 指定なし(前回テンプレートとの 2 者比較) |
+
+- **`CREATE`** — まだ存在しないスタックに使う。作った時点で `REVIEW_IN_PROGRESS` 状態のスタックが先にでき、`execute-change-set` して初めて中身ができる。「新規構築を事前に見たい」ときの手段
+- **`UPDATE`** — 既存スタックの更新。`cfn-apply.yml:159` が使っているのはこれ
+- **`IMPORT`** — 既存リソースの取り込み(→ §8)
+- **`REVERT_DRIFT`** — 三方比較にする。ドリフトは既存スタックにしか存在しないので `UPDATE` と組む(**未検証:** `CREATE` と併用したときエラーになるか黙って無視されるかは公式に記載がない)
+
+つまり `--change-set-type` は「作る / 更新する / 取り込む」という**用途**、`--deployment-mode` は「実物を読むか読まないか」という**比較の仕方**で、直交している。
+
+### `deploy` では実物を読ませられない
+
+**仕様: `aws cloudformation deploy` に実リソースを読ませる設定は無い。** オプション自体が存在しないので、設定では切り替えられない。根拠は 2 つ。
+
+`--deployment-mode` は [`CreateChangeSet`](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_CreateChangeSet.html) のパラメータである。
+
+> `REVERT_DRIFT` – Creates a drift-aware change set that brings actual resource states in line with template definitions. Provides a three-way comparison between actual state, previous deployment state, and desired state.
+
+そして [`deploy` のリファレンス](https://docs.aws.amazon.com/cli/latest/reference/cloudformation/deploy.html)の Synopsis は全オプションを列挙しているが、そこに無い。
+
+```
+deploy --template-file --stack-name [--s3-bucket] [--force-upload] [--s3-prefix]
+[--kms-key-id] [--parameter-overrides] [--capabilities] [--no-execute-changeset]
+[--disable-rollback] [--role-arn] [--notification-arns]
+[--fail-on-empty-changeset] [--tags]     ← ここまでが全部
+```
+
+`update-stack` にも無い。**`deploy` は内部で Change Set を作るが、既定モードで作るしか選べない。**
+
+取れる道は 3 つ。
+
+| 道 | `deploy` を保てるか | 備考 |
+|---|---|---|
+| `create-change-set` を手組みして `--deployment-mode REVERT_DRIFT` を足す | ✕ 置き換えになる | このリポジトリの `cfn-apply.yml` は既に create → describe → execute を自分で書いているので、**1 行足すだけで済む** |
+| `deploy` の前に `detect-stack-drift` を別ステップで走らせる | ○ | 差分表示は変わらないので、人が 2 つを見比べることになる |
+| コンソールで「Drift aware change set」を選ぶ | — | CI では選択肢にならない |
+
+#### 必要になる IAM 権限
+
+**仕様:** [drift 検出のドキュメント](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-cfn-stack-drift.html)より。
+
+> In order to successfully perform drift detection on a stack, a user must have the following permissions:
+> + Read permission for each resource that supports drift detection included in the stack.
+
+このリポジトリの 2 つのロールで見ると:
+
+- **CloudFormation サービスロール** — `AdministratorAccess` なので満たす(→ [手順書 §2-1](../../infrastructure/cloudformation-operations.md))
+- **GitHub Actions が引き受けるロール** — `cloudformation:*` と S3・ECS の限定的な権限だけで、**リソースの `Describe*` 系を持たない**(同 §2-2 の `--policy-name DeployStack`)
+
+**未検証:** 変更セット作成時の実状態の読み取りが、スタックに紐づくサービスロールで行われるのか、呼び出し側の資格情報で行われるのか、公式ドキュメントに明記がない。前者なら追加不要、後者なら Actions のロールに `ec2:Describe*` / `rds:Describe*` / `ecs:Describe*` / `elasticloadbalancing:Describe*` などが要る。**判別するには、権限を足さずに一度流して `ResourceDriftStatus` が全部 `NOT_CHECKED` で返るかを見るのが早い。**
+
+#### 副作用 — 「見るだけ」のモードではない
+
+`REVERT_DRIFT` は実行すると外部変更を積極的に巻き戻す。**仕様:** [drift-aware change sets](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/drift-aware-change-sets.html) より。
+
+> Drift-aware change sets will **update the actual state of all stack resources to match the desired state, even if a resource was not explicitly changed in the template.**
+
+ただし ECS のタスク数は保護される。ここは [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md) の未検証項目に直結する。
+
+> Drift-aware change sets recognize that drift is expected for **AWS-managed properties** and leave their actual value untouched if you have not modified the property in their template. Top examples ... Using the `AWS::ApplicationAutoScaling::ScalableTarget` resource to enable auto-scaling for properties such as ... **the desired count of an Amazon ECS cluster**
+
+他に効く制約が 4 つ。
+
+- **書き込み専用プロパティ**(パスワード・シークレット)は実物ではなく前回デプロイ値と比較される
+- **不変(immutable)プロパティのドリフトは戻せない**(→ §6 の `Replacement`)
+- **非対応のリソース型は従来の 2 者比較にフォールバックする**(除外リストが 28 型ある。この構成で使っている型は含まれていない)
+- **テンプレートに書いていないタグキーは触らない**(ABAC との衝突を避ける仕様)
+
+#### `describe-change-set` の出力が変わる
+
+三方比較になるので、返ってくる項目が増える。
+
+| 項目 | 内容 |
+|---|---|
+| `StackDriftStatus` | `DRIFTED` / `IN_SYNC` / `NOT_CHECKED` / `UNKNOWN` |
+| `ResourceDriftStatus` | リソースごとの `DELETED` / `MODIFIED` / `IN_SYNC` / `NOT_CHECKED` |
+| `BeforeValueFrom` | before の値が `ACTUAL_STATE` から来たか `PREVIOUS_DEPLOYMENT_STATE` から来たか |
+| `Drift` | `PreviousValue` / `ActualValue` / `DriftDetectionTimestamp` |
+| `ResourceDriftIgnoredProperties` | ドリフトを戻さなかったプロパティと、その理由 |
+
+`cfn-apply.yml` の差分サマリは `.Changes[]` しか見ていないので、これらを表に出したいなら jq の追記が要る。
 
 ---
 
