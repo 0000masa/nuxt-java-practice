@@ -1,0 +1,280 @@
+# 既に動いている環境に、CloudFormation の変更だけを反映する(フェーズ13 の追補)。
+#
+# 設計 → docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md の決定20
+# 経緯 → docs/adr/0007-app-deploy-inside-cloudformation.md
+# 手順書 → docs/infrastructure/cloudformation-operations.md の §9
+#
+# 【cfn-deploy.yml との違い】
+# cfn-deploy.yml は「何も無い状態から建てる」ためのワークフローで、
+# DesiredCount=0 で作る → DB ユーザー作成 → マイグレーション → DesiredCount を上げる、
+# という順序を 4 ジョブで表現している。
+# こちらは既存スタックへの反映だけで、DB 操作もサービスの停止起動もしない。
+#
+# 【aws cloudformation deploy を使っていない理由】
+# 既存環境を触るワークフローなので「何が変わるか」を必ずジョブサマリに残したい。
+# deploy は内部で Change Set を作って即実行してしまい、差分を出す隙がない。
+# 代償として、deploy が暗黙にやっていた 2 つを自分で書くことになる。
+#   1. 渡さなかったパラメータを UsePreviousValue にする(→ ImageTag)
+#   2. 51,200 バイトを超えるテンプレートを S3 経由にする(→ テンプレートを S3 に置くステップ)
+name: CloudFormation スタックを反映(更新のみ)
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 対象環境
+        type: choice
+        options: [stg]
+        default: stg
+      image_tag:
+        description: ECR のイメージタグ。空にすると今デプロイされているタグを維持する
+        type: string
+        default: ""
+      dry_run:
+        description: Change Set を作って差分を見るだけで実行しない
+        type: boolean
+        default: false
+      allow_replacement:
+        description: リソースの作り直し(Replacement)を許可する。RDS が作り直されると中のデータは消える
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION: ap-northeast-1
+  TEMPLATE: cloudformation/app.yml
+
+permissions:
+  id-token: write
+  contents: read
+
+# cfn-deploy.yml / cfn-destroy.yml と同じグループ。
+# 同じスタックへの操作を 3 本のワークフローをまたいで直列化する。
+concurrency:
+  group: cfn-deploy-${{ inputs.env }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    # ECS サービスの入れ替えを含むと 10〜20 分。CLI の waiter は 30 秒 × 120 回 = 60 分で
+    # 諦めるので、それを待ちきれるだけの余裕を持たせる。
+    timeout-minutes: 75
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS に AssumeRole する(OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 既存環境向けのワークフローなので、前提が崩れている状態で叩かれたときは
+      # AWS の生のエラーではなく「代わりに何をすべきか」を出して落ちる。
+      - name: 前提を確かめる
+        id: pre
+        run: |
+          set -euo pipefail
+          stack="nuxt-java-practice-${{ inputs.env }}"
+          echo "stack=$stack" >> "$GITHUB_OUTPUT"
+
+          if ! json=$(aws cloudformation describe-stacks --stack-name "$stack" --output json 2>/dev/null); then
+            echo "::error::スタック $stack がありません。初回構築は cfn-deploy.yml を使ってください"
+            exit 1
+          fi
+
+          status=$(echo "$json" | jq -r '.Stacks[0].StackStatus')
+          case "$status" in
+            CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
+            ROLLBACK_COMPLETE)
+              echo "::error::状態が $status です。作成に失敗したスタックは更新できません。cfn-destroy.yml で削除してから建て直してください"
+              exit 1 ;;
+            UPDATE_ROLLBACK_FAILED)
+              echo "::error::状態が $status です。continue-update-rollback をコンソールから実行して復帰させてください"
+              exit 1 ;;
+            *)
+              echo "::error::状態が $status なので更新できません(進行中か、削除待ちの可能性があります)"
+              exit 1 ;;
+          esac
+
+          # DesiredCount=0 は「cfn-deploy.yml が bootstrap / migrate の途中で止まった状態」。
+          # ここで params の値(1 以上)を流し込むと、DB ユーザーがまだ無いままタスクが起動して
+          # クラッシュループし、CloudFormation が最大 3 時間サービスの安定を待って失敗する。
+          desired=$(echo "$json" | jq -r '.Stacks[0].Parameters[] | select(.ParameterKey == "WebDesiredCount") | .ParameterValue')
+          if [ "$desired" = "0" ]; then
+            echo "::error::スタックの WebDesiredCount が 0 です(bootstrap / migrate が未完了)。cfn-deploy.yml を実行してください"
+            exit 1
+          fi
+
+          echo "状態: $status / WebDesiredCount: $desired"
+
+      # テンプレートが 51,200 バイト(リクエストに直接載せられる上限)を超えているため、
+      # CloudFormation に渡す口が S3 しかない。TemplateURL は S3 か SSM ドキュメントのみで、
+      # GitHub の raw URL は受け付けない(API リファレンスに明記)。
+      # バケットは手動管理の常駐リソース。名前はアカウント ID から組み立てるので設定不要。
+      - name: テンプレートを S3 に置く
+        id: tpl
+        run: |
+          set -euo pipefail
+          account=$(aws sts get-caller-identity --query Account --output text)
+          bucket="nuxt-java-practice-cfn-templates-${account}"
+          key="templates/${GITHUB_SHA}/app.yml"
+
+          aws s3 cp "$TEMPLATE" "s3://${bucket}/${key}" --only-show-errors
+          echo "url=https://${bucket}.s3.${AWS_REGION}.amazonaws.com/${key}" >> "$GITHUB_OUTPUT"
+          echo "s3://${bucket}/${key} に置きました($(wc -c < "$TEMPLATE") バイト)"
+
+      - name: Change Set を作る
+        id: cs
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          BASIC_AUTH_CREDENTIAL: ${{ secrets.BASIC_AUTH_CREDENTIAL }}
+        run: |
+          set -euo pipefail
+          stack="${{ steps.pre.outputs.stack }}"
+          name="apply-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+          # params ファイルがパラメータの唯一の正。そこに無いのは ImageTag と
+          # BasicAuthCredential の 2 つだけなので、それを足して全パラメータを埋める。
+          # ImageTag が空のときは UsePreviousValue にして、今デプロイされているタグを維持する。
+          if [ -n "$IMAGE_TAG" ]; then
+            image=$(jq -n --arg v "$IMAGE_TAG" '{ParameterKey: "ImageTag", ParameterValue: $v}')
+          else
+            image='{"ParameterKey": "ImageTag", "UsePreviousValue": true}'
+          fi
+
+          parameters=$(jq -n \
+            --slurpfile p "cloudformation/params/${{ inputs.env }}.json" \
+            --argjson image "$image" \
+            --arg cred "$BASIC_AUTH_CREDENTIAL" \
+            '$p[0] + [$image, {ParameterKey: "BasicAuthCredential", ParameterValue: $cred}]')
+
+          # --tags を省略するとスタックのタグが失われる(UpdateStack と同じ挙動)ので、
+          # cfn-deploy.yml と同じ 3 つを毎回渡す。
+          aws cloudformation create-change-set \
+            --stack-name "$stack" \
+            --change-set-name "$name" \
+            --change-set-type UPDATE \
+            --template-url "${{ steps.tpl.outputs.url }}" \
+            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --tags Key=Project,Value=nuxt-java-practice Key=Env,Value=${{ inputs.env }} Key=ManagedBy,Value=cloudformation \
+            --parameters "$parameters" \
+            > /dev/null
+
+          # 差分がゼロだと waiter は FAILED で返る。異常ではないので後段で理由を見て分ける。
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$stack" --change-set-name "$name" || true
+
+          detail=$(aws cloudformation describe-change-set \
+            --stack-name "$stack" --change-set-name "$name" --output json)
+          st=$(echo "$detail" | jq -r '.Status')
+          reason=$(echo "$detail" | jq -r '.StatusReason // ""')
+
+          if [ "$st" = "FAILED" ]; then
+            if echo "$reason" | grep -qi "didn't contain changes\|No updates are to be performed"; then
+              echo "empty=true" >> "$GITHUB_OUTPUT"
+              aws cloudformation delete-change-set --stack-name "$stack" --change-set-name "$name"
+              {
+                echo "### 差分がありませんでした"
+                echo ""
+                echo "テンプレートと params は既にこのスタックへ反映済みです。"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "::error::Change Set の作成に失敗しました: $reason"
+            exit 1
+          fi
+
+          echo "empty=false" >> "$GITHUB_OUTPUT"
+
+      # 差分をサマリに残し、そのうえで作り直し(Replacement)が含まれていないか判定する。
+      # RDS が作り直されると新しい空のインスタンスになり、中のデータは失われる。
+      - name: 差分を確認する
+        if: steps.cs.outputs.empty == 'false'
+        run: |
+          set -euo pipefail
+          stack="${{ steps.pre.outputs.stack }}"
+          name="${{ steps.cs.outputs.name }}"
+
+          {
+            echo "### Change Set の差分"
+            echo ""
+            echo '```'
+            aws cloudformation describe-change-set --stack-name "$stack" --change-set-name "$name" \
+              --query 'Changes[].ResourceChange.{操作:Action,種類:ResourceType,論理ID:LogicalResourceId,置換:Replacement}' \
+              --output table
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          replaced=$(aws cloudformation describe-change-set --stack-name "$stack" --change-set-name "$name" \
+            --output json | jq -r '[.Changes[].ResourceChange | select(.Replacement == "True") | .LogicalResourceId] | join(" ")')
+
+          if [ -n "$replaced" ] && [ "${{ inputs.allow_replacement }}" != "true" ]; then
+            {
+              echo ""
+              echo "### 作り直し(Replacement)が含まれるため実行しませんでした"
+              echo ""
+              echo "対象: \`$replaced\`"
+              echo ""
+              echo "**作り直しはデータを失う操作です。** とくに \`Database\` が含まれている場合、"
+              echo "新しい空の RDS に置き換わります(DeletionPolicy が Snapshot なのでスナップショットは残る)。"
+              echo ""
+              echo "意図した変更であれば allow_replacement=true で再実行してください。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            aws cloudformation delete-change-set --stack-name "$stack" --change-set-name "$name"
+            echo "::error::作り直しが含まれています($replaced)。allow_replacement=false のため停止しました"
+            exit 1
+          fi
+
+      - name: dry run なので実行しない
+        if: ${{ steps.cs.outputs.empty == 'false' && inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          aws cloudformation delete-change-set \
+            --stack-name "${{ steps.pre.outputs.stack }}" \
+            --change-set-name "${{ steps.cs.outputs.name }}"
+          {
+            echo ""
+            echo "**dry run のため実行していません。**反映するには dry_run=false で再実行してください。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Change Set を実行する
+        if: ${{ steps.cs.outputs.empty == 'false' && !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          stack="${{ steps.pre.outputs.stack }}"
+
+          aws cloudformation execute-change-set \
+            --stack-name "$stack" --change-set-name "${{ steps.cs.outputs.name }}"
+
+          echo "反映を待ちます(ECS サービスの入れ替えを含むと 10〜20 分)"
+          if ! aws cloudformation wait stack-update-complete --stack-name "$stack"; then
+            echo "::error::スタックの更新が失敗、またはロールバックしました"
+            aws cloudformation describe-stack-events --stack-name "$stack" \
+              --query 'StackEvents[?contains(ResourceStatus, `FAILED`)] | [0:10].{論理ID:LogicalResourceId,状態:ResourceStatus,理由:ResourceStatusReason}' \
+              --output table || true
+            exit 1
+          fi
+
+      - name: 結果をサマリに出す
+        if: ${{ success() && steps.cs.outputs.empty == 'false' && !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          stack="${{ steps.pre.outputs.stack }}"
+          json=$(aws cloudformation describe-stacks --stack-name "$stack" --output json)
+          out() { echo "$json" | jq -r --arg k "$1" '.Stacks[0].Outputs[] | select(.OutputKey == $k) | .OutputValue'; }
+          param() { echo "$json" | jq -r --arg k "$1" '.Stacks[0].Parameters[] | select(.ParameterKey == $k) | .ParameterValue'; }
+
+          {
+            echo ""
+            echo "### 反映しました(${{ inputs.env }})"
+            echo ""
+            echo '```'
+            echo "URL          : $(out AppUrl)"
+            echo "イメージタグ : $(param ImageTag)"
+            echo "タスク数     : $(param WebDesiredCount)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

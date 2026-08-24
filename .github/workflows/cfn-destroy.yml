@@ -1,0 +1,105 @@
+# CloudFormation スタックを削除して撤収する(フェーズ13)。
+#
+# 設計 → docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md の決定14
+#
+# 【stg 専用】本番のスタックを消すワークフローは作らない。実務では本番の撤収は
+# 人が手で、承認を伴って行うもので、ボタン 1 つで消せる状態にはしない。
+# その前提のおかげで「バケットを空にする処理を環境ごとに切り替える」必要もなくなり、
+# 素の CloudFormation に force_destroy 相当が無い問題を運用側で解けている。
+#
+# 残るもの: Route53 ホストゾーン / ECR / OIDC プロバイダ / IAM ロール 3 つ / SSM の SecureString
+name: CloudFormation スタックを削除
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 削除する場合は destroy と入力する
+        type: string
+        required: true
+
+env:
+  AWS_REGION: ap-northeast-1
+  # stg 固定。prod をここに足さない(上のコメントの理由)
+  ENV_NAME: stg
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cfn-deploy-stg
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: stg
+    steps:
+      - name: 入力を確かめる
+        run: |
+          if [ "${{ inputs.confirm }}" != "destroy" ]; then
+            echo "::error::confirm に destroy と入力してください"
+            exit 1
+          fi
+
+      - name: AWS に AssumeRole する(OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: スタックの存在を確かめる
+        id: check
+        run: |
+          set -uo pipefail
+          if aws cloudformation describe-stacks --stack-name "nuxt-java-practice-$ENV_NAME" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "スタックが存在しないので何もしません"
+          fi
+
+      # 素の CloudFormation には Terraform の force_destroy に相当する機能が無く、
+      # オブジェクトが残っているバケットは削除に失敗する。ここで空にしてから消す。
+      - name: 画像バケットを空にする
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          bucket=$(aws cloudformation describe-stacks --stack-name "nuxt-java-practice-$ENV_NAME" \
+            --query "Stacks[0].Outputs[?OutputKey=='ImageBucketName'].OutputValue | [0]" --output text)
+          if [ -n "$bucket" ] && [ "$bucket" != "None" ]; then
+            echo "空にします: s3://$bucket"
+            aws s3 rm "s3://$bucket" --recursive
+          fi
+
+      - name: スタックを削除する
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          stack="nuxt-java-practice-$ENV_NAME"
+          # サービスロールを明示する。作成時と同じロールで消さないと、
+          # Actions のロール(cloudformation:* しか持たない)ではリソースを削除できない。
+          aws cloudformation delete-stack --stack-name "$stack" \
+            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}"
+          echo "削除を待ちます(RDS と NAT Gateway があるので 10〜15 分かかる)"
+          aws cloudformation wait stack-delete-complete --stack-name "$stack"
+
+      - name: 結果をサマリに出す
+        if: always()
+        run: |
+          {
+            echo "### 撤収($ENV_NAME)"
+            echo ""
+            if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
+              echo "スタックを削除しました。"
+            else
+              echo "スタックが存在しなかったため何もしていません。"
+            fi
+            echo ""
+            echo "**残っているもの**(手動管理なので消えません)"
+            echo "- Route53 ホストゾーンとドメイン代"
+            echo "- ECR リポジトリとイメージ"
+            echo "- OIDC プロバイダと IAM ロール 3 つ"
+            echo "- SSM の SecureString 4 つ"
+          } >> "$GITHUB_STEP_SUMMARY"

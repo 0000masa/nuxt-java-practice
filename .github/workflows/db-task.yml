@@ -1,0 +1,217 @@
+# DB に対する 1 回きりの操作を ECS Run Task で実行する(フェーズ12 / 13)。
+#
+# 設計 → docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md の決定13
+#
+# 単体でも叩けるし、cfn-deploy.yml から workflow_call で呼ばれる。
+# 環境を建てる手順には bootstrap → migrate が必須で、これを回さないとアプリが起動できない
+# (DB ユーザーを分離しているため → docs/adr/0005)。
+name: DB タスクを実行
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 対象環境
+        type: choice
+        options: [stg]
+        default: stg
+      action:
+        description: bootstrap(ユーザー作成) / migrate(Flyway) / sql(任意 SQL)
+        type: choice
+        options: [bootstrap, migrate, sql]
+        required: true
+      sql:
+        description: action=sql のときに実行する SQL
+        type: string
+        default: ""
+      sql_user:
+        description: action=sql の実行ユーザー。app は読み書きのみ、master は何でもできる
+        type: choice
+        options: [app, master]
+        default: app
+
+  workflow_call:
+    inputs:
+      env:
+        type: string
+        required: true
+      action:
+        type: string
+        required: true
+      sql:
+        type: string
+        default: ""
+      sql_user:
+        type: string
+        default: app
+
+env:
+  AWS_REGION: ap-northeast-1
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    # Environment secrets からロール ARN を引く。stg / prod で同じ Secret 名のまま
+    # 値が切り替わるので、ワークフロー側に環境名を埋め込まなくて済む。
+    environment: ${{ inputs.env }}
+
+    steps:
+      # 任意 SQL は stg だけ。prod のスタックに対して GitHub Actions から
+      # 好きな SQL を流せる状態は作らない(→ 設計書の決定18)。
+      # このリポジトリは GitHub Free のプライベートリポジトリで required reviewers が
+      # 使えないため、承認による保護の代わりにこの制約を置いている。
+      - name: 任意 SQL が許される環境か確かめる
+        if: inputs.action == 'sql'
+        run: |
+          if [ "${{ inputs.env }}" != "stg" ]; then
+            echo "::error::任意 SQL の実行は stg でのみ許可しています(env=${{ inputs.env }})"
+            exit 1
+          fi
+          if [ -z "${{ inputs.sql }}" ]; then
+            echo "::error::action=sql には sql の指定が必要です"
+            exit 1
+          fi
+
+      - name: AWS に AssumeRole する(OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # run-task に必要な値はスタックの Outputs から取る。
+      # Terraform 側は SSM パラメータに書き出して受け渡していたが、CloudFormation では中継が不要。
+      - name: スタックの出力を読む
+        id: stack
+        run: |
+          set -euo pipefail
+          stack="nuxt-java-practice-${{ inputs.env }}"
+          outputs=$(aws cloudformation describe-stacks --stack-name "$stack" \
+            --query 'Stacks[0].Outputs' --output json)
+
+          get() { echo "$outputs" | jq -r --arg k "$1" '.[] | select(.OutputKey == $k) | .OutputValue'; }
+
+          {
+            echo "cluster=$(get ClusterName)"
+            echo "subnets=$(get PrivateSubnetIds)"
+            echo "sg=$(get EcsSecurityGroupId)"
+            echo "bootstrap_task=$(get BootstrapTaskDefinition)"
+            echo "migrate_task=$(get MigrateTaskDefinition)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 実行するタスクと上書き内容を決める
+        id: plan
+        env:
+          SQL: ${{ inputs.sql }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.action }}" in
+            bootstrap)
+              echo "task=${{ steps.stack.outputs.bootstrap_task }}" >> "$GITHUB_OUTPUT"
+              echo "container=mysql" >> "$GITHUB_OUTPUT"
+              # タスク定義の既定値がそのままユーザー作成の SQL なので上書きしない
+              echo "overrides=" >> "$GITHUB_OUTPUT"
+              ;;
+            migrate)
+              echo "task=${{ steps.stack.outputs.migrate_task }}" >> "$GITHUB_OUTPUT"
+              echo "container=migrate" >> "$GITHUB_OUTPUT"
+              echo "overrides=" >> "$GITHUB_OUTPUT"
+              ;;
+            sql)
+              # SQL は containerOverrides の environment で渡す。command に文字列として
+              # 埋め込むと引用符と改行のエスケープで必ず壊れるため。
+              # ファイル経由にしているのは、SQL に改行が含まれても GITHUB_OUTPUT が壊れないようにするため。
+              jq -n --arg sql "$SQL" --arg user "${{ inputs.sql_user }}" '{
+                containerOverrides: [{
+                  name: "mysql",
+                  environment: [
+                    { name: "SQL", value: $sql },
+                    { name: "SQL_USER", value: $user }
+                  ]
+                }]
+              }' > overrides.json
+              echo "task=${{ steps.stack.outputs.bootstrap_task }}" >> "$GITHUB_OUTPUT"
+              echo "container=mysql" >> "$GITHUB_OUTPUT"
+              echo "overrides=overrides.json" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      # 【重要】aws ecs run-task は起動するだけで完了を待たない。
+      # wait tasks-stopped で待ち、describe-tasks の exitCode を見て 0 以外なら失敗させる。
+      # ここを書かないと「マイグレーションが失敗したのにワークフローは緑」になる。
+      #
+      # パイプで終了コードを隠さないよう、値は一度変数に入れてから判定する
+      # (手元の検証で java -jar ... | tail の終了コードを取り違えた実例がある)。
+      - name: Run Task を実行して終了を待つ
+        run: |
+          set -euo pipefail
+
+          overrides_arg=()
+          if [ -n "${{ steps.plan.outputs.overrides }}" ]; then
+            overrides_arg=(--overrides "file://${{ steps.plan.outputs.overrides }}")
+          fi
+
+          task_arn=$(aws ecs run-task \
+            --cluster "${{ steps.stack.outputs.cluster }}" \
+            --task-definition "${{ steps.plan.outputs.task }}" \
+            --launch-type FARGATE \
+            --network-configuration "awsvpcConfiguration={subnets=[${{ steps.stack.outputs.subnets }}],securityGroups=[${{ steps.stack.outputs.sg }}],assignPublicIp=DISABLED}" \
+            "${overrides_arg[@]}" \
+            --query 'tasks[0].taskArn' --output text)
+
+          if [ -z "$task_arn" ] || [ "$task_arn" = "None" ]; then
+            echo "::error::タスクを起動できませんでした"
+            exit 1
+          fi
+          echo "起動しました: $task_arn"
+
+          aws ecs wait tasks-stopped \
+            --cluster "${{ steps.stack.outputs.cluster }}" \
+            --tasks "$task_arn"
+
+          exit_code=$(aws ecs describe-tasks \
+            --cluster "${{ steps.stack.outputs.cluster }}" \
+            --tasks "$task_arn" \
+            --query "tasks[0].containers[?name=='${{ steps.plan.outputs.container }}'].exitCode | [0]" \
+            --output text)
+          stopped_reason=$(aws ecs describe-tasks \
+            --cluster "${{ steps.stack.outputs.cluster }}" \
+            --tasks "$task_arn" \
+            --query 'tasks[0].stoppedReason' --output text)
+
+          # ログの場所を出す。ログストリーム名は <prefix>/<container>/<task id>
+          task_id="${task_arn##*/}"
+          {
+            echo "### DB タスク: ${{ inputs.action }} (${{ inputs.env }})"
+            echo ""
+            echo '```'
+            echo "タスク定義   : ${{ steps.plan.outputs.task }}"
+            echo "終了コード   : $exit_code"
+            echo "停止理由     : $stopped_reason"
+            echo "ロググループ : /ecs/nuxt-java-practice-${{ inputs.env }}"
+            echo "タスク ID    : $task_id"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$exit_code" != "0" ]; then
+            echo "::error::タスクが終了コード $exit_code で終わりました($stopped_reason)"
+            exit 1
+          fi
+
+      - name: CloudWatch Logs の内容を出す
+        if: always()
+        run: |
+          set -uo pipefail
+          group="/ecs/nuxt-java-practice-${{ inputs.env }}"
+          # 直近のログストリームを 1 本だけ取る。失敗しても本体の結果は変えない
+          stream=$(aws logs describe-log-streams --log-group-name "$group" \
+            --order-by LastEventTime --descending --max-items 1 \
+            --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
+          if [ -n "$stream" ] && [ "$stream" != "None" ]; then
+            echo "--- $group : $stream ---"
+            aws logs get-log-events --log-group-name "$group" --log-stream-name "$stream" \
+              --limit 200 --query 'events[].message' --output text || true
+          fi
