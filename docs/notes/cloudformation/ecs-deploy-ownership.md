@@ -10,7 +10,7 @@
 2. **「要らない」は「安全」ではない。** 外部の変更は保護されておらず、次にテンプレート側で差分が出たときにまとめて巻き戻る。**Terraform なら即バレする事故が、CloudFormation では遅れて出る**
 3. **CloudFormation にも `ignore_changes` 相当はある**(タスク定義を family だけで参照する)。そして**「直したのにロールアウトされない」問題は Terraform 側にもある** — `ignore_changes` は設定側の変更も反映しないので、同じ罠が起きる。CloudFormation 固有の悪さは別のところで、**テンプレートに残した古いイメージのタスク定義が「最新 ACTIVE」になり、テンプレートがそれを指し続けること**
 
-関連: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) §5 / [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md)
+関連: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) §5 / [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) §5-8 / [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md)
 
 ---
 
@@ -104,7 +104,7 @@ Terraform なら 1 月 20 日の `plan` で気付く。CloudFormation は**2 月
 |---|---|---|
 | 既定の Change Set | — | **実物を読まない**(§2 冒頭の引用「do not account for stack drift」)。`cfn-apply.yml` の `dry_run` も既定モードなので同じ |
 | `detect-stack-drift` | ○ | 別操作。Change Set の出力とは別に見ることになる。非対応のリソース型がある |
-| drift-aware change set(`--deployment-mode REVERT_DRIFT`) | 作るだけなら ○ | **`aws cloudformation deploy` からは使えない。** 実行すると全部戻る |
+| drift-aware change set(`--deployment-mode REVERT_DRIFT`) | 作るだけなら ○ | **`aws cloudformation deploy` からは使えない。** 実行すると全部戻る(→ [CLI コマンドのノート §5-8](./cli-commands-and-change-sets.md)) |
 
 **決定的なのは、`REVERT_DRIFT` に「このプロパティだけは見るが戻さない」という指定が無いこと。** 戻さないでくれるのは AWS が決めた 3 種類(AWS 管理プロパティ / 書き込み専用プロパティ / 不変プロパティ)だけで、**タスク定義は AWS 管理プロパティの一覧に入っていない**(公式が挙げる例は RDS の `AutoMinorVersionUpgrade`、`AWS::ApplicationAutoScaling::ScalableTarget`、`AWS::AutoScaling::ScalingPolicy`)。つまり外部ツールが登録したリビジョンは「ドリフト」として戻される。
 
@@ -117,7 +117,7 @@ CFN       : 読まない  か  読んで全部戻す(タスク定義も戻る)�
 
 そして family 参照を採ると、これが効く場面がもう 1 つ増える。**テンプレートが指す先が現実からずれても、その事実は Change Set にも drift 検出以外の経路にも出てこない**(→ §3-3)。
 
-設定・必要な IAM 権限・副作用の詳細 → [対訳ノート §5「`deploy` では実物を読ませられない」](./terraform-to-cloudformation.md#deploy-では実物を読ませられない)。
+設定・必要な IAM 権限・副作用の詳細 → [CLI コマンドのノート §5-8](./cli-commands-and-change-sets.md#deploy-では実物を読ませられない)。
 
 ---
 
@@ -341,7 +341,7 @@ TaskDefinition: myproj-stg-app  →  myproj-stg-app   (変更なし)
 
 `app.yml:1233` は `DesiredCount: !Ref WebDesiredCount` と書いており、ワークフローは毎回この値を渡す。**CloudFormation が ECS の `UpdateService` に `desiredCount` を常に含めるのか、変更のないプロパティは送らないのかが公式ドキュメントに明記されていない。**
 
-stg は `MinCapacity=1 / MaxCapacity=2` なので実害は小さい。必要になれば [drift-aware change set](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/drift-aware-change-sets.html)(`--deployment-mode REVERT_DRIFT`)に切り替える道がある。ECS の desired count は「AWS 管理プロパティ」として drift を保持すると明記されている。**切り替えに必要な設定・IAM 権限・副作用** → [対訳ノート §5「`deploy` では実物を読ませられない」](./terraform-to-cloudformation.md#deploy-では実物を読ませられない)。
+stg は `MinCapacity=1 / MaxCapacity=2` なので実害は小さい。必要になれば [drift-aware change set](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/drift-aware-change-sets.html)(`--deployment-mode REVERT_DRIFT`)に切り替える道がある。ECS の desired count は「AWS 管理プロパティ」として drift を保持すると明記されている。**切り替えに必要な設定・IAM 権限・副作用** → [CLI コマンドのノート §5-8](./cli-commands-and-change-sets.md#deploy-では実物を読ませられない)。
 
 検証結果は設計書 [§10 実測で確かめること](../../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)に書く。
 
