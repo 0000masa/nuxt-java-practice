@@ -20,8 +20,8 @@
 | 9 | シードタスク | タスクモード(`--app.task=seed`)実装。users 1万 / posts 100万 / likes 300万 をセットベース SQL で投入 | 未着手 |
 | 10 | index 実験 | 検索ラボで実験用 index(複合・FULLTEXT)の before/after を検証し、結果を `docs/notes/` に記録 | 未着手 |
 | 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 完了 |
-| 12 | AWS 運用 | `db-task.yml`(ECS Run Task で migrate/seed)、SES/S3 の本番設定。CloudFormation テンプレート側の作業と合わせて別途設計 | 未着手 |
-| 13 | インフラコード | CloudFormation テンプレート(素の YAML)の作成。**ファイル分割・環境差分の共通化方式は未確定で、着手前に別セッションで設計を議論する**。方針 → [ADR-0001](../adr/0001-cloudformation-yaml-over-terraform.md) と [infrastructure/README.md](../infrastructure/README.md) | 未着手 |
+| 12 | AWS 運用 | `db-task.yml`(ECS Run Task で bootstrap/migrate/任意SQL)、SES/S3 の本番設定。**フェーズ13 に取り込んで実施済み**(DB ユーザー分離により必須化したため)。残っているのは seed の実行(フェーズ9 待ち) | 完了 |
+| 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -34,6 +34,50 @@
 
 ## 完了メモ
 
+- **フェーズ13 追補: CloudFormation を叩くのを `cfn-apply.yml` 1 本に集約**(2026-08-24):
+  - **`cfn-deploy.yml` から aws コマンドを全部消した。** `workflow_call` で `cfn-apply.yml`(1 段目・4 段目)と `db-task.yml`(2 段目・3 段目)を呼ぶだけの 5 ジョブになり、258 行 → 147 行(ほぼコメント)。`cfn-apply.yml` と重複していた「テンプレートを S3 経由で渡す」「params を jq で組み立てる」「`--tags` を毎回渡す」が 1 か所に寄った → **[ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md)**
+  - **`cfn-apply.yml` が `--change-set-type CREATE` も担うようになった。** `aws cloudformation deploy` が暗黙にやっていた「スタックが無い / `REVIEW_IN_PROGRESS` なら CREATE」の判定と、`stack-create-complete` / `stack-update-complete` の出し分けを自前で持つ
+  - **`workflow_dispatch` から見た `cfn-apply.yml` の挙動は変わっていない。** guard を外す 3 入力(`web_desired_count` / `allow_missing_stack` / `allow_zero_desired_count`)は **`workflow_call` にしか宣言していない**ので、Actions の UI からは触れない。これが安全弁
+  - **`cfn-apply.yml` から `concurrency` を削除した。** 呼ばれる側のワークフローレベル `concurrency` も適用されるため、呼び出し側と同じグループ名を持つと親子で枠を取り合って止まる。外しても precheck が `cfn-deploy` / `cfn-destroy` の実行中の全期間を拾うことを確認済み
+  - **4 段目にも Change Set の差分と Replacement の安全弁が付いた**(これまで `deploy` を直に叩いていたので差分が出ていなかった)。締めのサマリは 5 段目 `summary` が `outputs` から組み立てるので **AWS を叩かない**
+  - **学習メモを 1 本追加** → [reusable-workflows.md](../notes/github-actions/reusable-workflows.md)(`workflow_call` の書き方と 5 つの落とし穴、composite action との使い分け)
+  - **実機未検証。** テンプレート置き場の S3 バケットを手動作成するまで構築も反映もできない(下の 2026-08-21 のメモ参照)
+
+- **フェーズ13 追補: 反映専用ワークフローと、テンプレートのサイズ上限**(2026-08-21):
+  - **`cfn-apply.yml` を新設。** 既存スタックに `app.yml` / `params` の変更を反映するだけのワークフロー(1 ジョブ)。`create-change-set` → 差分をジョブサマリ → `execute-change-set`。`Replacement: True` を含むときは `allow_replacement=true` が無ければ実行せずに失敗する。実行前に「スタックの存在 / 状態 / `WebDesiredCount`≠0」を確かめる。設計 → 設計書の決定20
+  - **アプリのイメージ更新も CloudFormation 経由で行うことを決めた** → **[ADR-0007](../adr/0007-app-deploy-inside-cloudformation.md)**。Terraform 時代の「作成は IaC / 普段の更新は Actions」は CloudFormation では巻き戻りの原因になる。代替(ECS サービスから family だけ参照する)はあるが採らない
+  - **`cfn-deploy.yml` の欠陥を修正した。** `app.yml` が **54,178 バイト**で「リクエストに直接載せられる上限 51,200 バイト」を超えており、**初回実行時に必ず失敗する状態だった**(aws-cli が AWS を呼ぶ前に `DeployBucketRequiredError` で落ちる)。3 か所の `deploy` に `--s3-bucket` を追加
+  - **テンプレート置き場の S3 バケットが手動管理の常駐リソースとして 1 つ増えた。** `nuxt-java-practice-cfn-templates-<アカウントID>`。作成手順 → 手順書 §3。**この作業をしていないと構築も反映もできない**
+  - **`aws cloudformation validate-template --template-body file://...` はもう使えない**(同じ上限が `ValidateTemplate` にも掛かる)。手元の構文チェックは `cfn-lint`
+  - **設計書の記述を 3 点訂正した**: 「CloudFormation は実リソースを読み直さない」は既定の Change Set に限る(`--deployment-mode REVERT_DRIFT` は読む)/ `ignore_changes = [task_definition]` には代替がある(family 参照)/ ワークフローは 3 本 → 4 本
+
+- **フェーズ13 実装済み・実機未検証**(2026-08-20): 設計を固めてから実装した。**AWS 上でまだ一度も建てていないので、実機確認は次のセッションの最初の作業。**
+  - **設計** → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)(決定 19 件)。**[ADR-0005](../adr/0005-separate-db-users-for-app-and-migration.md)**(DB ユーザーの分離)と **[ADR-0006](../adr/0006-basic-auth-with-waf.md)**(Basic 認証を WAF で実装)を追加
+  - **作ったもの**:
+    - `cloudformation/app.yml` — 1 テンプレートに全リソース(パラメータ 36 / リソース 62 / 出力 13 / Condition 3)
+    - `cloudformation/params/{stg,prod}.json` — 環境差分。**`HostedZoneId` は `REPLACE_WITH_HOSTED_ZONE_ID` のままなので埋める必要がある**
+    - `.github/workflows/cfn-deploy.yml` / `db-task.yml` / `cfn-destroy.yml`(2026-08-21 に `cfn-apply.yml` を追加)
+    - `docs/infrastructure/cloudformation-operations.md` — 手動セットアップ(IAM ロール 2 つ・SSM 4 つ・GitHub Environment・Google・SES)と構築/撤収手順、詰まったときの見どころ
+    - アプリ側: actuator(liveness を ALB に使う)、`config/MailSenderConfig` と `SesMailSender`(SES の API 経路)、`config/TaskRunner`(タスクモード)、Flyway を環境変数で切る設定
+  - **設計時の想定と違った点(実測で判明)**:
+    - **`SPRING_MAIN_WEB_APPLICATION_TYPE=none` では起動できない。** Spring Session JDBC の自動設定が動かず(セッションは Web スコープの機能)、`UserSessionManager` が要求する `FindByIndexNameSessionRepository` が解決できずコンテキストの初期化に失敗する。**Web は普通に立てて起動後に終了させる**形に変え、`APP_TASK=migrate` のタスクモードを実装した。これは**フェーズ9 の `--app.task=seed` の土台**でもある
+    - **`app.task` を `application.yml` に書いてはいけない。** `task: ${APP_TASK:}` と書くと未指定でも「空文字のプロパティが存在する」状態になり、`@ConditionalOnProperty` が成立して(false 以外なら成立する判定なので)**通常起動でも即終了する**
+    - **actuator のメールのヘルス指標を切る必要があった。** 有効なままだと `mailHealthContributor` の生成が `'beans' must not be empty` で失敗し `@SpringBootTest` のテスト 3 本が落ちる。本番でも集約 `/api/actuator/health` を叩くたびに SMTP 接続を試みるので、切るのが正しい(送信は SES の API 経路で SMTP の生死は無関係)
+    - **`MailSender` の Bean は 2 つにならない(当初の想定を後で訂正)。** Boot の `MailSenderAutoConfiguration` には `@ConditionalOnMissingBean(MailSender.class)` が付いているので、`sesMailSender` を登録した時点で**自動設定ごと降り**、`spring.mail.host` の既定値 `${SMTP_HOST:localhost}` があっても SMTP 側は作られない。当初は「候補が 2 つになる」と考えて `@Primary` を付けていたが、**実測して不要と分かったので外した**(2026-08-20)。解説 → [mail-sending-and-transport-switching.md](../notes/java/spring/mail-sending-and-transport-switching.md)
+    - **`MAIL_TRANSPORT` の綴り間違いが起動時に検出されなかった。** 切り替えは `@ConditionalOnProperty(havingValue = "ses")` の文字列一致なので、`sess` と打つと**黙って SMTP 側が選ばれ**、本番では `localhost:1025` への接続失敗がログに残るだけになる(送信失敗は握りつぶす設計のため)。`AppProperties.Mail.transport` を enum(`SMTP` / `SES`)にして、不正値は束縛の時点で起動を落とすようにした(2026-08-20)
+    - **YAML は 1 ノードに 2 つのタグを付けられない。** `!Base64 !Ref X` は構文エラーで、`Fn::Base64:` の長い形式にする必要がある
+    - **`!Sub '${...}:password::'` はクォートが必要。** 末尾のコロンが YAML のマッピング区切りと解釈される
+    - **ECS の `containerOverrides` は `secrets` を上書きできない。** 任意 SQL の実行ユーザー切り替えは、環境変数で選ばせてコンテナ側のシェルで分岐する形にした
+    - **環境変数に入れた文字列の中の `$VAR` は展開されない。** `SQL` 環境変数にパスワードのプレースホルダを書いても効かないので、ユーザー作成の SQL はシェルのダブルクォート内で組み立てている
+  - **実測済み(docker compose 上)**:
+    - actuator の公開範囲 — `/api/actuator/health/liveness` は未ログインで 200、`health` / `readiness` は未ログイン 401・ログイン中 200、`env` / `beans` / `configprops` は**ログイン中でも 404**(公開対象外)
+    - `APP_TASK=migrate` → 終了コード 0(9 秒、Flyway 適用 → `TaskRunner` → 終了) / `APP_TASK=bogus` → 終了コード 1 / 未指定 → Web が生き続ける
+    - `MAIL_TRANSPORT=ses` でコンテキストが起動し、`MailSender` の Bean は `sesMailSender` の 1 個だけ(`JavaMailSender` 型の Bean は 0 個)。`@Primary` を外しても同じ
+    - `app.mail.transport=sess`(綴り間違い)で起動失敗 — `No enum constant ...Transport.sess`
+    - actuator のメールのヘルス指標を `enabled: true` に戻すと `AuthFlowTest` の 3 本が `'beans' must not be empty` で落ちる(原因は `mailHealthContributor` が具象型 `JavaMailSenderImpl` で Bean を探すのに、テストのモックが `JavaMailSender` インターフェースであること)
+    - テスト 46 本すべて成功
+  - **実機で確かめること**: SES の DKIM トークンが作り直しで変わるか / Blue/Green の重み入れ替えがリスナールール側だけで成立するか(公式の移行ガイドはリスナーの `DefaultActions` も両ターゲットグループの forward にしている) / Basic 認証を通した状態で Google ログインのコールバックが成立するか / `FARGATE_SPOT` の中断頻度 / RDS の `EngineVersion: "8.4"` がメジャーバージョン指定として通るか
+  - **手元の検証で踏んだ罠**: **パイプが終了コードを隠す。** `java -jar app.jar | tail` の終了コードは `tail` のものになるので、起動失敗を「終了コード 0」と読み違えた。`aws ecs run-task` の結果判定でも同じ形の罠があるため、ワークフローでは値を変数に入れてから判定している
 - **フェーズ11 完了**(2026-08-18): **フェーズ5〜10(いいね・画像・プロフィール・検索ラボ・シード・index 実験)を飛ばして着手した。** アプリの最低限の機能が揃ったので、機能を増やす前に「AWS にデプロイできる形」を先に通しておくため。飛ばしたフェーズは後で戻って実施する。
   - **作ったもの**:
     - `docker/app/Dockerfile` — 3 ステージ(Node 22 で `npm run generate` → Temurin 21 JDK で SSG 出力を `static/` に入れて `bootJar` → Temurin 21 JRE で実行)。**ビルドコンテキストはリポジトリ直下**(frontend と backend の両方を材料にするため)
