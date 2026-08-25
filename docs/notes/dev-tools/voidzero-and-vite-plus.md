@@ -61,10 +61,10 @@ Oxc がやったのは、**この土台を 1 つに統合すること**。
 ```
 【従来】
 
-  app.ts ─┬→ ESLint   → 自前パーサー → AST①
-          ├→ Prettier → 自前パーサー → AST②
-          ├→ tsc      → 自前パーサー → AST③
-          └→ esbuild  → 自前パーサー → AST④
+  app.ts ─┬→ ESLint   → 自前パーサー → AST 1
+          ├→ Prettier → 自前パーサー → AST 2
+          ├→ tsc      → 自前パーサー → AST 3
+          └→ esbuild  → 自前パーサー → AST 4
 
 【Oxc】
 
