@@ -214,30 +214,27 @@ jobs:
           name="apply-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           echo "name=$name" >> "$GITHUB_OUTPUT"
 
-          # params ファイルがパラメータの唯一の正。そこに無いのは ImageTag と
-          # BasicAuthCredential の 2 つだけなので、それを足して全パラメータを埋める。
-          # ImageTag が空のときは UsePreviousValue にして、今デプロイされているタグを維持する。
-          if [ -n "$IMAGE_TAG" ]; then
-            image=$(jq -n --arg v "$IMAGE_TAG" '{ParameterKey: "ImageTag", ParameterValue: $v}')
-          elif [ "$CS_TYPE" = "CREATE" ]; then
+          # 構築(CREATE)では ImageTag を省略できない。UsePreviousValue にできる前の値が無い
+          if [ -z "$IMAGE_TAG" ] && [ "$CS_TYPE" = "CREATE" ]; then
             echo "::error::新規作成では image_tag を省略できません(UsePreviousValue にできる前の値が無い)"
             exit 1
-          else
-            image='{"ParameterKey": "ImageTag", "UsePreviousValue": true}'
           fi
 
-          # web_desired_count は「追記」ではなく「置換」。WebDesiredCount は params の中に
-          # 既にあるので、同じ ParameterKey を 2 つ持つ配列を渡すと CloudFormation が弾く。
-          parameters=$(jq -n \
-            --slurpfile p "cloudformation/params/${{ inputs.env }}.json" \
-            --argjson image "$image" \
-            --arg cred "$BASIC_AUTH_CREDENTIAL" \
-            --arg desired "$WEB_DESIRED_COUNT" \
-            '($p[0]
-               | if $desired == "" then .
-                 else map(if .ParameterKey == "WebDesiredCount" then .ParameterValue = $desired else . end)
-                 end)
-             + [$image, {ParameterKey: "BasicAuthCredential", ParameterValue: $cred}]')
+          # params ファイルがパラメータの唯一の正。動的な 3 つを先頭に積み、unique_by で同じキーを潰す。
+          # 残るのは先頭側なので、params に有る WebDesiredCount は上書き、無い 2 つは追記になる
+          # (同じ ParameterKey が 2 つ並ぶと CloudFormation が弾くため、上書きでなければならない)。
+          # 空文字は select で落ちるので、渡さなかった入力は params の値がそのまま残る。
+          # ImageTag が空のままなら UsePreviousValue を足して、今デプロイされているタグを維持する。
+          # `. as $params` は必須。| の後の . は元の入力ではなく直前の値になる。
+          parameters=$(jq --arg tag "$IMAGE_TAG" --arg cred "$BASIC_AUTH_CREDENTIAL" --arg desired "$WEB_DESIRED_COUNT" '
+            . as $params
+            | [ {ParameterKey: "ImageTag",            ParameterValue: $tag},
+                {ParameterKey: "WebDesiredCount",     ParameterValue: $desired},
+                {ParameterKey: "BasicAuthCredential", ParameterValue: $cred} ]
+            | map(select(.ParameterValue != "")) + $params
+            | unique_by(.ParameterKey)
+            | if any(.ParameterKey == "ImageTag") then . else . + [{ParameterKey: "ImageTag", UsePreviousValue: true}] end
+          ' "cloudformation/params/${{ inputs.env }}.json")
 
           # --tags を省略するとスタックのタグが失われる(UpdateStack と同じ挙動)ので毎回渡す。
           aws cloudformation create-change-set \
@@ -304,8 +301,9 @@ jobs:
               echo "### Change Set の差分"
               echo ""
               echo '```'
+              # --output table は列をキー名順に並べる。書いた順ではないので、表示順に合わせてある
               aws cloudformation describe-change-set --stack-name "$stack" --change-set-name "$name" \
-                --query 'Changes[].ResourceChange.{"操作":Action,"種類":ResourceType,"論理ID":LogicalResourceId,"置換":Replacement}' \
+                --query 'Changes[].ResourceChange.{"操作":Action,"種類":ResourceType,"置換":Replacement,"論理ID":LogicalResourceId}' \
                 --output table
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
