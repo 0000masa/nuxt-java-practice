@@ -78,8 +78,11 @@ jobs:
         run: |
           set -euo pipefail
           stack="nuxt-java-practice-$ENV_NAME"
-          # サービスロールを明示する。作成時と同じロールで消さないと、
-          # Actions のロール(cloudformation:* しか持たない)ではリソースを削除できない。
+          # サービスロールを明示する。省略しても create-change-set が渡したロールが
+          # スタックに紐づいている(Stack の RoleARN)ので通常は同じ結果になるが、
+          # 紐づいていないスタック(手で作った場合など)では Actions のロール
+          # (cloudformation:* しか持たない)の一時セッションで削除が試みられ、
+          # リソースを消せずに DELETE_FAILED になる。明示すればその分岐が消える。
           aws cloudformation delete-stack --stack-name "$stack" \
             --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}"
           echo "削除を待ちます(RDS と NAT Gateway があるので 10〜15 分かかる)"
