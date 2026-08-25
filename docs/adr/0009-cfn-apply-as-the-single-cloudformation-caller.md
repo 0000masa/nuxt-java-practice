@@ -61,9 +61,9 @@
 
 - **`aws cloudformation deploy` が暗黙にやっていた「CREATE / UPDATE の出し分け」を自分で持つことになった。** スタックが無い場合と `REVIEW_IN_PROGRESS` の場合を CREATE、それ以外を UPDATE とし、完了待ちも `stack-create-complete` / `stack-update-complete` を出し分ける
 
-- **`dry_run` が残す `REVIEW_IN_PROGRESS` のスタックの器と、CREATE 判定が依存関係にある。** `dry_run=true` で流すと器が残り(`delete-change-set` が消すのはネストスタックだけ)、次の構築はその器を「スタックが無い」とみなして CREATE を作り直すことで通る。`aws cloudformation deploy` はこれを内部でやっていた(aws-cli の `deployer.has_stack`)。**片方だけ直すと壊れる**
+- **`dry_run` が残す `REVIEW_IN_PROGRESS` のスタック(リソースを 1 つも持たない)と、CREATE 判定が依存関係にある。** `dry_run=true` で流すとそのスタックが残り(`delete-change-set` が消すのはネストスタックだけ)、次の構築はそれを「スタックが無い」とみなして CREATE を作り直すことで通る。`aws cloudformation deploy` はこれを内部でやっていた(aws-cli の `deployer.has_stack`)。**片方だけ直すと壊れる**
 
-  **追記(2026-08-24):括弧内の「`delete-change-set` が消すのはネストスタックだけ」は誤り。** [`DeleteChangeSet`](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DeleteChangeSet.html) は指定した Change Set を消すコマンドで、ネストスタックの話は「`IncludeNestedStacks=True` で作った場合は階層に属する Change Set も、そしてネストスタックの `REVIEW_IN_PROGRESS` の Change Set も併せて消す」という追加規定にすぎない。**正しくは「`delete-change-set` は Change Set を消すだけで、`--change-set-type CREATE` が先に作った親スタックの `REVIEW_IN_PROGRESS` の器には触らない」**(スタックを操作する API ではないため)。器が残るという結論と、CREATE 判定との依存関係は変わらない。詳細 → [CloudFormation の CLI コマンドを読み解く §8-2](../notes/cloudformation/cli-commands-and-change-sets.md)
+  **追記(2026-08-24):括弧内の「`delete-change-set` が消すのはネストスタックだけ」は誤り。** [`DeleteChangeSet`](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DeleteChangeSet.html) は指定した Change Set を消すコマンドで、ネストスタックの話は「`IncludeNestedStacks=True` で作った場合は階層に属する Change Set も、そしてネストスタックの `REVIEW_IN_PROGRESS` の Change Set も併せて消す」という追加規定にすぎない。**正しくは「`delete-change-set` は Change Set を消すだけで、`--change-set-type CREATE` が先に作った親スタック(`REVIEW_IN_PROGRESS` のもの)には触らない」**(スタックを操作する API ではないため)。リソースを持たないスタックが残るという結論と、CREATE 判定との依存関係は変わらない。詳細 → [CloudFormation の CLI コマンドを読み解く §8-2](../notes/cloudformation/cli-commands-and-change-sets.md)
 
 - **1 回の `cfn-deploy` 実行でジョブサマリが 7 ブロック並ぶ**(1 段目の差分と結果、bootstrap、migrate、4 段目の差分と結果、締め)。「タスク数 0」→「タスク数 1」の並びは 2 段階デプロイが効いた記録として読める。見た目のために「呼ばれたときはサマリを出さない」入力を足すことは**しない**
 
