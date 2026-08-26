@@ -1,0 +1,40 @@
+[
+  { "ParameterKey": "EnvName",               "ParameterValue": "stg" },
+  { "ParameterKey": "ProjectName",           "ParameterValue": "nuxt-java-practice" },
+  { "ParameterKey": "DomainName",            "ParameterValue": "mylabinfra.com" },
+  { "ParameterKey": "AppSubdomain",           "ParameterValue": "njp" },
+  { "ParameterKey": "HostedZoneId",           "ParameterValue": "REPLACE_WITH_HOSTED_ZONE_ID" },
+  { "ParameterKey": "EcrRepositoryName",      "ParameterValue": "nuxt-java-practice-ecs" },
+  { "ParameterKey": "SsmParameterPath",       "ParameterValue": "/nuxt-java-practice/stg/" },
+
+  { "ParameterKey": "VpcCidr",                "ParameterValue": "192.168.0.0/20" },
+  { "ParameterKey": "PublicSubnetACidr",      "ParameterValue": "192.168.3.0/24" },
+  { "ParameterKey": "PublicSubnetCCidr",      "ParameterValue": "192.168.4.0/24" },
+  { "ParameterKey": "PrivateSubnetACidr",     "ParameterValue": "192.168.1.0/24" },
+  { "ParameterKey": "PrivateSubnetCCidr",     "ParameterValue": "192.168.2.0/24" },
+
+  { "ParameterKey": "DbInstanceClass",        "ParameterValue": "db.t4g.micro" },
+  { "ParameterKey": "DbAllocatedStorage",     "ParameterValue": "20" },
+  { "ParameterKey": "DbMultiAZ",              "ParameterValue": "false" },
+  { "ParameterKey": "DbBackupRetentionDays",  "ParameterValue": "0" },
+  { "ParameterKey": "DbPerformanceInsights",  "ParameterValue": "false" },
+  { "ParameterKey": "DbMonitoringInterval",   "ParameterValue": "60" },
+  { "ParameterKey": "DbName",                 "ParameterValue": "app" },
+  { "ParameterKey": "DbMasterUsername",       "ParameterValue": "admin" },
+  { "ParameterKey": "DbAppUsername",          "ParameterValue": "app" },
+  { "ParameterKey": "DbMigrateUsername",      "ParameterValue": "migrate" },
+
+  { "ParameterKey": "WebCpu",                 "ParameterValue": "512" },
+  { "ParameterKey": "WebMemory",              "ParameterValue": "1024" },
+  { "ParameterKey": "WebDesiredCount",        "ParameterValue": "1" },
+  { "ParameterKey": "WebCapacityProvider",    "ParameterValue": "FARGATE_SPOT" },
+  { "ParameterKey": "WebMinCapacity",         "ParameterValue": "1" },
+  { "ParameterKey": "WebMaxCapacity",         "ParameterValue": "2" },
+  { "ParameterKey": "WebCpuTarget",           "ParameterValue": "60" },
+  { "ParameterKey": "WebMemoryTarget",        "ParameterValue": "70" },
+  { "ParameterKey": "BakeTimeInMinutes",      "ParameterValue": "0" },
+  { "ParameterKey": "ContainerInsights",      "ParameterValue": "enhanced" },
+
+  { "ParameterKey": "LogRetentionDays",       "ParameterValue": "7" },
+  { "ParameterKey": "EnableBasicAuth",        "ParameterValue": "true" }
+]

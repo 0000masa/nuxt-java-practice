@@ -1,0 +1,1378 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+# =============================================================================
+# 投稿アプリの検証環境(1 スタックで作り捨て)
+# =============================================================================
+# 設計 → docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md
+# 運用 → docs/infrastructure/README.md
+#
+# このテンプレートは「共通部分」で、環境ごとの値は params/<env>.json から渡す。
+# prod を作るときは params/prod.json を足すだけで、このファイルは触らない。
+#
+# 手動管理(このスタックが作らないもの):
+#   Route53 ホストゾーン / ECR リポジトリ / OIDC プロバイダ / IAM ロール 3 つ /
+#   SSM の SecureString 4 つ
+#
+# 建てる手順は 2 段階(DesiredCount を 0 → N)。理由は設計書の決定12。
+# =============================================================================
+
+Description: 投稿アプリの検証環境(ALB + ECS Fargate + RDS MySQL)
+
+# -----------------------------------------------------------------------------
+# パラメータ
+# -----------------------------------------------------------------------------
+# CloudFormation の Parameters は String / Number / List しか持てないため、
+# Terraform の rds_config のような構造化した型は使えず、各フィールドを平坦に開く。
+# 環境差分をテンプレートに直書きしない(Mappings を使わない)のは、prod を追加するときに
+# 共通部分を編集しなくて済むようにするため。設計書の決定2。
+# -----------------------------------------------------------------------------
+Parameters:
+  EnvName:
+    Type: String
+    AllowedValues: [stg, prod]
+    Description: 環境名。リソース名とタグに入る
+
+  ProjectName:
+    Type: String
+    Default: nuxt-java-practice
+    Description: リソース名の接頭辞
+
+  DomainName:
+    Type: String
+    Description: 手動管理のホストゾーンのドメイン(例 mylabinfra.com)
+
+  AppSubdomain:
+    Type: String
+    Description: アプリの階層。FQDN は <EnvName>.<AppSubdomain>.<DomainName> になる
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: >-
+      手動管理のホストゾーンの ID。CloudFormation には Terraform の
+      data "aws_route53_zone" に相当する仕組みが無いので外から渡す
+
+  EcrRepositoryName:
+    Type: String
+    Description: 手動管理の ECR リポジトリ名。イメージ URI はアカウント ID とリージョンから組み立てる
+
+  ImageTag:
+    Type: String
+    Description: ECR のイメージタグ(コミットの短縮 SHA)。ecr-push.yml のジョブサマリに出る値
+
+  SsmParameterPath:
+    Type: String
+    Description: 手動作成した SecureString の置き場(末尾スラッシュあり。例 /nuxt-java-practice/stg/)
+    AllowedPattern: ^/.*/$
+
+  # この値だけ SSM に置かずパラメータで受けている理由。
+  # 他の機密(DB パスワード、Google の ID / シークレット)は SSM の SecureString に置き、
+  # ECS のタスク定義の Secrets / ValueFrom で注入している。CloudFormation は値を読まない。
+  # しかしこの値は WAF のルールに埋め込む必要があり、同じ手が使えない。
+  # SecureString をテンプレートから読む手段は {{resolve:ssm-secure:...}} だが、
+  # これは対応プロパティが 11 個(RDS の MasterUserPassword、IAM ユーザーの LoginProfile.Password など)
+  # に限定されていて、AWS::WAFv2::WebACL の ByteMatchStatement.SearchString は入っていない。
+  # 平文の {{resolve:ssm:...}} にはプロパティの制限が無いが、SSM 側を平文の String 型で
+  # 持つことになるので採らない。
+  # → https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references-ssm-secure-strings.html
+  # → docs/adr/0006-basic-auth-with-waf.md
+  BasicAuthCredential:
+    Type: String
+    NoEcho: true
+    Default: ""
+    Description: >-
+      Basic 認証の生の資格情報 "user:pass"。base64 化はテンプレート側で行う。
+      params ファイルには置かず、GitHub の Environment secret からワークフローが渡す
+
+  # --- ネットワーク ---
+  VpcCidr:
+    Type: String
+    Default: 192.168.0.0/20
+  PublicSubnetACidr:
+    Type: String
+    Default: 192.168.3.0/24
+  PublicSubnetCCidr:
+    Type: String
+    Default: 192.168.4.0/24
+  PrivateSubnetACidr:
+    Type: String
+    Default: 192.168.1.0/24
+  PrivateSubnetCCidr:
+    Type: String
+    Default: 192.168.2.0/24
+
+  # --- RDS ---
+  DbInstanceClass:
+    Type: String
+    Description: prod は db.t4g.medium 以上(Performance Insights の対応もそこから)
+  DbAllocatedStorage:
+    Type: Number
+    MinValue: 20
+  DbMultiAZ:
+    Type: String
+    AllowedValues: ["true", "false"]
+  DbBackupRetentionDays:
+    Type: Number
+    MinValue: 0
+    MaxValue: 35
+    Description: 0 で自動バックアップ無効。撤収前提の stg は 0
+  DbPerformanceInsights:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Description: >-
+      db.t4g の micro / small は非対応で、true にすると
+      InvalidParameterCombination で失敗する(選択ではなく制約)
+  DbMonitoringInterval:
+    Type: Number
+    AllowedValues: [0, 1, 5, 10, 15, 30, 60]
+    Description: 拡張モニタリングの収集間隔(秒)。0 で無効。60 秒なら取り込み量が CloudWatch Logs の無料枠に収まる
+  DbName:
+    Type: String
+    Default: app
+  DbMasterUsername:
+    Type: String
+    Default: admin
+    Description: パスワードは RDS が生成して Secrets Manager が保持する(ManageMasterUserPassword)
+  DbAppUsername:
+    Type: String
+    Default: app
+    Description: DML だけを持つユーザー。db-bootstrap タスクが作る → docs/adr/0005
+  DbMigrateUsername:
+    Type: String
+    Default: migrate
+    Description: DDL を持つユーザー。db-migrate タスクだけが使う
+
+  # --- ECS ---
+  WebCpu:
+    Type: String
+    AllowedValues: ["256", "512", "1024", "2048", "4096"]
+  WebMemory:
+    Type: String
+    Description: MiB。WebCpu と組み合わせが決まっている
+  WebDesiredCount:
+    Type: Number
+    MinValue: 0
+    Description: >-
+      ワークフローが 1 段目で 0 を渡す(ユーザー作成前にタスクを起動できないため)。
+      0 のときはオートスケーリングも作らない
+  WebCapacityProvider:
+    Type: String
+    AllowedValues: [FARGATE, FARGATE_SPOT]
+    Description: stg は FARGATE_SPOT(約 70% 安い。中断は検証環境なら許容)
+  WebMinCapacity:
+    Type: Number
+    MinValue: 1
+  WebMaxCapacity:
+    Type: Number
+    MinValue: 1
+  WebCpuTarget:
+    Type: Number
+    Description: CPU 使用率の目標値(%)。これを超えるとスケールアウト
+  WebMemoryTarget:
+    Type: Number
+  BakeTimeInMinutes:
+    Type: Number
+    MinValue: 0
+    MaxValue: 10080
+    Description: Blue/Green の切替後に blue を残す時間。stg は 0、prod は自動ロールバックの猶予として 30〜60
+  ContainerInsights:
+    Type: String
+    AllowedValues: [enhanced, enabled, disabled]
+
+  # --- その他 ---
+  LogRetentionDays:
+    Type: Number
+    AllowedValues: [1, 3, 5, 7, 14, 30, 60, 90, 180, 365]
+  EnableBasicAuth:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Description: WAF による Basic 認証。stg は true / prod は false → docs/adr/0006
+
+# -----------------------------------------------------------------------------
+# 定数
+# -----------------------------------------------------------------------------
+Mappings:
+  # CloudFront のマネージドポリシーは ID を直書きするしかない。
+  # Terraform の data "aws_cloudfront_cache_policy" に相当するデータソースが CloudFormation に無い。
+  CloudFrontManagedPolicy:
+    CachePolicy:
+      # Managed-CachingOptimized
+      Optimized: 658327ea-f89d-4fab-a63d-7e88639e58f6
+    OriginRequestPolicy:
+      # Managed-CORS-S3Origin
+      CorsS3: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf
+
+Conditions:
+  # DesiredCount が 0 の段(ブートストラップ待ち)ではオートスケーリングを作らない。
+  # Application Auto Scaling は MinCapacity を下回る状態を見つけると勝手に増やすため、
+  # 0 のはずのサービスにタスクが立ち上がってクラッシュループする。
+  ServiceEnabled: !Not [!Equals [!Ref WebDesiredCount, 0]]
+
+  BasicAuthEnabled: !Equals [!Ref EnableBasicAuth, "true"]
+
+  EnhancedMonitoringEnabled: !Not [!Equals [!Ref DbMonitoringInterval, 0]]
+
+Resources:
+  # ===========================================================================
+  # ネットワーク
+  # ===========================================================================
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-igw
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  # AZ は Fn::GetAZs で引く。ap-northeast-1 の a / c を直書きしないのは、
+  # リージョンを変えたときにテンプレートを直さなくて済むようにするため。
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-public-a
+
+  PublicSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnetCCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-public-c
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetACidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-private-a
+
+  PrivateSubnetC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnetCCidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-private-c
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetC
+      RouteTableId: !Ref PublicRouteTable
+
+  # NAT Gateway は 1 台だけ(single_nat_gateway 相当)。
+  # プライベートサブネットのタスクが ECR の API・CloudWatch Logs・SSM・SES に出るために必要。
+  # prod では AZ ごとに立てるのが定石だが、そのときはこのリソースと EIP を 2 組にする。
+  NatGatewayEip:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-nat-eip
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEip.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-nat
+
+  # プライベート側のルートテーブルは AZ ごとに分ける。
+  # NAT が 1 台でも分けておくのは、prod で NAT を 2 台にするときに
+  # ルートの向き先を変えるだけで済むようにするため。
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-private-rt-a
+
+  PrivateRouteTableC:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-private-rt-c
+
+  PrivateDefaultRouteA:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateDefaultRouteC:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableC
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateSubnetCRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetC
+      RouteTableId: !Ref PrivateRouteTableC
+
+  # VPC エンドポイントはこれだけ。ゲートウェイ型は時間課金もデータ処理課金も無く、
+  # ENI ではなくルートテーブルにルートが入る仕組みなので無料で置ける。
+  # 画像(フェーズ6)の S3 通信に加え、ECR のイメージレイヤーの実体は S3 にあるため
+  # pull の転送量も NAT を通らなくなる(ECR の API 呼び出し自体は NAT 経由のまま)。
+  # ゲートウェイ型が使えるのは S3 と DynamoDB だけで、logs / ssm / ses は Interface 型しかない。
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref Vpc
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PrivateRouteTableA
+        - !Ref PrivateRouteTableC
+
+  # ===========================================================================
+  # セキュリティグループ
+  # ===========================================================================
+  # ALB は 0.0.0.0/0 に開ける。外部からの隔離は WAF の Basic 認証が担う(→ docs/adr/0006)。
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ProjectName}-${EnvName} ALB
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS へのリダイレクト用
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: 本番の経路
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-alb-sg
+
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ProjectName}-${EnvName} ECS tasks
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-ecs-sg
+
+  # ALB → ECS は 8080(Spring Boot の組み込み Tomcat)。Nginx を使わないので 80 ではない。
+  # SG のルールを別リソースにしているのは、ALB SG と ECS SG が相互参照になると
+  # CloudFormation が循環依存として拒否するため。
+  EcsSecurityGroupIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: ALB からのみ
+
+  # 外向きは全開。ECR / CloudWatch Logs / SSM / Secrets Manager / SES / S3 に出る必要がある。
+  EcsSecurityGroupEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref EcsSecurityGroup
+      IpProtocol: "-1"
+      CidrIp: 0.0.0.0/0
+      Description: AWS の各サービスへ(NAT 経由)
+
+  RdsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ProjectName}-${EnvName} RDS
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+          Description: ECS タスクからのみ(サービス / bootstrap / migrate)
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-rds-sg
+
+  # ===========================================================================
+  # 証明書と DNS
+  # ===========================================================================
+  # DomainValidationOptions に HostedZoneId を渡すと、CloudFormation が検証用の CNAME を
+  # 自分で作り、発行完了まで待ってくれる。Terraform で必要だった
+  # 「domain_validation_options を for_each して Route53 レコードを作る」20 行が要らない。
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Sub ${EnvName}.${AppSubdomain}.${DomainName}
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Sub ${EnvName}.${AppSubdomain}.${DomainName}
+          HostedZoneId: !Ref HostedZoneId
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-cert
+
+  # ホストゾーンは手動管理。スタックが出し入れするのは中のレコードだけ。
+  AppDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub ${EnvName}.${AppSubdomain}.${DomainName}
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt LoadBalancer.DNSName
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
+        EvaluateTargetHealth: true
+
+  # ===========================================================================
+  # SES
+  # ===========================================================================
+  # このスタックに含める代償: 撤収すると DKIM の CNAME も消え、再構築時に検証が
+  # 通るまでメールが飛ばない。しかも EmailIdentity は検証完了を待たずに
+  # CREATE_COMPLETE になるので「スタックは成功したのにメールだけ来ない」状態を踏む。
+  # 設計書の決定5。
+  EmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Sub ${EnvName}.${AppSubdomain}.${DomainName}
+      DkimAttributes:
+        SigningEnabled: true
+
+  # count / for_each が無いので 3 本べた書きする。
+  DkimRecord1:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !GetAtt EmailIdentity.DkimDNSTokenName1
+      Type: CNAME
+      TTL: 600
+      ResourceRecords:
+        - !GetAtt EmailIdentity.DkimDNSTokenValue1
+
+  DkimRecord2:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !GetAtt EmailIdentity.DkimDNSTokenName2
+      Type: CNAME
+      TTL: 600
+      ResourceRecords:
+        - !GetAtt EmailIdentity.DkimDNSTokenValue2
+
+  DkimRecord3:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !GetAtt EmailIdentity.DkimDNSTokenName3
+      Type: CNAME
+      TTL: 600
+      ResourceRecords:
+        - !GetAtt EmailIdentity.DkimDNSTokenValue3
+
+  # ===========================================================================
+  # ロググループ
+  # ===========================================================================
+  # RDS のロググループを明示的に作って RDS に DependsOn させる。
+  # 先に消えると、RDS が削除処理中の最終書き込みで同名のロググループを作り直し、
+  # スタック管理外の孤児(保持期間 無期限)が残る。
+  EcsLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /ecs/${ProjectName}-${EnvName}
+      RetentionInDays: !Ref LogRetentionDays
+
+  RdsErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/rds/instance/${ProjectName}-${EnvName}-db/error
+      RetentionInDays: !Ref LogRetentionDays
+
+  RdsSlowQueryLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/rds/instance/${ProjectName}-${EnvName}-db/slowquery
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ===========================================================================
+  # RDS
+  # ===========================================================================
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: !Sub ${ProjectName}-${EnvName}
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-db-subnet-group
+
+  # スロークエリログは既定のパラメータグループでは生成すらされないので有効化する。
+  # フェーズ8(検索ラボ)とフェーズ10(index 実験)で使う。
+  # 注意: MariaDB は 10.11 で変数名が変わったが(log_slow_query など)、MySQL は従来名のまま。
+  # 参考にした Terraform リポジトリは MariaDB なので、あちらの変数名はここでは通らない。
+  DbParameterGroup:
+    Type: AWS::RDS::DBParameterGroup
+    Properties:
+      Description: !Sub ${ProjectName}-${EnvName} MySQL 8.4
+      Family: mysql8.4
+      Parameters:
+        slow_query_log: "1"
+        # 秒。MySQL の既定は 10 秒だが、Web アプリで 10 秒は既に大事故なので 1 秒に締める
+        long_query_time: "1"
+        # CloudWatch Logs へのエクスポートは「インスタンス内のログファイルを転送する」仕組みなので、
+        # 既定の TABLE のままだと mysql.slow_log テーブルに書かれ、転送すべきファイルが存在しない。
+        # エラーログはこの設定に関係なく常にファイル出力される。
+        log_output: FILE
+
+  RdsMonitoringRole:
+    Type: AWS::IAM::Role
+    Condition: EnhancedMonitoringEnabled
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-rds-monitoring-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    # 【重要】RDS だけは DeletionPolicy の既定が Delete ではなく Snapshot。
+    # 明示しないとスタックを消してもスナップショットが残って課金が続く。
+    # UpdateReplacePolicy も同じ理由で明示する(作り直しが起きたときの取り残し防止)。
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    DependsOn:
+      - RdsErrorLogGroup
+      - RdsSlowQueryLogGroup
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${EnvName}-db
+      Engine: mysql
+      # 開発環境(docker compose の mysql:8)が 8.4.x なので合わせる
+      EngineVersion: "8.4"
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbAllocatedStorage
+      StorageType: gp3
+      StorageEncrypted: true
+      DBName: !Ref DbName
+      MasterUsername: !Ref DbMasterUsername
+      # パスワードを渡さない。RDS が生成して Secrets Manager にシークレットを作る。
+      # テンプレートにも SSM にも手元にも値が現れず、DB を消すとシークレットも消える。
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups:
+        - !Ref RdsSecurityGroup
+      DBParameterGroupName: !Ref DbParameterGroup
+      PubliclyAccessible: false
+      MultiAZ: !Ref DbMultiAZ
+      BackupRetentionPeriod: !Ref DbBackupRetentionDays
+      DeleteAutomatedBackups: true
+      CopyTagsToSnapshot: true
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: !Ref DbPerformanceInsights
+      MonitoringInterval: !Ref DbMonitoringInterval
+      # 拡張モニタリングが無効(0)のときにロールを渡すと組み合わせエラーになるので外す
+      MonitoringRoleArn: !If
+        - EnhancedMonitoringEnabled
+        - !GetAtt RdsMonitoringRole.Arn
+        - !Ref AWS::NoValue
+      EnableCloudwatchLogsExports:
+        - error
+        - slowquery
+      # UTC。JST では月曜 00:00-00:30
+      PreferredMaintenanceWindow: sun:15:00-sun:15:30
+      # UTC。JST 02:00-02:30(メンテナンスウィンドウと重ならないように)
+      PreferredBackupWindow: "17:00-17:30"
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-db
+
+  # ===========================================================================
+  # 画像用の S3 と CloudFront
+  # ===========================================================================
+  # フェーズ6(画像)で使う。撤収時はワークフローが aws s3 rm --recursive で空にしてから
+  # delete-stack する(素の CloudFormation に force_destroy 相当は無い)。
+  ImageBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub ${ProjectName}-${EnvName}-images
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ImageOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${ProjectName}-${EnvName}-images-oac
+        Description: 画像バケットへは CloudFront 経由のみ
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # 独自ドメインは付けない。CloudFront 用の ACM 証明書は us-east-1 にしか置けず、
+  # スタックは 1 リージョンに閉じるため、付けるとクロスリージョンの分割が必要になる。
+  # 画像 URL はオブジェクトキーとこのドメインから組み立てる設計なのでアプリ側は影響を受けない。
+  ImageDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        IsIPV6Enabled: true
+        Comment: !Sub ${ProjectName}-${EnvName}-images
+        Origins:
+          - Id: image-bucket
+            DomainName: !GetAtt ImageBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt ImageOriginAccessControl.Id
+            S3OriginConfig: {}
+        DefaultCacheBehavior:
+          TargetOriginId: image-bucket
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          CachePolicyId: !FindInMap [CloudFrontManagedPolicy, CachePolicy, Optimized]
+          OriginRequestPolicyId: !FindInMap [CloudFrontManagedPolicy, OriginRequestPolicy, CorsS3]
+
+  ImageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ImageBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipal
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub ${ImageBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${ImageDistribution}
+
+  # ===========================================================================
+  # ALB
+  # ===========================================================================
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-alb
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetC
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-alb
+
+  # ECS ネイティブ Blue/Green はターゲットグループを 2 つ使い、デプロイのたびに
+  # 本番用リスナールールの重みを入れ替える。
+  # ヘルスチェックは actuator の liveness(DB を含まない)。DB を含む health を使うと
+  # RDS が一時的に落ちたときに全タスクが unhealthy になって入れ替わり続ける。
+  TargetGroupBlue:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-tg-blue
+      VpcId: !Ref Vpc
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /api/actuator/health/liveness
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        # 撤収前提の検証環境なので、切り離しを待たせる意味がない
+        - Key: deregistration_delay.timeout_seconds
+          Value: "10"
+
+  TargetGroupGreen:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-tg-green
+      VpcId: !Ref Vpc
+      Port: 8080
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /api/actuator/health/liveness
+      HealthCheckIntervalSeconds: 15
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "10"
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: redirect
+          RedirectConfig:
+            Protocol: HTTPS
+            Port: "443"
+            StatusCode: HTTP_301
+
+  # 既定は 403 で落とす。想定したホスト名で来たものだけを下のルールが通す。
+  # Blue/Green の重み入れ替えはリスナールール側で行われる。
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref Certificate
+      DefaultActions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "403"
+            ContentType: text/plain
+            MessageBody: Forbidden
+
+  # ECS がデプロイ中にこのルールの重みを書き換える。
+  # Terraform では ignore_changes = [action] が必要だったが、CloudFormation は
+  # 実リソースの状態を読み直さず「前回のテンプレート」との差分だけを適用するので不要。
+  # ただし後でこのリソースの定義を編集すると、そのとき重みもテンプレートの値に戻る。
+  ProductionListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 100
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Sub ${EnvName}.${AppSubdomain}.${DomainName}
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref TargetGroupBlue
+                Weight: 1
+              - TargetGroupArn: !Ref TargetGroupGreen
+                Weight: 0
+
+  # ===========================================================================
+  # WAF(Basic 認証)
+  # ===========================================================================
+  # ALB のリスナールールでは実現できない。fixed-response が WWW-Authenticate ヘッダーを
+  # 付けられず、ブラウザが認証ダイアログを出さないため。WAF のカスタムレスポンスなら
+  # 任意のヘッダーを付けられる。→ docs/adr/0006
+  WebAcl:
+    Type: AWS::WAFv2::WebACL
+    Condition: BasicAuthEnabled
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-basic-auth
+      # ALB は REGIONAL。CLOUDFRONT スコープの Web ACL は us-east-1 にしか作れない
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${ProjectName}-${EnvName}-basic-auth
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: RequireBasicAuth
+          Priority: 0
+          Statement:
+            NotStatement:
+              Statement:
+                ByteMatchStatement:
+                  FieldToMatch:
+                    SingleHeader:
+                      Name: authorization
+                  PositionalConstraint: EXACTLY
+                  # Terraform の base64encode(var.basic_auth_credential) に相当。
+                  # !Base64 !Ref と短縮形を 2 つ重ねられない(YAML が 1 ノードに
+                  # タグを 2 つ許さない)ので Fn::Base64 は長い形式で書く。
+                  # このプロパティは {{resolve:ssm-secure:...}} の対応表に無いので、
+                  # SSM の SecureString からは渡せない(→ Parameters の BasicAuthCredential)。
+                  SearchString: !Sub
+                    - Basic ${b64}
+                    - b64:
+                        Fn::Base64: !Ref BasicAuthCredential
+                  TextTransformations:
+                    - Priority: 0
+                      Type: NONE
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 401
+                ResponseHeaders:
+                  - Name: www-authenticate
+                    Value: Basic realm="restricted"
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: RequireBasicAuth
+            SampledRequestsEnabled: true
+      # マネージドルールは入れない。フェーズ8 の検索ラボが SQL に似たキーワードを送るので
+      # SQLi のルールに引っかかって検証が壊れる。
+
+  WebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Condition: BasicAuthEnabled
+    Properties:
+      ResourceArn: !Ref LoadBalancer
+      WebACLArn: !GetAtt WebAcl.Arn
+
+  # ===========================================================================
+  # IAM(ECS)
+  # ===========================================================================
+  # 実行ロール: ECR から pull し、ログを書き、secrets を読む。コンテナの中身は使わない。
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-task-execution-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # SSM の SecureString(手動作成の 4 つ)。既定の aws/ssm キーで暗号化されているので
+              # kms:Decrypt を明示する必要はない
+              - Sid: SsmSecureStrings
+                Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}*
+              # RDS が作るマスターパスワードのシークレット
+              - Sid: RdsMasterSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+
+  # タスクロール: アプリ自身が使う権限。
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AppPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # メール送信。SMTP 認証を使わないので IAM ユーザーも長期クレデンシャルも要らない
+              - Sid: SendEmail
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${EmailIdentity}
+              # 画像(フェーズ6)
+              - Sid: ImageObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub ${ImageBucket.Arn}/*
+              - Sid: ImageBucketList
+                Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt ImageBucket.Arn
+              # ECS Exec(コンテナに入って調査する)。ssmmessages はリソース単位に縛れない
+              - Sid: EcsExec
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # ブートストラップ専用のタスクロール。マスター資格情報を読めるのはここだけで、
+  # アプリのタスクロールには渡らない(→ docs/adr/0005)。
+  BootstrapTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-bootstrap-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # ECS が ALB のリスナールールの重みを書き換えるために引き受けるロール。
+  # ネイティブ Blue/Green に必須。
+  EcsInfrastructureRoleForLoadBalancers:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-ecs-infra-lb-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+
+  # ===========================================================================
+  # ECS
+  # ===========================================================================
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${ProjectName}-${EnvName}-cluster
+      ClusterSettings:
+        - Name: containerInsights
+          Value: !Ref ContainerInsights
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+
+  # アプリのタスク定義。Flyway は走らせない(FLYWAY_ENABLED=false)。
+  AppTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ProjectName}-${EnvName}-app
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref WebCpu
+      Memory: !Ref WebMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: app
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: DB_HOST
+              Value: !GetAtt Database.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt Database.Endpoint.Port
+            - Name: DB_NAME
+              Value: !Ref DbName
+            - Name: DB_USER
+              Value: !Ref DbAppUsername
+            # マイグレーションは db-migrate タスクが済ませている
+            - Name: FLYWAY_ENABLED
+              Value: "false"
+            # メール本文のリンクと Google の redirect_uri の組み立てに使う。
+            # Google Cloud Console の承認済みリダイレクト URI にも
+            # <この値>/api/login/oauth2/code/google を登録しておく必要がある
+            - Name: APP_BASE_URL
+              Value: !Sub https://${EnvName}.${AppSubdomain}.${DomainName}
+            - Name: MAIL_TRANSPORT
+              Value: ses
+            - Name: MAIL_FROM
+              Value: !Sub no-reply@${EnvName}.${AppSubdomain}.${DomainName}
+            - Name: S3_BUCKET
+              Value: !Ref ImageBucket
+            - Name: IMAGE_CDN_DOMAIN
+              Value: !GetAtt ImageDistribution.DomainName
+          Secrets:
+            # RDS が Secrets Manager に作ったシークレットから password キーだけを注入する
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub '${Database.MasterUserSecret.SecretArn}:password::'
+            - Name: GOOGLE_CLIENT_ID
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_id
+            - Name: GOOGLE_CLIENT_SECRET
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_secret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: app
+
+  # マイグレーション用。同じイメージを APP_TASK=migrate で起動し、
+  # Flyway を流して終了する。DDL 権限を持つ migrate ユーザーを使う。
+  MigrateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ProjectName}-${EnvName}-db-migrate
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      # アプリの権限は要らない(SES も S3 も触らない)。ロールを分けたいところだが、
+      # 実行ロールと違いタスクロールは省略できるので付けない。
+      ContainerDefinitions:
+        - Name: migrate
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}
+          Essential: true
+          Environment:
+            - Name: APP_TASK
+              Value: migrate
+            - Name: DB_HOST
+              Value: !GetAtt Database.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt Database.Endpoint.Port
+            - Name: DB_NAME
+              Value: !Ref DbName
+            # datasource は app ユーザー(JPA の validate に使う)、Flyway だけ migrate ユーザー
+            - Name: DB_USER
+              Value: !Ref DbAppUsername
+            - Name: FLYWAY_ENABLED
+              Value: "true"
+            - Name: FLYWAY_DB_USER
+              Value: !Ref DbMigrateUsername
+            # Web を立てるが ALB には登録されないので、ポートは何番でもよい
+            - Name: SERVER_PORT
+              Value: "8080"
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
+            - Name: FLYWAY_DB_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}migrate_db_password
+            - Name: GOOGLE_CLIENT_ID
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_id
+            - Name: GOOGLE_CLIENT_SECRET
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_secret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: db-migrate
+
+  # ユーザー作成と任意 SQL。mysql の公式イメージ(AWS のミラー)を使い、
+  # command を上書きして SQL を流すだけのタスクにする。
+  # SQL を command に埋め込まず環境変数で渡すのは、引用符と改行のエスケープで壊れないため。
+  BootstrapTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ProjectName}-${EnvName}-db-bootstrap
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt BootstrapTaskRole.Arn
+      ContainerDefinitions:
+        - Name: mysql
+          # Docker Hub は匿名 pull にレート制限があるので AWS のミラーを使う
+          Image: public.ecr.aws/docker/library/mysql:8
+          Essential: true
+          EntryPoint: [sh, -c]
+          # 環境変数 SQL が空なら「ユーザー作成」、入っていればその SQL を流す。
+          # db-task.yml は action=sql のとき containerOverrides で SQL と SQL_USER を渡す。
+          #
+          # ユーザー作成の SQL をここ(シェルのダブルクォート内)で組み立てているのは、
+          # 環境変数 SQL の中に $APP_DB_PASSWORD と書いても展開されないため。
+          # "$SQL" を展開した結果の文字列は再展開されないので、パスワードが
+          # リテラルのまま mysql に渡ってしまう。
+          #
+          # 実行ユーザーを secrets ではなく環境変数 SQL_USER で選ばせているのは、
+          # ECS の containerOverrides が environment と command は上書きできるが
+          # secrets は上書きできないため。
+          #
+          # パスワードは MYSQL_PWD で渡す(--password= だとプロセス一覧に出る)。
+          #
+          # 注意: パスワードは SQL の文字列リテラルに埋め込まれる。SSM に置く値に
+          # シングルクォートとバックスラッシュを使わないこと。
+          Command:
+            - !Sub |
+              set -eu
+              if [ "${!SQL_USER:-master}" = "app" ]; then
+                RUN_USER="${DbAppUsername}"
+                MYSQL_PWD="$APP_DB_PASSWORD"
+              else
+                RUN_USER="$MASTER_USER"
+                MYSQL_PWD="$MASTER_PASSWORD"
+              fi
+              export MYSQL_PWD
+              if [ -n "${!SQL:-}" ]; then
+                echo "任意 SQL を ${!RUN_USER} で実行します"
+                exec mysql --host="$DB_HOST" --port="$DB_PORT" --user="$RUN_USER" --batch --table --execute="$SQL"
+              fi
+              echo "app / migrate ユーザーを作成します"
+              exec mysql --host="$DB_HOST" --port="$DB_PORT" --user="$RUN_USER" --batch --execute="
+                CREATE USER IF NOT EXISTS '${DbAppUsername}'@'%' IDENTIFIED BY '$APP_DB_PASSWORD';
+                ALTER USER '${DbAppUsername}'@'%' IDENTIFIED BY '$APP_DB_PASSWORD';
+                GRANT SELECT, INSERT, UPDATE, DELETE ON \`${DbName}\`.* TO '${DbAppUsername}'@'%';
+                CREATE USER IF NOT EXISTS '${DbMigrateUsername}'@'%' IDENTIFIED BY '$MIGRATE_DB_PASSWORD';
+                ALTER USER '${DbMigrateUsername}'@'%' IDENTIFIED BY '$MIGRATE_DB_PASSWORD';
+                GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES ON \`${DbName}\`.* TO '${DbMigrateUsername}'@'%';
+                FLUSH PRIVILEGES;
+              "
+          Environment:
+            - Name: DB_HOST
+              Value: !GetAtt Database.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt Database.Endpoint.Port
+            # 以下 2 つは db-task.yml が action=sql のとき containerOverrides で上書きする
+            - Name: SQL
+              Value: ""
+            - Name: SQL_USER
+              Value: master
+          Secrets:
+            - Name: MASTER_USER
+              ValueFrom: !Sub '${Database.MasterUserSecret.SecretArn}:username::'
+            - Name: MASTER_PASSWORD
+              ValueFrom: !Sub '${Database.MasterUserSecret.SecretArn}:password::'
+            - Name: APP_DB_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
+            - Name: MIGRATE_DB_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}migrate_db_password
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: db-bootstrap
+
+  Service:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${ProjectName}-${EnvName}-app
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref AppTaskDefinition
+      DesiredCount: !Ref WebDesiredCount
+      EnableExecuteCommand: true
+      CapacityProviderStrategy:
+        - CapacityProvider: !Ref WebCapacityProvider
+          Weight: 1
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        # ECS ネイティブ Blue/Green。切替後に blue を残す時間は環境で変える
+        Strategy: BLUE_GREEN
+        BakeTimeInMinutes: !Ref BakeTimeInMinutes
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      # Spring Boot の起動に 30〜60 秒かかる。短いと起動途中に殺され続ける
+      HealthCheckGracePeriodSeconds: 120
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetC
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: app
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroupBlue
+          AdvancedConfiguration:
+            AlternateTargetGroupArn: !Ref TargetGroupGreen
+            ProductionListenerRule: !Ref ProductionListenerRule
+            RoleArn: !GetAtt EcsInfrastructureRoleForLoadBalancers.Arn
+
+  # DesiredCount が 0 の段では作らない(Condition)。
+  # 作ってしまうと Application Auto Scaling が MinCapacity まで増やしてしまい、
+  # ユーザーがまだ存在しない DB につなごうとしてクラッシュループする。
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    Condition: ServiceEnabled
+    Properties:
+      ServiceNamespace: ecs
+      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Sub service/${Cluster}/${Service.Name}
+      MinCapacity: !Ref WebMinCapacity
+      MaxCapacity: !Ref WebMaxCapacity
+
+  CpuScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: ServiceEnabled
+    Properties:
+      PolicyName: !Sub ${ProjectName}-${EnvName}-cpu-target
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageCPUUtilization
+        TargetValue: !Ref WebCpuTarget
+        ScaleInCooldown: 120
+        ScaleOutCooldown: 60
+
+  MemoryScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Condition: ServiceEnabled
+    Properties:
+      PolicyName: !Sub ${ProjectName}-${EnvName}-memory-target
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ECSServiceAverageMemoryUtilization
+        TargetValue: !Ref WebMemoryTarget
+        # メモリは下がりにくいのでスケールインは長めに待つ
+        ScaleInCooldown: 180
+        ScaleOutCooldown: 60
+
+# -----------------------------------------------------------------------------
+# 出力
+# -----------------------------------------------------------------------------
+# ワークフローが run-task の networkConfiguration をここから組み立てる。
+# Terraform 側はこれを SSM パラメータに書き出して受け渡していたが、
+# CloudFormation では describe-stacks で読めるので中継が不要。
+#
+# Export は付けない。他のスタックから ImportValue されると、
+# エクスポート元のスタックを削除できなくなり撤収運用が壊れる。
+# -----------------------------------------------------------------------------
+Outputs:
+  AppUrl:
+    Description: アプリの入口
+    Value: !Sub https://${EnvName}.${AppSubdomain}.${DomainName}
+
+  LoadBalancerDnsName:
+    Description: ALB の DNS 名(DNS 伝播前の切り分けに使う)
+    Value: !GetAtt LoadBalancer.DNSName
+
+  ClusterName:
+    Value: !Ref Cluster
+
+  ServiceName:
+    Value: !GetAtt Service.Name
+
+  PrivateSubnetIds:
+    Description: run-task の networkConfiguration に渡す
+    Value: !Sub ${PrivateSubnetA},${PrivateSubnetC}
+
+  EcsSecurityGroupId:
+    Description: run-task の networkConfiguration に渡す
+    Value: !Ref EcsSecurityGroup
+
+  BootstrapTaskDefinition:
+    Description: db-task.yml が run-task するタスク定義(ユーザー作成 / 任意 SQL)
+    Value: !Ref BootstrapTaskDefinition
+
+  MigrateTaskDefinition:
+    Description: db-task.yml が run-task するタスク定義(Flyway)
+    Value: !Ref MigrateTaskDefinition
+
+  DbEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
+
+  DbMasterSecretArn:
+    Description: RDS が作ったマスターパスワードのシークレット(手元から DB に入るときに読む)
+    Value: !GetAtt Database.MasterUserSecret.SecretArn
+
+  ImageBucketName:
+    Description: 撤収時に空にするバケット
+    Value: !Ref ImageBucket
+
+  ImageCdnDomain:
+    Value: !GetAtt ImageDistribution.DomainName
+
+  SesIdentity:
+    Description: 検証が完了するまでメールは送れない(スタックの成功とは無関係)
+    Value: !Ref EmailIdentity
