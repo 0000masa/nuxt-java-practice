@@ -26,7 +26,7 @@
 - `--tags` に `Project` / `Env` / `ManagedBy` の 3 つを毎回渡す(省略するとスタックのタグが失われる)
 - Change Set を作って差分をジョブサマリに出す一式(`cfn-deploy.yml` の `dry_run` 側)
 
-**先例が同じリポジトリにあった。** `db-task.yml` は `workflow_dispatch` と `workflow_call` の両方を持ち、`cfn-deploy.yml` が bootstrap と migrate をそこへ委譲している([決定13](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md))。`run-task` の待ち合わせが 1 か所で済んでいるのと同じ形を、CloudFormation の叩き方にも適用する。
+**先例が同じリポジトリにあった。** `db-task.yml` は `workflow_dispatch` と `workflow_call` の両方を持ち、`cfn-deploy.yml` が create-db-users と migrate をそこへ委譲している([決定13](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md))。`run-task` の待ち合わせが 1 か所で済んでいるのと同じ形を、CloudFormation の叩き方にも適用する。
 
 **委譲したことで消えた配線が 1 つある。** これまで `deploy-zero` が params から `WebDesiredCount` を読んで `outputs` で `deploy-service` に渡していたが、`cfn-apply.yml` は元から params を丸ごと読むので、**`web_desired_count` を渡さなければ params の値に収束する。** params を読む jq が 1 か所になった。
 
@@ -39,7 +39,7 @@
 | そのとき走っている処理 | スタックの状態 | dispatch された cfn-apply |
 |---|---|---|
 | cfn-deploy 1 段目 | `CREATE_IN_PROGRESS` / `UPDATE_IN_PROGRESS` | 状態チェックで落ちる |
-| cfn-deploy 2〜3 段目(bootstrap / migrate) | `CREATE_COMPLETE` だが `WebDesiredCount` が 0 | DesiredCount チェックで落ちる |
+| cfn-deploy 2〜3 段目(create-db-users / migrate) | `CREATE_COMPLETE` だが `WebDesiredCount` が 0 | DesiredCount チェックで落ちる |
 | cfn-deploy 4 段目 | `UPDATE_IN_PROGRESS` | 状態チェックで落ちる |
 | cfn-destroy | `DELETE_IN_PROGRESS` | 状態チェックで落ちる |
 
@@ -49,7 +49,7 @@
 
 - **共通部分を 4 本目 `cfn-stack.yml`(`workflow_call` 専用)に抽出し、`cfn-deploy` と `cfn-apply` の両方が呼ぶ** — 入口(`concurrency` と guard を持つ)と機構(持たない)が分かれるので、構造としては一番きれい。採らなかったのは、`cfn-apply` の precheck が別ジョブに切り出されて **AssumeRole が 1 回増えてジョブも 1 つ増える**割に、呼び出し側が 2 つしかないため
 
-- **`mode` 入力 1 つ(`apply` / `create` / `start`)で分岐する** — 呼び出し側は 3 入力で済み一番短い。採らなかったのは、**2 段階デプロイの理由(なぜ 0 で作るのか)が `cfn-apply.yml` の中に流れ込む**ため。`db-task.yml` が `action: bootstrap|migrate|sql` という「何をするか」しか受け取らず、**なぜ bootstrap が先なのかを知らない**のと同じ関係を保ちたかった
+- **`mode` 入力 1 つ(`apply` / `create` / `start`)で分岐する** — 呼び出し側は 3 入力で済み一番短い。採らなかったのは、**2 段階デプロイの理由(なぜ 0 で作るのか)が `cfn-apply.yml` の中に流れ込む**ため。`db-task.yml` が `action: create-db-users|migrate|sql` という「何をするか」しか受け取らず、**なぜ create-db-users が先なのかを知らない**のと同じ関係を保ちたかった
 
 - **guard を外すフラグを 1 つに束ねる(`initial_build: true` のような)** — 呼び出し側は読みやすくなるが、4 段目でも「スタックが無くてもよい」が同時に開く。`needs` で 1 段目の後に走るので実際には起きないが、**安全弁は外す範囲を最小にする**ほうを採った([決定18](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md) が任意 SQL を stg 限定にし、実行ユーザーの既定を DDL 不可の `app` にしたのと同じ思想)
 
@@ -65,7 +65,7 @@
 
   **追記(2026-08-24):括弧内の「`delete-change-set` が消すのはネストスタックだけ」は誤り。** [`DeleteChangeSet`](https://docs.aws.amazon.com/AWSCloudFormation/latest/APIReference/API_DeleteChangeSet.html) は指定した Change Set を消すコマンドで、ネストスタックの話は「`IncludeNestedStacks=True` で作った場合は階層に属する Change Set も、そしてネストスタックの `REVIEW_IN_PROGRESS` の Change Set も併せて消す」という追加規定にすぎない。**正しくは「`delete-change-set` は Change Set を消すだけで、`--change-set-type CREATE` が先に作った親スタック(`REVIEW_IN_PROGRESS` のもの)には触らない」**(スタックを操作する API ではないため)。リソースを持たないスタックが残るという結論と、CREATE 判定との依存関係は変わらない。詳細 → [CloudFormation の CLI コマンドを読み解く §8-2](../notes/cloudformation/cli-commands-and-change-sets.md)
 
-- **1 回の `cfn-deploy` 実行でジョブサマリが 7 ブロック並ぶ**(1 段目の差分と結果、bootstrap、migrate、4 段目の差分と結果、締め)。「タスク数 0」→「タスク数 1」の並びは 2 段階デプロイが効いた記録として読める。見た目のために「呼ばれたときはサマリを出さない」入力を足すことは**しない**
+- **1 回の `cfn-deploy` 実行でジョブサマリが 7 ブロック並ぶ**(1 段目の差分と結果、create-db-users、migrate、4 段目の差分と結果、締め)。「タスク数 0」→「タスク数 1」の並びは 2 段階デプロイが効いた記録として読める。見た目のために「呼ばれたときはサマリを出さない」入力を足すことは**しない**
 
 - **4 段目にも Change Set の差分と Replacement の安全弁が付いた**(これまで `deploy` を直に叩いていたので差分は出ていなかった)
 

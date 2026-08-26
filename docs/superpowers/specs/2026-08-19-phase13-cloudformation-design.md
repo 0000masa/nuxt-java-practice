@@ -16,7 +16,7 @@
 **やること**
 
 - CloudFormation テンプレート `cloudformation/app.yml` と環境ごとのパラメータファイル
-- GitHub Actions のワークフロー 3 本(構築 / DB タスク / 撤収)
+- GitHub Actions のワークフロー 4 本(構築 / 反映 / DB タスク / 撤収)
 - 上記に必要なアプリ側の変更(actuator、SES 送信、Flyway の切り離し)
 - 手動で作るもの(IAM ロール 2 つ、SSM パラメータ、Google Console の設定)の手順書
 
@@ -41,7 +41,13 @@ cloudformation/
 └── README.md
 ```
 
-**CloudFormation には Terraform の module に相当する仕組みがない。** テンプレートは 1 ファイルで自己完結する必要があり、同じディレクトリの YAML を連結する機能もない。ファイルを分ける唯一の手段はネストスタック(子テンプレートを S3 に置く)か、スタック自体の分割。
+**CloudFormation には Terraform の module に相当する仕組みがない。** テンプレートは 1 ファイルで自己完結する必要があり、同じディレクトリの YAML を自動で連結する機能もない。ファイルを分ける手段は 3 つある。
+
+| 手段 | S3 | 主な代償 |
+|---|---|---|
+| `AWS::Include` transform | **必須**(`Location` は `s3://` のみ) | マクロなので Change Set 経由でしか展開されず、`validate-template` で中身が見えない。`CAPABILITY_AUTO_EXPAND` も要る |
+| ネストスタック | **必須**(子は `TemplateURL` のみ。`TemplateBody` は Cloud Control API 専用) | 親子間の値の受け渡しを手書き。Change Set が入れ子 |
+| スタック自体の分割 | **不要** | `Export` / `ImportValue` に縛られ、参照されているスタックを削除できない |
 
 ネストスタックを採らなかった理由:
 
@@ -52,6 +58,8 @@ cloudformation/
 - **このリポジトリはライフサイクルが 1 つしかない**(全部まとめて建てて全部まとめて消す)。AWS 公式が示す分割基準(ライフサイクルと所有者で分ける)に照らしても分ける理由が弱い
 
 代償: `app.yml` が 700〜900 行の単一ファイルになる。実際に運用して読みにくさが問題になったら、そのときネストスタックへの分割を別フェーズでやる。
+
+**追記(2026-08-21):書き上げた `app.yml` は 1365 行・54,178 バイトになり、「リクエストに直接載せられるテンプレートの上限 51,200 バイト」を超えた。** そのため**テンプレート置き場の S3 バケットは、ネストスタックを採らなくても必要になった。** ここでネストスタックを却下した理由の 1 つ(「子テンプレート置き場の S3 バケットが手動管理の常駐リソースとして増える」)は、もはや分割しないことの利点ではない。残る理由(親子間の値の受け渡しを全部手書き、Change Set が入れ子で読みにくい)は有効なので、分割しない判断そのものは変えていない。**バケットを常駐させる決定は [ADR-0008](../../adr/0008-template-bucket-as-resident-resource.md) に切り出した。**
 
 ### 決定2: 環境差分は全部 `Parameters` に平坦化する
 
@@ -179,7 +187,7 @@ Action:
 
 ### 決定10: ブートストラップは mysql イメージの Run Task
 
-`CREATE USER` と `GRANT` を実行する主体。**アプリのコードもイメージも触らない**のが利点で、「マスター資格情報を使うのはこのタスクだけ」という境界がタスク定義の単位ではっきり分かれる(アプリのイメージにマスターの権限が一切渡らない)。
+`CREATE USER` と `GRANT` を実行する主体。**アプリのコードもイメージも触らない**のが利点で、「マスター資格情報を使うのはこのタスクだけ」という境界が、タスク定義と**実行ロール**の単位ではっきり分かれる(アプリのイメージにマスターの権限が一切渡らない)。
 
 - イメージは `public.ecr.aws/docker/library/mysql:8`(Docker Hub は匿名 pull にレート制限があるため AWS のミラーを使う)
 - `CREATE USER IF NOT EXISTS` + `GRANT` なので何度流しても安全
@@ -187,9 +195,33 @@ Action:
 
 RDS はプライベートサブネットにいるので GitHub Actions のランナーからは接続できない。**VPC の中でコマンドを 1 回実行する手段**として Run Task を使う(踏み台 EC2 や Session Manager のポートフォワードより、常駐しない・スタックに書ける・1 コマンドで叩ける点で運用に合う)。
 
-### 決定11: マイグレーションは別の Run Task で走らせる
+### 決定11: マイグレーションは別の Run Task で走らせる(タスクモードを実装した)
 
-アプリイメージを `SPRING_MAIN_WEB_APPLICATION_TYPE=none` で起動し、Flyway だけ実行して終了させる。ECS サービス側は `SPRING_FLYWAY_ENABLED=false` + `app` ユーザーのみ。
+アプリイメージを **`APP_TASK=migrate`** で起動し、Flyway だけ実行して終了させる。ECS サービス側は `FLYWAY_ENABLED=false` + `app` ユーザーのみ。
+
+**当初は `SPRING_MAIN_WEB_APPLICATION_TYPE=none` を使う設計だったが、実測で使えないことが判明した。**
+
+```
+APPLICATION FAILED TO START
+Parameter 0 of constructor in com.example.app.auth.UserSessionManager
+required a bean of type 'org.springframework.session.FindByIndexNameSessionRepository'
+```
+
+Web アプリではなくなると **Spring Session JDBC の自動設定が動かない**(セッションは Web スコープの機能)。フェーズ3 で作った `UserSessionManager` がそのリポジトリを要求しているため、コンテキストの初期化に失敗する。
+
+そこで **Web は普通に立て、起動しきったところで終了させる**形にした。`config/TaskRunner`(`@ConditionalOnProperty("app.task")` の `ApplicationRunner`)が `SpringApplication.exit` → `System.exit` を呼ぶ。Run Task はプライベートサブネットで動き ALB に登録されないので、8080 番が一瞬開くことに実害はない。
+
+**これは進捗表フェーズ9 が予定している `--app.task=seed` の土台でもある。** タスクモードの仕組みを先に作った形になる。
+
+実測結果:
+
+| 実行 | 終了コード | 経過 |
+|---|---|---|
+| `APP_TASK=migrate` | 0 | 9 秒(Flyway 適用 → `TaskRunner` → 終了) |
+| `APP_TASK=bogus` | 1 | 未知のタスク名を検知 |
+| 未指定 | ― | Web が生き続ける(既存動作のまま) |
+
+**`app.task` は `application.yml` に書かない。** `task: ${APP_TASK:}` と書くと未指定でも「空文字のプロパティが存在する」状態になり、`@ConditionalOnProperty` が成立して(`false` 以外なら成立する判定なので)通常起動でも即終了してしまう。
 
 `spring.flyway.user` / `password` を使って「アプリの接続は `app`、Flyway だけ `migrate`」を同一プロセスでやる案もあった(Spring Boot 4.1 でも健在なことを設定メタデータで確認済み)。採らなかったのは:
 
@@ -197,9 +229,9 @@ RDS はプライベートサブネットにいるので GitHub Actions のラン
 - タスク数を増やすと起動時に全タスクが Flyway のロックを争う
 - 実務のデプロイ手順(migrate → 新バージョンを展開)と一致しない
 
-**実装上の注意**: Dockerfile の `ENTRYPOINT` は `["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]` で、`sh -c` の後ろに引数を渡しても `$0` になるだけで java には届かない。**起動オプションは `command` ではなく環境変数で指定する**(Spring のリラックスバインディング)。
+**実装上の注意**: Dockerfile の `ENTRYPOINT` は `["sh", "-c", "exec java $JAVA_OPTS -jar /app/app.jar"]` で、`sh -c` の後ろに引数を渡しても `$0` になるだけで java には届かない。**起動オプションは `command` ではなく環境変数で指定する**(Spring のリラックスバインディング)。`APP_TASK` を環境変数にしたのはこの制約もあってのこと。
 
-**未検証**: Web を立てない起動で JVM が確実に終了するか(Spring Session の掃除スケジューラなど非デーモンスレッドが残ると終わらない)。終わらない場合は `SpringApplication.exit` を呼ぶ小さな `ApplicationRunner` を足す。
+**副産物として actuator の設定が 1 つ増えた**: `management.health.mail.enabled: false`。有効なままだと `mailHealthContributor` の生成が `'beans' must not be empty` で失敗し、`@SpringBootTest` のテスト 3 本が落ちた。本番でも集約の `/api/actuator/health` を叩くたびに SMTP 接続を試みる挙動になるので、切るのが正しい(送信経路は SES の API で、SMTP の生死は無関係)。
 
 ### 決定12: 順序は 2 段階デプロイ(`DesiredCount` 0 → N)
 
@@ -211,24 +243,29 @@ RDS はプライベートサブネットにいるので GitHub Actions のラン
 
 ```
 1. cfn deploy  --parameter-overrides DesiredCount=0
-2. ecs run-task  db-bootstrap    # CREATE USER / GRANT
+2. ecs run-task  db-ops          # CREATE USER / GRANT
 3. ecs run-task  db-migrate      # Flyway
 4. cfn deploy  --parameter-overrides DesiredCount=1
 ```
 
 カスタムリソース(Lambda が run-task して完了を待ち、サービスが `DependsOn`)なら 1 回で済むが、Lambda・`cfn-response` の自前実装・削除時に実行しない分岐・失敗時に `DELETE_FAILED` で詰まるリスクを負う。今回は採らない。
 
-### 決定13: ワークフローは 3 本。`db-task.yml` は再利用可能にする
+### 決定13: ワークフローは 4 本。`db-task.yml` は再利用可能にする
 
 ```
-cfn-deploy.yml   (workflow_dispatch)          構築・更新
-  job deploy-0   : cfn deploy DesiredCount=0
-  job bootstrap  : uses ./.github/workflows/db-task.yml  with action=bootstrap
-  job migrate    : uses ./.github/workflows/db-task.yml  with action=migrate
-  job deploy-n   : cfn deploy DesiredCount=<params の値>
+cfn-deploy.yml   (workflow_dispatch)          構築(何も無い状態から建てる)
+  job deploy-zero    : uses ./.github/workflows/cfn-apply.yml  web_desired_count=0
+  job create-db-users: uses ./.github/workflows/db-task.yml    action=create-db-users
+  job migrate        : uses ./.github/workflows/db-task.yml    action=migrate
+  job deploy-service : uses ./.github/workflows/cfn-apply.yml  (params の値に収束)
+  job summary        : 4 段目の outputs から締めのサマリ(AWS を叩かない)
+
+cfn-apply.yml    (workflow_dispatch + workflow_call)   反映 → 決定20
+  job apply      : precheck(CREATE / UPDATE の判定を含む)→ create-change-set
+                   → 差分をサマリ → execute-change-set
 
 db-task.yml      (workflow_dispatch + workflow_call)   DB 操作
-  inputs: env, action = bootstrap | migrate | sql, sql, sql_user
+  inputs: env, action = create-db-users | migrate | sql, sql, sql_user
 
 cfn-destroy.yml  (workflow_dispatch)          撤収。**stg 専用**
   1. aws s3 rm --recursive   (画像バケットを空にする)
@@ -236,6 +273,8 @@ cfn-destroy.yml  (workflow_dispatch)          撤収。**stg 専用**
 ```
 
 `db-task.yml` を `workflow_call` にも対応させることで、**構築は 1 回のディスパッチで完結し、あとから任意 SQL や再マイグレーションを単体で叩ける。** run-task の待ち合わせ処理も 1 か所で済む。
+
+**追記(2026-08-24):同じ形を CloudFormation の叩き方にも適用した。** `cfn-apply.yml` を `workflow_call` にも対応させ、`cfn-deploy.yml` の 1 段目と 4 段目をそこへ委譲した。`cfn-deploy.yml` に aws コマンドは 1 つも無くなり、**順序を表現するだけ**のワークフローになった(→ [ADR-0009](../../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md))。締めのサマリ用に 5 段目 `summary` を足したが、値は 4 段目の `outputs` から受け取るので AWS を叩かない。
 
 **`aws ecs run-task` は起動するだけで完了を待たない。** `aws ecs wait tasks-stopped` で待ち、`describe-tasks` の `containers[0].exitCode` を見て 0 以外ならワークフローを失敗させる。これを書かないと「マイグレーションが失敗したのにワークフローは緑」になる。
 
@@ -253,25 +292,33 @@ cfn-destroy.yml  (workflow_dispatch)          撤収。**stg 専用**
 
 毎回 Change Set の承認を挟むと 1 回建てるのに 2 回必要になり、しかも**新規作成時の差分は「全リソース Add」で見る価値が乏しい**。差分が意味を持つのは既存スタックを更新するときだけ。
 
+**追記(2026-08-21):その「既存スタックを更新するとき」が `cfn-apply.yml` なので、あちらは常に Change Set を作る**(→ [決定20](#決定20-反映専用のワークフローを分ける))。承認は挟まないが、差分は必ずジョブサマリに残る。
+
+**追記(2026-08-24):`dry_run` は差分を出したあと Change Set を削除する。** 実行しない Change Set をスタックに溜めないため(`cfn-apply.yml` の dry run と同じ扱い)。初回作成時に作られる `REVIEW_IN_PROGRESS` のスタック(リソースを 1 つも持たない)は残るが、`aws cloudformation deploy` はこの状態を「スタックが無い」とみなして `CREATE` の Change Set を作り直すので、次の構築に影響しない(→ [手順書 §8](../../infrastructure/cloudformation-operations.md))。
+
+**追記(2026-08-24):この決定の本文はもう実装と一致していない。** [決定20](#決定20-反映専用のワークフローを分ける) と [ADR-0009](../../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md) を経て `cfn-deploy.yml` は `cfn-apply.yml` に委譲するようになり、**`aws cloudformation deploy` はどのワークフローからも呼ばれていない**。`dry_run` の切り替えも `--no-execute-changeset` ではなく「Change Set を作って `describe-change-set` で差分を出し、`delete-change-set` で消す」という自前の流れになっている。`deploy` を捨てたことで肩代わりすることになった 4 つ(テンプレートの S3 アップロード / `UsePreviousValue` の補完 / CREATE と UPDATE の判定 / 差分ゼロの判定)と、その対応表 → [CloudFormation の CLI コマンドを読み解く §3, §10-4](../../notes/cloudformation/cli-commands-and-change-sets.md)。
+
 ### 決定16: IAM は CloudFormation サービスロール方式
 
 | ロール | 権限 | 作り方 |
 |---|---|---|
 | `nuxt-java-practice-gha-ecr-push` | ECR push(既存) | 手動・常駐 |
 | `nuxt-java-practice-gha-cfn-stg` | `cloudformation:*` / `iam:PassRole` / `ecs:RunTask` / `ecs:DescribeTasks` / `s3` 削除 / `cloudformation:DescribeStacks` | 手動・常駐(新規) |
-| `nuxt-java-practice-cfn-service-stg` | リソース作成権限(実質管理者相当) | 手動・常駐(新規) |
+| `nuxt-java-practice-cfn-service-stg` | `AdministratorAccess`(AWS 管理ポリシー) | 手動・常駐(新規) |
 
 ```
 Actions ロール = cloudformation:* + iam:PassRole だけ
   ↓ CFn に「このロールで作れ」と指示(deploy --role-arn)
-CloudFormation サービスロール = 管理者相当
+CloudFormation サービスロール = AdministratorAccess
   ↓
 AWS リソース
 ```
 
 **Actions の一時クレデンシャルが漏れても、テンプレートに書かれていないことはできない**(直接 EC2 を立てたりできない)。`iam:PassRole` という IAM の重要な概念を実例で学べる。
 
-サービスロールには `secretsmanager:CreateSecret` / `secretsmanager:TagResource` / `kms:DescribeKey` が必要(`ManageMasterUserPassword` のため。RDS ユーザーガイドに明記)。
+**追記(2026-08-22):サービスロールの権限は当初サービス単位の列挙(インラインポリシー `CfnProvision`)にしていたが、`AdministratorAccess` に変更した。** 理由は維持コストで、テンプレートにリソース型を足すたびに権限も足すことになり、権限不足は `CREATE_FAILED` になってから分かるため往復が多い。**爆発半径は広がる**(列挙版は書いたサービスに限られたが、管理ポリシーは IAM ユーザー作成や他スタックのリソース削除まで通る)が、上の「Actions ロールは `cloudformation:*` と `iam:PassRole` だけ」という境界は変わらない。手順と切り替えコマンド → [手順書 §2-1](../../infrastructure/cloudformation-operations.md)。
+
+列挙に戻すときの参考として、実際に必要だった権限を残す。サービスロールには `secretsmanager:CreateSecret` / `secretsmanager:TagResource` / `kms:DescribeKey` が必要(`ManageMasterUserPassword` のため。RDS ユーザーガイドに明記)。
 
 ### 決定17: 信頼ポリシーは Environment + `ref` クレームで縛る
 
@@ -316,12 +363,46 @@ CloudFormation は ECS ネイティブ Blue/Green に完全対応している(`D
 
 **Terraform の `ignore_changes = [action]` に相当するものは CloudFormation では不要。** 理由が重要で、**CloudFormation は実リソースの状態を読み直さない。** 更新時に比較するのは「前回のテンプレート」と「今回のテンプレート」だけ。ECS が重みを 0/1 に入れ替えても、テンプレートに変更がなければそのリソースに触らない。Terraform は `refresh` で実物を読んでから差分を出すので `ignore_changes` が必要だった。**この非対称が両者の設計思想の違い。**
 
+**訂正(2026-08-21):この「読み直さない」は既定の Change Set については正しいが、絶対ではない。** [drift-aware change sets](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/drift-aware-change-sets.html) は `create-change-set --deployment-mode REVERT_DRIFT` で**実物を読み、「実際の状態 / 前回のテンプレート / 今回のテンプレート」の三方比較**を行う。しかもドキュメントに「`AWS::ApplicationAutoScaling::ScalableTarget` による **ECS の desired count** のような AWS 管理プロパティは、テンプレートで触っていなければ実際の値を残す」と明記されている。つまり Terraform の `ignore_changes = [desired_count]` に近い挙動が公式に用意されている。今回は使わない(→ [決定20](#決定20-反映専用のワークフローを分ける))。
+
+**また、`ignore_changes = [task_definition]` には CloudFormation でも代替がある。** `AWS::ECS::Service` の `TaskDefinition` は「リビジョンを指定しない場合は最新の `ACTIVE` リビジョンが使われる」と定義されているので、`!Ref` をやめて family 名だけを書けばテンプレート上の値が不変になり、外部で登録したリビジョンが巻き戻らない。**採らない判断をした**(理由 → [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md))。「代替が無い」ではなく「代替はあるが採らない」が正確。
+
 **ただし注意**: 後でリスナールールの定義自体を編集すると、そのとき重みも一緒にテンプレートの値へ戻される(green が本番なのに blue に流れる)。
 
 オートスケーリングは stg でも入れる。1 点調整が必要:
 
 - `DesiredCount=0` の段階でスケーラブルターゲットの `MinCapacity` が 1 だと、Application Auto Scaling が 1 に戻してしまう
 - **スケーラブルターゲットとポリシーは `DesiredCount` が 0 でないときだけ作る `Condition`** を付ける
+
+
+### 決定20: 反映専用のワークフローを分ける
+
+構築(`cfn-deploy.yml`)は「何も無い状態から建てる」ための順序をジョブの連なりで表現している。**既に動いている環境にテンプレートや `params` の変更を反映したいときは、その順序が邪魔になる。** DB ユーザーは既にいるし、`DesiredCount` を 0 に落として上げ直すのはサービスの停止に等しい。そこで `cfn-apply.yml` を分ける。
+
+前提として、**アプリのイメージ更新も CloudFormation 経由で行う**(→ [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md))。そのため `cfn-apply.yml` は「インフラの反映」と「イメージの更新」を兼ねる。
+
+| 項目 | 決めたこと |
+|---|---|
+| 入力 | `env` / `image_tag`(**任意**。空なら現行維持) / `dry_run` / `allow_replacement` |
+| パラメータ | `params/<env>.json` を丸ごと + `BasicAuthCredential`。`ImageTag` が空のときは `UsePreviousValue` |
+| 差分 | **常に** Change Set を作り、ジョブサマリに残してから実行する |
+| 安全弁 | `Replacement: True` を含むときは実行せず失敗する(`allow_replacement=true` で解除) |
+| 実行前チェック | スタックの存在 / 状態が更新可能 / **`WebDesiredCount` が 0 でない** |
+| `concurrency` | ~~既存と同じ `cfn-deploy-${env}`。3 本のワークフローをまたいで直列化する~~ → **2026-08-24 に削除**(下の追記) |
+
+**`aws cloudformation deploy` を使っていない。** あれは内部で Change Set を作って即実行するので、差分を出す隙がない。既存環境を触るワークフローなので「何が変わるか」の記録を必ず残したい。代償として、`deploy` が暗黙にやっていた 2 つ(渡さなかったパラメータを `UsePreviousValue` にする / 51,200 バイト超のテンプレートを S3 経由にする)を自分で書くことになった。
+
+**`WebDesiredCount` が 0 のスタックを弾くのが要点。** 0 は「`cfn-deploy.yml` が create-db-users か migrate の途中で失敗して止まった状態」を意味する。ここで `params` の値(1 以上)を流し込むと、DB ユーザーがまだ無いままタスクが起動してクラッシュループし、**CloudFormation が最大 3 時間サービスの安定を待って失敗する**(→ [§8 の 3](#8-cloudformation-固有の注意点学びの記録))。この 1 行のチェックでその事故を手前で止める。
+
+**`Replacement: True` を弾くのも同じ発想。** GitHub Free のプライベートリポジトリでは Environment の required reviewers が使えないため、承認による保護が張れない。`db-task.yml` が任意 SQL を stg 限定にしたのと同じく、**危険な側を選んだときだけ意識させる**形で埋めている。とくに `Database` が対象に入ると、新しい空の RDS に置き換わって中身が失われる。
+
+**drift-aware change set(`--deployment-mode REVERT_DRIFT`)は使わない。** ADR-0007 の分担ではドリフトを作らないので三方比較の出番が乏しく、機能が新しくランナーの CLI バージョンに依存する(手元の aws-cli 2.31.14 には未実装)。`WebDesiredCount` の件が実測で問題になったら切り替える。
+
+**追記(2026-08-24):`cfn-deploy.yml` がこのワークフローを `workflow_call` で呼ぶ形にした**(→ [ADR-0009](../../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md))。上の表からの差分は 3 点。
+
+- **`workflow_call` 専用の入力 3 つを足した。** `web_desired_count`(params の値を上書き)/ `allow_missing_stack`(スタックが無ければ CREATE)/ `allow_zero_desired_count`(現在の `WebDesiredCount` が 0 でも続行)。**`workflow_dispatch` には宣言しない**ので、dispatch から見た挙動と「実行前チェック」の 3 つは何も変わらない。既存環境向けの guard を、構築フローに対してだけ開けるための鍵
+- **`concurrency` を削除した。** 呼ばれる側のワークフローレベル `concurrency` も適用されるため、呼び出し側と同じグループ名を持つと親子で枠を取り合って止まる。直列化は入口(`cfn-deploy.yml` / `cfn-destroy.yml`)が持ち、dispatch 時の保護は precheck が担う(`cfn-deploy` / `cfn-destroy` が走っている全期間、スタックは「進行中の状態」か「`WebDesiredCount`=0」のどちらかなので必ず弾かれる。対応表 → ADR-0009)
+- **CREATE も担うようになった。** スタックが無い場合と `REVIEW_IN_PROGRESS` の場合は `--change-set-type CREATE`、それ以外は `UPDATE`。完了待ちも出し分ける。CREATE のときの差分は表にせず「新規作成: N リソース」の 1 行にする(決定15 の「新規作成時の差分は見る価値が乏しい」と揃える)
 
 ---
 
@@ -347,7 +428,7 @@ flowchart TB
                 TGA[TG blue]
                 TGB[TG green]
                 App[ECS Fargate<br/>Spring Boot :8080<br/>静的ファイル + /api]
-                Boot[Run Task<br/>db-bootstrap<br/>mysql:8]
+                Boot[Run Task<br/>db-ops<br/>mysql:8]
                 Mig[Run Task<br/>db-migrate<br/>アプリイメージ]
                 RDS[(RDS MySQL 8.4)]
             end
@@ -395,6 +476,7 @@ flowchart TB
 | IAM ロール `...-gha-cfn-stg` | 循環依存を避けるため(→ [決定16](#決定16-iam-は-cloudformation-サービスロール方式)) |
 | IAM ロール `...-cfn-service-stg` | 同上 |
 | SSM SecureString 4 つ | `app_db_password` / `migrate_db_password` / `google_client_id` / `google_client_secret` |
+| S3 バケット `...-cfn-templates-<アカウントID>` | テンプレートが 51,200 バイトを超えたため、CloudFormation に渡す口として必要(→ [決定1 の追記](#決定1-ファイルは-1-テンプレート環境差分はパラメータファイル))。中身は 30 日で自動削除する受け渡し物 |
 | SES のサンドボックス用に検証した受信アドレス | 手動検証 |
 
 ### CloudFormation 管理(作り捨て)
@@ -463,7 +545,8 @@ VPC / サブネット / ルートテーブル / NAT Gateway / S3 ゲートウェ
 |---|---|
 | actuator 追加 | `spring-boot-starter-actuator`、`management.endpoints.web.base-path: /api/actuator`、liveness / readiness グループの設定、`SecurityConfig` に liveness の `permitAll` |
 | SES 送信 | `software.amazon.awssdk:sesv2` 依存、`MailSender` の SES 実装、プロパティで Mailpit と切り替え、`AuthMailSender` の依存を `MailSender` に変更 |
-| Flyway の切り離し | `SPRING_FLYWAY_ENABLED` / `SPRING_FLYWAY_USER` / `SPRING_FLYWAY_PASSWORD` を環境変数で受けられることの確認。サービスは `false`、migrate タスクは `true` |
+| Flyway の切り離し | `FLYWAY_ENABLED` / `FLYWAY_DB_USER` / `FLYWAY_DB_PASSWORD` を `application.yml` で受ける。サービスは `false`、migrate タスクは `true` |
+| タスクモード | `config/TaskRunner` と `AppProperties.task`。`APP_TASK=migrate` で起動 → Flyway 適用 → 終了。フェーズ9 の seed もここに足す |
 | `.env.example` | 追加した変数の記載 |
 
 **手作業も残る**:
@@ -481,7 +564,7 @@ VPC / サブネット / ルートテーブル / NAT Gateway / S3 ゲートウェ
 1. ecr-push.yml を実行し、ジョブサマリのイメージタグを控える
 2. cfn-deploy.yml を実行(inputs: env=stg, image_tag=<控えたタグ>, dry_run=false)
    ├─ スタック作成/更新(DesiredCount=0)
-   ├─ db-bootstrap の Run Task(CREATE USER / GRANT)
+   ├─ db-ops の Run Task(CREATE USER / GRANT)
    ├─ db-migrate の Run Task(Flyway)
    └─ スタック更新(DesiredCount=params の値)
 3. SES の検証が通るのを待つ(初回。スタック成功≠メール送信可能)
@@ -511,7 +594,10 @@ VPC / サブネット / ルートテーブル / NAT Gateway / S3 ゲートウェ
 9. **スタックは 1 リージョンに閉じる。** CloudFront に独自ドメインを付けない判断(us-east-1 の証明書が必要になる)はこの制約が理由
 10. **スタックレベルのタグは全リソースに自動で伝播する。** リソースごとに `Tags` を書かなくてよい
 11. **状態を読み直さないので `ignore_changes` が要らない**(→ [決定19](#決定19-ecs-はネイティブ-bluegreen--オートスケーリング))
-12. **RDS のロググループは先に作って `DependsOn` させる。** 先に消えると RDS が削除処理中の最終書き込みで同名のロググループを作り直し、管理外の孤児(保持期間 無期限)が残る(Terraform 側のコメントにあった知見。CloudFormation でも同じ)
+12. **テンプレートをリクエストに直接載せられるのは 51,200 バイトまで。** 超えると S3(または SSM ドキュメント)に置いて `TemplateURL` で渡すしかない。**GitHub の raw URL は渡せない**(`CreateChangeSet` の API リファレンスに「S3 バケットまたは Systems Manager ドキュメント」「S3 の静的ウェブサイト URL は非対応」と明記)。`aws cloudformation deploy` は `--s3-bucket` が無いと **AWS を呼ぶ前に** `DeployBucketRequiredError` で落ちる。日本語コメントは 1 文字 3 バイトなので、行数より先にバイト数が上限に当たる
+13. **`create-change-set` は `--tags` を省略するとスタックのタグが失われる。** `deploy` が毎回渡していたものを自分で渡す必要がある
+14. **`aws cloudformation deploy` は `--parameter-overrides` に無いパラメータを `UsePreviousValue: true` にする**(aws-cli の `merge_parameters`)。`create-change-set` を直接使うときはこれを自分で組む。値を渡さずデフォルトも無いパラメータがあると「must have values」で落ちる
+15. **RDS のロググループは先に作って `DependsOn` させる。** 先に消えると RDS が削除処理中の最終書き込みで同名のロググループを作り直し、管理外の孤児(保持期間 無期限)が残る(Terraform 側のコメントにあった知見。CloudFormation でも同じ)
 
 ---
 
@@ -529,8 +615,16 @@ VPC / サブネット / ルートテーブル / NAT Gateway / S3 ゲートウェ
 
 設計時点で確度が低く、実物で確かめる必要がある項目。
 
-- Web を立てない起動で JVM が終了するか(→ [決定11](#決定11-マイグレーションは別の-run-task-で走らせる))
+- ~~Web を立てない起動で JVM が終了するか~~ → **解決済み。** そもそも起動しなかったので設計を変えた(→ [決定11](#決定11-マイグレーションは別の-run-task-で走らせるタスクモードを実装した))
 - 同じドメインで SES アイデンティティを作り直したとき DKIM トークンが変わるか(→ [決定5](#決定5-ses-のドメインアイデンティティと-dkim-はスタックに含める))
 - リスナーの `DefaultActions` を `fixed-response` にして、Blue/Green の重み入れ替えがリスナールール側だけで成立するか(公式の移行ガイドは `DefaultActions` も両ターゲットグループの forward にしている)
 - Basic 認証を通した状態で Google ログインのコールバックが成立するか(ブラウザが Basic 資格情報を再送するか)
 - `FARGATE_SPOT` の中断が検証中にどのくらい起きるか
+- **オートスケーリングが `WebDesiredCount` を超えてタスクを増やしている最中にスタックを更新したとき、タスク数が `params` の値に戻るか。** CloudFormation が ECS の `UpdateService` に `desiredCount` を常に含めるのか、変更のないプロパティは送らないのかが公式ドキュメントに明記されていない(→ [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md))
+
+## 11. 実装中に踏んだ落とし穴
+
+ワークフローを書くときに同じ形で踏みうるもの。
+
+- **パイプが終了コードを隠す。** `java -jar app.jar | tail -8` の終了コードはパイプの最後(`tail`)のものになる。手元での検証中、起動失敗しているのに「終了コード 0」と読んでしまった。**`aws ecs run-task` の結果判定でも同じ罠がある**(→ [決定13](#決定13-ワークフローは-3-本db-taskyml-は再利用可能にする))
+- **ポートの取り合い。** 手元で `java -jar` を試すときは `SERVER_PORT=0` を付ける(開発サーバーが 8080 を掴んでいる)

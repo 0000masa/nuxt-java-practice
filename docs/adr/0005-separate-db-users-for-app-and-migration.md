@@ -15,7 +15,7 @@ AWS 上の RDS には**用途の違う 3 つの MySQL ユーザー**を置き、
 
 これに伴い、**Flyway をアプリの起動から切り離す**。ECS サービスは `SPRING_FLYWAY_ENABLED=false` で動き、マイグレーションは別のタスク定義(同じイメージを `SPRING_MAIN_WEB_APPLICATION_TYPE=none` で起動)が担う。
 
-`app` / `migrate` ユーザーの作成は、**`public.ecr.aws/docker/library/mysql:8` を使う ECS Run Task**(`db-bootstrap`)がマスター資格情報で `CREATE USER IF NOT EXISTS` と `GRANT` を実行する。
+`app` / `migrate` ユーザーの作成は、**`public.ecr.aws/docker/library/mysql:8` を使う ECS Run Task**(`db-ops`)がマスター資格情報で `CREATE USER IF NOT EXISTS` と `GRANT` を実行する。
 
 **開発環境(docker-compose)はこの分離をしない。** MySQL コンテナが作る `app` ユーザー 1 本で、Flyway もアプリも同じ接続を使う。
 
@@ -31,7 +31,7 @@ AWS 上の RDS には**用途の違う 3 つの MySQL ユーザー**を置き、
 
 - アプリが使う接続には DDL 権限が無い。**SQL インジェクションが成立しても `DROP TABLE` はできない**
 - アプリのコンテナが侵入されても、そこから見えるのは DML 権限の資格情報だけ
-- マスター資格情報に触るのは `db-bootstrap` タスクだけで、**アプリのイメージには一度も渡らない**。境界がタスク定義の単位で分かれる
+- マスター資格情報に触るのは `db-ops` タスクだけで、**アプリのイメージには一度も渡らない**。境界はタスク定義だけでなく**実行ロールの単位**で分かれている(マスターシークレットへの `secretsmanager:GetSecretValue` を持つのは `db-ops-execution-role` のみで、アプリと `db-migrate` が共有する実行ロールには入れていない)
 
 ローテーションを本当に解決するのは **RDS の IAM データベース認証**(15 分有効のトークンで接続し、パスワードが存在しない)である。採らなかったのは、HikariCP に「接続のたびにトークンを取り直す」実装を差し込む必要があり、アプリ側の作業が増えるため。将来の選択肢として残す。
 
@@ -55,7 +55,7 @@ Spring Boot には `spring.flyway.user` / `spring.flyway.password` があり、�
 
 ## 結果として生じること
 
-- **環境を建てる手順に「ブートストラップ」という段が増えた。** RDS は毎回まっさらなので、スタックを作るたびに `db-bootstrap` → `db-migrate` の順で Run Task を流す必要がある。この必要性が、進捗表フェーズ12 の `db-task.yml` をフェーズ13 に取り込む理由になった
+- **環境を建てる手順に「ブートストラップ」という段が増えた。** RDS は毎回まっさらなので、スタックを作るたびに `db-ops` → `db-migrate` の順で Run Task を流す必要がある。この必要性が、進捗表フェーズ12 の `db-task.yml` をフェーズ13 に取り込む理由になった
 - **CloudFormation では「タスクを流してからサービスを起動する」順序を表現できない。** ECS サービスは安定するまで最大 3 時間ポーリングされるため、起動できない状態で作るとスタックが失敗する。そのため `DesiredCount` をパラメータにし、**0 で作る → Run Task → N に上げる**の 2 段階デプロイになった
 - **開発環境と本番でユーザー構成が違う。** 開発は `app` 1 本で DDL も通るので、「本番では通らない SQL が開発では通る」という差が生まれる。Flyway のマイグレーション以外で DDL を書かない限り実害は出ないが、差があること自体は覚えておく必要がある
 - `app` / `migrate` のパスワードは**手動で SSM に置く常駐リソース**になった(ホストゾーン・ECR と同じ扱い)
