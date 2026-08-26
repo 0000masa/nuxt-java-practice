@@ -10,7 +10,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 # prod を作るときは params/prod.json を足すだけで、このファイルは触らない。
 #
 # 手動管理(このスタックが作らないもの):
-#   Route53 ホストゾーン / ECR リポジトリ / OIDC プロバイダ / IAM ロール 3 つ /
+#   Route53 ホストゾーン / ECR リポジトリ / OIDC プロバイダ / IAM ロール 4 つ /
 #   SSM の SecureString 4 つ
 #
 # 建てる手順は 2 段階(DesiredCount を 0 → N)。理由は設計書の決定12。
@@ -135,7 +135,7 @@ Parameters:
   DbAppUsername:
     Type: String
     Default: app
-    Description: DML だけを持つユーザー。db-bootstrap タスクが作る → docs/adr/0005
+    Description: DML だけを持つユーザー。db-ops タスクが作る → docs/adr/0005
   DbMigrateUsername:
     Type: String
     Default: migrate
@@ -202,7 +202,7 @@ Mappings:
       CorsS3: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf
 
 Conditions:
-  # DesiredCount が 0 の段(ブートストラップ待ち)ではオートスケーリングを作らない。
+  # DesiredCount が 0 の段(DB ユーザー作成待ち)ではオートスケーリングを作らない。
   # Application Auto Scaling は MinCapacity を下回る状態を見つけると勝手に増やすため、
   # 0 のはずのサービスにタスクが立ち上がってクラッシュループする。
   ServiceEnabled: !Not [!Equals [!Ref WebDesiredCount, 0]]
@@ -456,7 +456,7 @@ Resources:
           FromPort: 3306
           ToPort: 3306
           SourceSecurityGroupId: !Ref EcsSecurityGroup
-          Description: ECS タスクからのみ(サービス / bootstrap / migrate)
+          Description: ECS タスクからのみ(サービス / db-ops / db-migrate)
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-rds-sg
@@ -997,12 +997,12 @@ Resources:
                   - ssmmessages:OpenDataChannel
                 Resource: "*"
 
-  # ブートストラップ専用のタスクロール。マスター資格情報を読めるのはここだけで、
+  # DB 管理タスク専用のタスクロール。マスター資格情報を読めるのはここだけで、
   # アプリのタスクロールには渡らない(→ docs/adr/0005)。
-  BootstrapTaskRole:
+  DbOpsTaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${ProjectName}-${EnvName}-bootstrap-task-role
+      RoleName: !Sub ${ProjectName}-${EnvName}-db-ops-task-role
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -1151,19 +1151,22 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: db-migrate
 
-  # ユーザー作成と任意 SQL。mysql の公式イメージ(AWS のミラー)を使い、
+  # DB の管理操作(ユーザー作成と任意 SQL)。mysql の公式イメージ(AWS のミラー)を使い、
   # command を上書きして SQL を流すだけのタスクにする。
   # SQL を command に埋め込まず環境変数で渡すのは、引用符と改行のエスケープで壊れないため。
-  BootstrapTaskDefinition:
+  #
+  # 名前を「用途(db-ops)」で付け、道具の名前(mysql)はコンテナ名にだけ置いている。
+  # db-migrate タスクも同じ MySQL に繋ぐので、mysql では 2 つを区別できないため。
+  DbOpsTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      Family: !Sub ${ProjectName}-${EnvName}-db-bootstrap
+      Family: !Sub ${ProjectName}-${EnvName}-db-ops
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
       Cpu: "256"
       Memory: "512"
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt BootstrapTaskRole.Arn
+      TaskRoleArn: !GetAtt DbOpsTaskRole.Arn
       ContainerDefinitions:
         - Name: mysql
           # Docker Hub は匿名 pull にレート制限があるので AWS のミラーを使う
@@ -1235,7 +1238,7 @@ Resources:
             Options:
               awslogs-group: !Ref EcsLogGroup
               awslogs-region: !Ref AWS::Region
-              awslogs-stream-prefix: db-bootstrap
+              awslogs-stream-prefix: db-ops
 
   Service:
     Type: AWS::ECS::Service
@@ -1351,9 +1354,9 @@ Outputs:
     Description: run-task の networkConfiguration に渡す
     Value: !Ref EcsSecurityGroup
 
-  BootstrapTaskDefinition:
+  DbOpsTaskDefinition:
     Description: db-task.yml が run-task するタスク定義(ユーザー作成 / 任意 SQL)
-    Value: !Ref BootstrapTaskDefinition
+    Value: !Ref DbOpsTaskDefinition
 
   MigrateTaskDefinition:
     Description: db-task.yml が run-task するタスク定義(Flyway)

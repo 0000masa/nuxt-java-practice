@@ -174,12 +174,12 @@ jobs:
           # CREATE_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETEの更新して良い状態のときだけこの部分に達する。
           echo "type=UPDATE" >> "$GITHUB_OUTPUT"
 
-          # DesiredCount=0 は「cfn-deploy.yml が bootstrap / migrate の途中で止まった状態」。
+          # DesiredCount=0 は「cfn-deploy.yml が create-db-users / migrate の途中で止まった状態」。
           # ここで params の値(1 以上)を流し込むと、DB ユーザーがまだ無いままタスクが起動して
           # クラッシュループし、CloudFormation が最大 3 時間サービスの安定を待って失敗する。
           desired=$(echo "$json" | jq -r '.Stacks[0].Parameters[] | select(.ParameterKey == "WebDesiredCount") | .ParameterValue')
           if [ "$desired" = "0" ] && [ "${{ inputs.allow_zero_desired_count }}" != "true" ]; then
-            echo "::error::スタックの WebDesiredCount が 0 です(bootstrap / migrate が未完了)。cfn-deploy.yml を実行してください"
+            echo "::error::スタックの WebDesiredCount が 0 です(create-db-users / migrate が未完了)。cfn-deploy.yml を実行してください"
             exit 1
           fi
 

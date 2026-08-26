@@ -78,20 +78,20 @@ jobs:
   # ---------------------------------------------------------------------------
   # 2 段目: DB ユーザーを作る
   # ---------------------------------------------------------------------------
-  bootstrap:
+  create-db-users:
     needs: deploy-zero
     if: ${{ !inputs.dry_run }}
     uses: ./.github/workflows/db-task.yml
     with:
       env: ${{ inputs.env }}
-      action: bootstrap
+      action: create-db-users
     secrets: inherit
 
   # ---------------------------------------------------------------------------
   # 3 段目: マイグレーション
   # ---------------------------------------------------------------------------
   migrate:
-    needs: bootstrap
+    needs: create-db-users
     uses: ./.github/workflows/db-task.yml
     with:
       env: ${{ inputs.env }}
