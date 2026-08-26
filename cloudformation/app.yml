@@ -919,6 +919,9 @@ Resources:
   # IAM(ECS)
   # ===========================================================================
   # 実行ロール: ECR から pull し、ログを書き、secrets を読む。コンテナの中身は使わない。
+  # アプリと db-migrate が共有する。**RDS のマスターシークレットはここに入れない**
+  # (共有ロールに入れると、アプリのタスク定義からもマスターの値を注入できてしまう)。
+  # マスターを読むのは db-ops 専用の DbOpsExecutionRole だけ → docs/adr/0005
   TaskExecutionRole:
     Type: AWS::IAM::Role
     Properties:
@@ -944,12 +947,6 @@ Resources:
                 Action:
                   - ssm:GetParameters
                 Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}*
-              # RDS が作るマスターパスワードのシークレット
-              - Sid: RdsMasterSecret
-                Effect: Allow
-                Action:
-                  - secretsmanager:GetSecretValue
-                Resource: !GetAtt Database.MasterUserSecret.SecretArn
 
   # タスクロール: アプリ自身が使う権限。
   TaskRole:
@@ -997,12 +994,14 @@ Resources:
                   - ssmmessages:OpenDataChannel
                 Resource: "*"
 
-  # DB 管理タスク専用のタスクロール。マスター資格情報を読めるのはここだけで、
-  # アプリのタスクロールには渡らない(→ docs/adr/0005)。
-  DbOpsTaskRole:
+  # db-ops タスク専用の実行ロール。**RDS のマスターシークレットを読めるのはこのロールだけ**で、
+  # ADR 0005 の「マスター資格情報に触るのは db-ops タスクだけ」を IAM の単位で成立させている。
+  # タスクロールではなく実行ロールを分けるのは、secrets を取ってコンテナに渡すのが
+  # コンテナ自身ではなく ECS エージェント(= 実行ロール)だから。
+  DbOpsExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${ProjectName}-${EnvName}-db-ops-task-role
+      RoleName: !Sub ${ProjectName}-${EnvName}-db-ops-execution-role
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -1010,6 +1009,28 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadDbSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # このタスクが注入するのは DB のパスワード 2 つだけ。Google の値は要らないので
+              # 共有ロールのようなパスのワイルドカードにしない
+              - Sid: DbPasswords
+                Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource:
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
+                  - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}migrate_db_password
+              # CREATE USER / GRANT をマスターで流すために要る
+              - Sid: RdsMasterSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !GetAtt Database.MasterUserSecret.SecretArn
 
   # ECS が ALB のリスナールールの重みを書き換えるために引き受けるロール。
   # ネイティブ Blue/Green に必須。
@@ -1085,9 +1106,10 @@ Resources:
             - Name: IMAGE_CDN_DOMAIN
               Value: !GetAtt ImageDistribution.DomainName
           Secrets:
-            # RDS が Secrets Manager に作ったシークレットから password キーだけを注入する
+            # DB_USER は app なので、パスワードも app ユーザーのもの(SSM の SecureString)。
+            # RDS のマスターパスワードはこのタスクには渡らない(→ docs/adr/0005)
             - Name: DB_PASSWORD
-              ValueFrom: !Sub '${Database.MasterUserSecret.SecretArn}:password::'
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
             - Name: GOOGLE_CLIENT_ID
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_id
             - Name: GOOGLE_CLIENT_SECRET
@@ -1136,14 +1158,22 @@ Resources:
             - Name: SERVER_PORT
               Value: "8080"
           Secrets:
+            # migrate のパスワードだけでは起動しきらないので app のパスワードも渡す。
+            # spring.flyway.user を設定すると Spring は Flyway 用に別の非プール DataSource を
+            # 作るので(FlywayAutoConfiguration#getMigrationDataSource)、migrate ユーザーを
+            # 使うのは Flyway だけで、プライマリの datasource は app ユーザーのまま残る。
+            # そのプライマリはこのタスクでも実際に接続する。ddl-auto: validate が
+            # EntityManagerFactory の初期化中にスキーマとエンティティを突き合わせるため。
+            # 結果としてこのタスク 1 回で、DDL の適用・app ユーザーの GRANT が効いていること・
+            # エンティティとスキーマの一致まで確認できる(Blue/Green の切替より前に落ちる)
             - Name: DB_PASSWORD
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
             - Name: FLYWAY_DB_PASSWORD
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}migrate_db_password
-            - Name: GOOGLE_CLIENT_ID
-              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_id
-            - Name: GOOGLE_CLIENT_SECRET
-              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_secret
+            # Google の資格情報は渡さない。このタスクは HTTP を受けないので、
+            # application.yml のダミー既定値(dummy-client-id / dummy-client-secret)で
+            # ClientRegistration が組み立てられて起動できる。
+            # 代わりに、OAuth の設定値はこのタスクでは検証されない
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -1165,8 +1195,8 @@ Resources:
       RequiresCompatibilities: [FARGATE]
       Cpu: "256"
       Memory: "512"
-      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
-      TaskRoleArn: !GetAtt DbOpsTaskRole.Arn
+      ExecutionRoleArn: !GetAtt DbOpsExecutionRole.Arn
+      # タスクロールは持たない。コンテナは mysql クライアントを走らせるだけで AWS を呼ばない
       ContainerDefinitions:
         - Name: mysql
           # Docker Hub は匿名 pull にレート制限があるので AWS のミラーを使う
