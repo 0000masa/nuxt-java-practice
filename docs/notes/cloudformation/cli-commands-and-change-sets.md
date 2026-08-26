@@ -101,7 +101,7 @@ Outputs:     [{AppUrl: https://...}, {LoadBalancerDnsName: ...}]
 | 消すコマンド | `delete-stack` | `delete-change-set` |
 | 消したときに起きること | **実リソースが削除される** | **何も削除されない** |
 
-**`delete-stack` と `delete-change-set` の差がいちばん分かりやすい対比。** 後者は予定リストを捨てるだけで AWS 上のものは何も減らない。`cfn-apply.yml:337` が Replacement を検出したときに `delete-change-set` を呼んでいるのは「危険な予定リストを実行可能なまま残さない」という意味で、リソースには一切触っていない(→ §8-3)。
+**`delete-stack` と `delete-change-set` の差がいちばん分かりやすい対比。** 後者は予定リストを捨てるだけで AWS 上のものは何も減らない。`cfn-apply.yml:334` が Replacement を検出したときに `delete-change-set` を呼んでいるのは「危険な予定リストを実行可能なまま残さない」という意味で、リソースには一切触っていない(→ §8-3)。
 
 #### スタックがあることは、リソースがあることを意味しない
 
@@ -223,7 +223,7 @@ Change Set が比べているのは **前回のテンプレートと今回のテ
 
 **これが `cfn-apply.yml:116` の `timeout-minutes: 75` の根拠。** waiter が 60 分粘るので、ジョブの制限時間はそれを待ちきれる値にしておかないと、待っている途中で GitHub 側に切られる。
 
-**待ちきれなかったときは失敗として返る。** 60 分でスタックが終わらなければ waiter は非ゼロで終わり、`cfn-apply.yml:373` の `if !` がそれを拾ってイベントの表を出す。**スタック側の操作は止まらない**(AWS 側で走り続ける)点に注意。CI が失敗しても反映は進んでいることがある。
+**待ちきれなかったときは失敗として返る。** 60 分でスタックが終わらなければ waiter は非ゼロで終わり、`cfn-apply.yml:370` の `if !` がそれを拾ってイベントの表を出す。**スタック側の操作は止まらない**(AWS 側で走り続ける)点に注意。CI が失敗しても反映は進んでいることがある。
 
 ### 4-2. 4 つの waiter が何を成功とみなすか
 
@@ -237,7 +237,7 @@ waiter 定義の `acceptors` が「この状態になったら成功 / 失敗」
 | `Status == FAILED` | **失敗** |
 | `ValidationError` が返る | 失敗 |
 
-**差分ゼロは `Status: FAILED` なので、この waiter は失敗として返る**(→ §6-3)。`cfn-apply.yml:254-255` が `|| true` を付けているのはこのため。異常か正常かの判定を waiter に任せず、後段の `describe-change-set` で `StatusReason` を読んで分けている。
+**差分ゼロは `Status: FAILED` なので、この waiter は失敗として返る**(→ §6-3)。`cfn-apply.yml:251-252` が `|| true` を付けているのはこのため。異常か正常かの判定を waiter に任せず、後段の `describe-change-set` で `StatusReason` を読んで分けている。
 
 **`stack-update-complete`**(`DescribeStacks` をポーリング)
 
@@ -247,7 +247,7 @@ waiter 定義の `acceptors` が「この状態になったら成功 / 失敗」
 | `UPDATE_FAILED` / `UPDATE_ROLLBACK_FAILED` / `UPDATE_ROLLBACK_COMPLETE` | **失敗** |
 | `ValidationError` | 失敗 |
 
-**`UPDATE_ROLLBACK_COMPLETE` を失敗として扱う**のが重要。ロールバックが完全に成功しても「更新は通らなかった」ので失敗になる。`cfn-apply.yml:374` のエラーメッセージが「失敗、またはロールバックしました」と 2 つ並べているのはこの挙動に対応している。
+**`UPDATE_ROLLBACK_COMPLETE` を失敗として扱う**のが重要。ロールバックが完全に成功しても「更新は通らなかった」ので失敗になる。`cfn-apply.yml:371` のエラーメッセージが「失敗、またはロールバックしました」と 2 つ並べているのはこの挙動に対応している。
 
 なお `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`(置換された古いリソースの掃除中)はどの acceptor にも当たらないので、waiter はポーリングを続ける。
 
@@ -260,7 +260,7 @@ waiter 定義の `acceptors` が「この状態になったら成功 / 失敗」
 | `CREATE_FAILED` / `DELETE_COMPLETE` / `DELETE_FAILED` / `ROLLBACK_FAILED` / `ROLLBACK_COMPLETE` | 失敗 |
 | `ValidationError` | 失敗 |
 
-**`UPDATE_*` を全部成功にしているのが奇妙に見えるが、「作成は既に済んでいる」という意味では筋が通る。** ただし `stack-create-complete` を UPDATE の完了待ちに流用すると `UPDATE_ROLLBACK_COMPLETE` を成功と誤判定するので、**CREATE と UPDATE で waiter を出し分ける必要がある**。`cfn-apply.yml:365-371` がそれをやっている。`aws cloudformation deploy` も内部で同じ出し分けをしている(→ §10-3)。
+**`UPDATE_*` を全部成功にしているのが奇妙に見えるが、「作成は既に済んでいる」という意味では筋が通る。** ただし `stack-create-complete` を UPDATE の完了待ちに流用すると `UPDATE_ROLLBACK_COMPLETE` を成功と誤判定するので、**CREATE と UPDATE で waiter を出し分ける必要がある**。`cfn-apply.yml:362-368` がそれをやっている。`aws cloudformation deploy` も内部で同じ出し分けをしている(→ §10-3)。
 
 **`stack-delete-complete`**(`DescribeStacks` をポーリング)
 
@@ -358,7 +358,7 @@ if [ -n "$bucket" ] && [ "$bucket" != "None" ]; then
 |---|---|---|
 | `json` | `cfn-apply.yml:141`, `:258`, `:291`, `:389` | `jq` に渡して複数の値を取り出す |
 | `text` | `cfn-destroy.yml:70`, `cfn-apply.yml:194` | シェル変数に 1 つの値を入れる |
-| `table` | `cfn-apply.yml:317`, `:377` | ジョブサマリに罫線付きの表として貼る |
+| `table` | `cfn-apply.yml:314`, `:377` | ジョブサマリに罫線付きの表として貼る |
 
 **未検証(公式に明記が見つからない):** `--output text` は JMESPath の結果が null のとき文字列 `None` を出力する(Python の `None` の repr)。`cfn-destroy.yml:71` が `[ "$bucket" != "None" ]` を持っているのは、実地で踏んだ証拠と読める。**空文字判定(`-n`)だけでは足りない**のがポイント。
 
@@ -432,32 +432,45 @@ JMESPath の構文そのものは CloudFormation の話ではないので、こ�
 | `UsePreviousValue` | `true` にすると**今スタックに入っている値をそのまま使う** |
 | `ResolvedValue` | (読み取り専用)SSM 型のパラメータが実際に解決された値。`describe-*` の出力に出る |
 
-**`ParameterValue` と `UsePreviousValue` は排他。** そして `CREATE` では `UsePreviousValue` が使えない(前の値が存在しないため)。`cfn-apply.yml:218-225` の分岐がそれを表している。
+**`ParameterValue` と `UsePreviousValue` は排他。** そして `CREATE` では `UsePreviousValue` が使えない(前の値が存在しないため)。`cfn-apply.yml:218-221` がそれを表している。
 
 ```bash
-if [ -n "$IMAGE_TAG" ]; then
-  image=$(jq -n --arg v "$IMAGE_TAG" '{ParameterKey: "ImageTag", ParameterValue: $v}')
-elif [ "$CS_TYPE" = "CREATE" ]; then
+# CREATE で image_tag が空なら、UsePreviousValue にできる前の値が無いので落とす
+if [ -z "$IMAGE_TAG" ] && [ "$CS_TYPE" = "CREATE" ]; then
   echo "::error::新規作成では image_tag を省略できません(UsePreviousValue にできる前の値が無い)"
   exit 1
-else
-  image='{"ParameterKey": "ImageTag", "UsePreviousValue": true}'
 fi
+```
+
+`UPDATE` で `image_tag` が空のときは、jq の最後で `UsePreviousValue` の要素を足す(`cfn-apply.yml:236`)。
+
+```bash
+| if any(.ParameterKey == "ImageTag") then . else . + [{ParameterKey: "ImageTag", UsePreviousValue: true}] end
 ```
 
 **落とし穴が 2 つ。**
 
 1. **テンプレートの全パラメータを埋めなければならない。** 値を渡さず `Default` も無いパラメータが 1 つでもあると「must have values」で落ちる。`deploy` はこれを自動で `UsePreviousValue` に埋めてくれる(→ §10-3)
-2. **同じ `ParameterKey` を 2 つ持つ配列は弾かれる。** `cfn-apply.yml:229-238` の jq が `web_desired_count` を「追記」ではなく「既存要素の置換」として書いているのはこのため
+2. **同じ `ParameterKey` を 2 つ持つ配列は弾かれる。** ワークフローが外から注す 3 つのうち `WebDesiredCount` は `params/<env>.json` に既にあり(＝上書きしたい)、`ImageTag` と `BasicAuthCredential` は無い(＝追記したい)。この 2 種類を別々に書くと長くなるので、`cfn-apply.yml:229-237` は**動的な 3 つを配列の先頭に積んでから `unique_by` で潰す**という 1 つの書き方にまとめている
 
 ```bash
-# WebDesiredCount は params の中に既にあるので、値を書き換える
-'($p[0]
-   | if $desired == "" then .
-     else map(if .ParameterKey == "WebDesiredCount" then .ParameterValue = $desired else . end)
-     end)
- + [$image, {ParameterKey: "BasicAuthCredential", ParameterValue: $cred}]'
+parameters=$(jq --arg tag "$IMAGE_TAG" --arg cred "$BASIC_AUTH_CREDENTIAL" --arg desired "$WEB_DESIRED_COUNT" '
+  . as $params
+  | [ {ParameterKey: "ImageTag",            ParameterValue: $tag},
+      {ParameterKey: "WebDesiredCount",     ParameterValue: $desired},
+      {ParameterKey: "BasicAuthCredential", ParameterValue: $cred} ]
+  | map(select(.ParameterValue != "")) + $params
+  | unique_by(.ParameterKey)
+' "cloudformation/params/${{ inputs.env }}.json")
 ```
+
+読み方は 3 点。
+
+- **`unique_by(.ParameterKey)` は同じキーの最初の要素だけを残す**(`def unique_by(f): [group_by(f)[] | .[0]];`)。先に積んだ動的な値が勝つので、params に有るキーは上書き、無いキーは追記になる。どちらも同じ 1 行で済む
+- **`map(select(.ParameterValue != ""))` が「渡さなかった入力」を落とす。** 落ちた分は params の値がそのまま残る。`web_desired_count` を渡さない dispatch 実行では params の `WebDesiredCount` が生きる
+- **`. as $params` は省略できない。** jq の `|` の右側で `.` は「元の入力」ではなく「直前の値」を指すので、束縛せずに `+ .` と書くと動的な配列が自分自身と連結されて params が消える
+
+副作用として `unique_by` が `ParameterKey` の辞書順に並べ替えるが、CloudFormation はパラメータの順序を見ないので影響しない。
 
 ### 5-4. `--capabilities` の 3 値
 
@@ -471,7 +484,7 @@ fi
 
 指定が足りないと `InsufficientCapabilities` エラーになる。
 
-**`cfn-apply.yml:247` が `CAPABILITY_NAMED_IAM` を渡しているのは、テンプレートが名前付きの IAM ロールを作るから。** IAM リソースを含む対象は API リファレンスに 8 型が列挙されている(`AWS::IAM::AccessKey` / `Group` / `InstanceProfile` / `ManagedPolicy` / `Policy` / `Role` / `User` / `UserToGroupAddition`)。
+**`cfn-apply.yml:246` が `CAPABILITY_NAMED_IAM` を渡しているのは、テンプレートが名前付きの IAM ロールを作るから。** IAM リソースを含む対象は API リファレンスに 8 型が列挙されている(`AWS::IAM::AccessKey` / `Group` / `InstanceProfile` / `ManagedPolicy` / `Policy` / `Role` / `User` / `UserToGroupAddition`)。
 
 **`CAPABILITY_AUTO_EXPAND` について、公式は Change Set では効かないと書いている。**
 
@@ -508,7 +521,7 @@ fi
 
 **「今あるタグに追加する」ではなく「これがタグの全体である」という意味。** 渡さなければ空のリストとして扱われ、既存のタグが消える。`UpdateStack` と同じ挙動。
 
-だから `cfn-apply.yml:248` は毎回 3 つを渡している。
+だから `cfn-apply.yml:245` は毎回 3 つを渡している。
 
 ```bash
 --tags Key=Project,Value=nuxt-java-practice Key=Env,Value=${{ inputs.env }} Key=ManagedBy,Value=cloudformation
@@ -667,10 +680,10 @@ ROLLBACK_COMPLETE)
 
 | フィールド | どのコマンドの出力 | 何の状態か | ワークフロー内 |
 |---|---|---|---|
-| `Status` | `describe-change-set` | **Change Set の作成が進んだか** | `cfn-apply.yml:259` |
+| `Status` | `describe-change-set` | **Change Set の作成が進んだか** | `cfn-apply.yml:256` |
 | `ExecutionStatus` | `describe-change-set` | **その Change Set を実行できるか** | 使っていない(waiter が内部で見る) |
 | `StackStatus` | `describe-stacks` | **スタックが今どういう状態か** | `cfn-apply.yml:142` → `:151-171` |
-| `ResourceStatus` | `describe-stack-events` | **1 リソース 1 イベントの結果** | `cfn-apply.yml:376` |
+| `ResourceStatus` | `describe-stack-events` | **1 リソース 1 イベントの結果** | `cfn-apply.yml:373` |
 
 `StatusReason` も同様に 3 つある。`StatusReason`(Change Set)/ `StackStatusReason`(スタック)/ `ResourceStatusReason`(イベント)。
 
@@ -705,7 +718,7 @@ create-change-set 直後   Status=CREATE_IN_PROGRESS  ExecutionStatus=UNAVAILABL
 
 > If CloudFormation fails to create the change set, it sets the changes set status to `CREATE_FAILED`. Fix the error displayed in the **Status reason** field, and then create a new change set.
 
-**API リファレンスの有効値の列挙と食い違っている。** `cfn-apply.yml:262` が `FAILED` だけを見ているのは API リファレンス側に従った形で、コンソールの表示がどちらであれ API が `CREATE_FAILED` を返さないなら問題にならない。**未検証:** 実際に返る値。
+**API リファレンスの有効値の列挙と食い違っている。** `cfn-apply.yml:259` が `FAILED` だけを見ているのは API リファレンス側に従った形で、コンソールの表示がどちらであれ API が `CREATE_FAILED` を返さないなら問題にならない。**未検証:** 実際に返る値。
 
 ### 6-3. `StatusReason` — 差分ゼロのときの実文字列
 
@@ -741,7 +754,7 @@ raise RuntimeError("Failed to create the changeset: {0} "
 | `The submitted information didn't contain changes.` | `CreateChangeSet` が差分ゼロを返すとき |
 | `No updates are to be performed` | `UpdateStack` 由来のメッセージ。Change Set 経由でも返ることがある |
 
-`cfn-apply.yml:263` の `grep` が同じ 2 パターンを見ているのは、この実装を写したもの。
+`cfn-apply.yml:260` の `grep` が同じ 2 パターンを見ているのは、この実装を写したもの。
 
 ```bash
 if echo "$reason" | grep -qi "didn't contain changes\|No updates are to be performed"; then
@@ -749,7 +762,7 @@ if echo "$reason" | grep -qi "didn't contain changes\|No updates are to be perfo
 
 **`-i`(大文字小文字を無視)を付けているのと、前半を短く切っているのは、文字列が変わることへの保険。** AWS がメッセージを変えても壊れにくい。
 
-**差分ゼロは `CREATE` では起きない**(新規作成なら全リソースが `Add` になるので、必ず差分がある)。`cfn-apply.yml:252-253` のコメントがそう書いている。
+**差分ゼロは `CREATE` では起きない**(新規作成なら全リソースが `Add` になるので、必ず差分がある)。`cfn-apply.yml:249-250` のコメントがそう書いている。
 
 **未検証:** 実際に AWS が返す文字列。上の 2 つは aws-cli のソースに現れるものなので「aws-cli の作者が観測した文字列」までは確かだが、末尾のピリオドの有無や現在の文言は実測しないと確定しない。aws-cli 自身も `or` の優先順位が怪しい書き方をしている(`status == "FAILED" and A or B` は `(status == "FAILED" and A) or B` と解釈される)ので、この判定は厳密ではない。
 
@@ -874,11 +887,11 @@ return stack["StackStatus"] != "REVIEW_IN_PROGRESS"
 
 ### 6-6. `ResourceStatus` / `ResourceStatusReason` — 失敗調査で見る
 
-`describe-stack-events` が返すのは **1 リソース 1 イベント**の履歴。`cfn-apply.yml:375-377` は失敗時にここから最初の 10 件を引いている。
+`describe-stack-events` が返すのは **1 リソース 1 イベント**の履歴。`cfn-apply.yml:372-374` は失敗時にここから最初の 10 件を引いている。
 
 ```bash
 aws cloudformation describe-stack-events --stack-name "$stack" \
-  --query 'StackEvents[?contains(ResourceStatus, `FAILED`)] | [0:10].{論理ID:LogicalResourceId,状態:ResourceStatus,理由:ResourceStatusReason}' \
+  --query 'StackEvents[?contains(ResourceStatus, `FAILED`)] | [0:10].{"論理ID":LogicalResourceId,"状態":ResourceStatus,"理由":ResourceStatusReason}' \
   --output table || true
 ```
 
@@ -918,7 +931,7 @@ aws cloudformation describe-stack-events --stack-name "$stack" \
 ```bash
 aws cloudformation describe-change-set --stack-name nuxt-java-practice-stg \
   --change-set-name <name> --include-property-values \
-  --query 'Changes[].ResourceChange.{論理ID:LogicalResourceId,前:BeforeContext,後:AfterContext}'
+  --query 'Changes[].ResourceChange.{"論理ID":LogicalResourceId,"前":BeforeContext,"後":AfterContext}'
 ```
 
 **未検証:** 付けると出力サイズが増えるので、`app.yml` の規模(リソース 50 個超)でページングに当たるかどうか(→ §7-3)。
@@ -953,7 +966,7 @@ aws cloudformation describe-change-set --stack-name nuxt-java-practice-stg \
 >
 > If you have multiple changes with different `RequiresRecreation` values, the `Replacement` value depends on the change with the most impact.
 
-**`cfn-apply.yml:315-320` は `True` と `Conditional` の両方を拾う。**
+**`cfn-apply.yml:312-317` は `True` と `Conditional` の両方を拾う。**
 
 ```bash
 ids() {
@@ -1018,7 +1031,7 @@ CLI は多くのコマンドで自動ページングするが、**`describe-chan
 >
 > **Default: `True`**
 
-**未検証:** これを額面通りに読むと「既定ではロールバックしない」になるが、コンソールの既定はロールバックする側であり、`cfn-apply.yml:374` のエラーメッセージも「失敗、またはロールバックしました」とロールバックを前提にしている。**ドキュメントの誤りである可能性が高い**が、実測しないと確定しない。
+**未検証:** これを額面通りに読むと「既定ではロールバックしない」になるが、コンソールの既定はロールバックする側であり、`cfn-apply.yml:371` のエラーメッセージも「失敗、またはロールバックしました」とロールバックを前提にしている。**ドキュメントの誤りである可能性が高い**が、実測しないと確定しない。
 
 なお `aws cloudformation deploy` は**この曖昧さを踏まない**。ソースを見ると常に明示的に渡している。
 
@@ -1065,9 +1078,9 @@ aws cloudformation delete-stack --stack-name nuxt-java-practice-stg
 
 | 箇所 | 状況 | 消す理由 |
 |---|---|---|
-| `cfn-apply.yml:265` | 差分ゼロ(`Status: FAILED`) | **`FAILED` の Change Set も残る。** 実行はできないが、スタックの Change Set 一覧に溜まる |
-| `cfn-apply.yml:337` | `Replacement: True` を検出して停止 | **実行可能なまま残すと危険。** 名前を知っていれば誰でも `execute-change-set` できる |
-| `cfn-apply.yml:346` | `dry_run=true` | 「見るだけ」なので溜めない |
+| `cfn-apply.yml:262` | 差分ゼロ(`Status: FAILED`) | **`FAILED` の Change Set も残る。** 実行はできないが、スタックの Change Set 一覧に溜まる |
+| `cfn-apply.yml:334` | `Replacement: True` を検出して停止 | **実行可能なまま残すと危険。** 名前を知っていれば誰でも `execute-change-set` できる |
+| `cfn-apply.yml:343` | `dry_run=true` | 「見るだけ」なので溜めない |
 
 **3 箇所とも「実行しないと決めた」ときに呼んでいる。** 逆に `execute-change-set` に進む経路では消さない —— 実行すると CloudFormation が自動で消すため(→ §2-2)。
 
@@ -1144,9 +1157,9 @@ aws cloudformation delete-stack --stack-name "$stack" \
 |---|---|---|
 | **存在確認** | `cfn-destroy.yml:56` | 終了コードだけ。出力は捨てる(→ §4-3) |
 | **状態とパラメータの取得** | `cfn-apply.yml:141` | `.Stacks[0].StackStatus` と `.Stacks[0].Parameters[]` |
-| **Outputs の取得** | `cfn-apply.yml:389`, `cfn-destroy.yml:69` | `.Stacks[0].Outputs[]` |
+| **Outputs の取得** | `cfn-apply.yml:386`, `cfn-destroy.yml:69` | `.Stacks[0].Outputs[]` |
 
-**`Parameters` と `Outputs` の両方が同じ 1 回の呼び出しで取れる**のがポイント。`cfn-apply.yml:389-396` は JSON を 1 回取って、シェル関数で 2 種類を引いている。
+**`Parameters` と `Outputs` の両方が同じ 1 回の呼び出しで取れる**のがポイント。`cfn-apply.yml:386-393` は JSON を 1 回取って、シェル関数で 2 種類を引いている。
 
 ```bash
 json=$(aws cloudformation describe-stacks --stack-name "$stack" --output json)
@@ -1352,7 +1365,7 @@ elif changeset_type == "UPDATE":
 waiter_config = {'Delay': 30, 'MaxAttempts': 120}
 ```
 
-`cfn-apply.yml:365-371` がやっているのと同じ。**コメントに「頻繁にポーリングすると `DescribeStacks` のレート制限に当たる」と書いてある**のが、30 秒という値の根拠。
+`cfn-apply.yml:362-368` がやっているのと同じ。**コメントに「頻繁にポーリングすると `DescribeStacks` のレート制限に当たる」と書いてある**のが、30 秒という値の根拠。
 
 ### 10-4. `deploy` が暗黙にやっていた 4 つ
 
@@ -1361,9 +1374,9 @@ waiter_config = {'Delay': 30, 'MaxAttempts': 120}
 | `deploy` がやっていたこと | 肩代わりしている場所 |
 |---|---|
 | **1. テンプレートを S3 に上げて `TemplateURL` に差し替える** | 「テンプレートを S3 に置く」ステップ(`cfn-apply.yml:190-200`)。バケットは手動管理の常駐リソース(→ [ADR-0008](../../adr/0008-template-bucket-as-resident-resource.md)) |
-| **2. 渡さなかったパラメータを `UsePreviousValue` にする** | `cfn-apply.yml:218-238` の jq。ただし方針が違う —— `deploy` は「渡さなかった全部」を自動で埋めるが、こちらは **params ファイルを唯一の正として全パラメータを明示**し、`ImageTag` だけを `UsePreviousValue` にする |
+| **2. 渡さなかったパラメータを `UsePreviousValue` にする** | `cfn-apply.yml:218-237` の jq。ただし方針が違う —— `deploy` は「渡さなかった全部」を自動で埋めるが、こちらは **params ファイルを唯一の正として全パラメータを明示**し、`ImageTag` だけを `UsePreviousValue` にする |
 | **3. スタックの有無から `CREATE` / `UPDATE` を判定する**(`REVIEW_IN_PROGRESS` は「無い」扱い) | precheck の `case` 文(`cfn-apply.yml:151-171`)。加えて `wait` の出し分け(`:365-371`) |
-| **4. 差分ゼロを判定する** | `cfn-apply.yml:262-275`。`StatusReason` の 2 パターンを `grep -qi` |
+| **4. 差分ゼロを判定する** | `cfn-apply.yml:259-272`。`StatusReason` の 2 パターンを `grep -qi` |
 
 **ワークフローのファイル冒頭のコメント(`cfn-apply.yml:33-37`)は 3 つと書いているが、4 つある。** 4 番目の「差分ゼロの判定」も `deploy` が持っていた処理(`ChangeEmptyError` を投げる仕組み)で、`deploy` を捨てたぶん自分で書くことになったもの。§10-5 の通り**扱いは v1 と v2 で違う**ので、単に「`deploy` に任せればよかった」ではないのが厄介なところ。
 
