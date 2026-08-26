@@ -108,16 +108,20 @@ jobs:
           SQL: ${{ inputs.sql }}
         run: |
           set -euo pipefail
+          # stream_prefix は app.yml の awslogs-stream-prefix と同じ値。
+          # ログストリーム名 <stream_prefix>/<container>/<task id> の組み立てに使う。
           case "${{ inputs.action }}" in
             bootstrap)
               echo "task=${{ steps.stack.outputs.bootstrap_task }}" >> "$GITHUB_OUTPUT"
               echo "container=mysql" >> "$GITHUB_OUTPUT"
+              echo "stream_prefix=db-bootstrap" >> "$GITHUB_OUTPUT"
               # タスク定義の既定値がそのままユーザー作成の SQL なので上書きしない
               echo "overrides=" >> "$GITHUB_OUTPUT"
               ;;
             migrate)
               echo "task=${{ steps.stack.outputs.migrate_task }}" >> "$GITHUB_OUTPUT"
               echo "container=migrate" >> "$GITHUB_OUTPUT"
+              echo "stream_prefix=db-migrate" >> "$GITHUB_OUTPUT"
               echo "overrides=" >> "$GITHUB_OUTPUT"
               ;;
             sql)
@@ -135,6 +139,7 @@ jobs:
               }' > overrides.json
               echo "task=${{ steps.stack.outputs.bootstrap_task }}" >> "$GITHUB_OUTPUT"
               echo "container=mysql" >> "$GITHUB_OUTPUT"
+              echo "stream_prefix=db-bootstrap" >> "$GITHUB_OUTPUT"
               echo "overrides=overrides.json" >> "$GITHUB_OUTPUT"
               ;;
           esac
@@ -146,6 +151,7 @@ jobs:
       # パイプで終了コードを隠さないよう、値は一度変数に入れてから判定する
       # (手元の検証で java -jar ... | tail の終了コードを取り違えた実例がある)。
       - name: Run Task を実行して終了を待つ
+        id: run
         run: |
           set -euo pipefail
 
@@ -168,6 +174,10 @@ jobs:
           fi
           echo "起動しました: $task_arn"
 
+          # タスクが失敗しても後続のログ取得ステップが参照できるよう、待つ前に出しておく
+          task_id="${task_arn##*/}"
+          echo "task_id=$task_id" >> "$GITHUB_OUTPUT"
+
           aws ecs wait tasks-stopped \
             --cluster "${{ steps.stack.outputs.cluster }}" \
             --tasks "$task_arn"
@@ -182,8 +192,7 @@ jobs:
             --tasks "$task_arn" \
             --query 'tasks[0].stoppedReason' --output text)
 
-          # ログの場所を出す。ログストリーム名は <prefix>/<container>/<task id>
-          task_id="${task_arn##*/}"
+          # 実行結果とログの場所をサマリに出す
           {
             echo "### DB タスク: ${{ inputs.action }} (${{ inputs.env }})"
             echo ""
@@ -203,15 +212,29 @@ jobs:
 
       - name: CloudWatch Logs の内容を出す
         if: always()
+        env:
+          TASK_ID: ${{ steps.run.outputs.task_id }}
         run: |
           set -uo pipefail
           group="/ecs/nuxt-java-practice-${{ inputs.env }}"
-          # 直近のログストリームを 1 本だけ取る。失敗しても本体の結果は変えない
-          stream=$(aws logs describe-log-streams --log-group-name "$group" \
-            --order-by LastEventTime --descending --max-items 1 \
-            --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
-          if [ -n "$stream" ] && [ "$stream" != "None" ]; then
-            echo "--- $group : $stream ---"
-            aws logs get-log-events --log-group-name "$group" --log-stream-name "$stream" \
-              --limit 200 --query 'events[].message' --output text || true
+
+          # run-task に到達する前に落ちた場合はタスク ID がない
+          if [ -z "$TASK_ID" ]; then
+            echo "タスク ID が取れていないためログの取得を省略します"
+            exit 0
+          fi
+
+          # ロググループは環境ごとに 1 つで、アプリの ECS サービスも同じ場所に書く。
+          # ストリーム名は <awslogs-stream-prefix>/<container>/<task id> で決まるので、
+          # 一覧から探さず直接組み立てる。LastEventTime 順の一覧は結果整合で
+          # (aws logs describe-log-streams help)、終わったばかりのタスクが先頭に来る保証がない。
+          stream="${{ steps.plan.outputs.stream_prefix }}/${{ steps.plan.outputs.container }}/$TASK_ID"
+          echo "--- $group : $stream ---"
+
+          # 末尾 200 件を jq で 1 イベント 1 行に出す。--output text は配列をタブ区切りで
+          # 並べるため、200 件が 1 行に潰れて読めない。
+          # 取得に失敗しても本体の結果は変えない(コンテナが起動できなければストリーム自体がない)。
+          if ! aws logs get-log-events --log-group-name "$group" --log-stream-name "$stream" \
+               --limit 200 --output json 2>/dev/null | jq -r '.events[].message'; then
+            echo "ログストリームが見つかりませんでした(コンテナが起動できなかった可能性があります)"
           fi
