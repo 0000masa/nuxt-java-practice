@@ -1,7 +1,12 @@
 # CloudFormation スタックを作成 / 更新する(フェーズ13)。
 #
 # 設計 → docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md
-# 手順書 → docs/infrastructure/cloudformation-operations.md
+# 経緯 → docs/adr/0009-cfn-apply-as-the-single-cloudformation-caller.md
+# 手順書 → docs/infrastructure/cloudformation-operations.md の §8
+#
+# 【このワークフローは順序だけを表現する】
+# aws コマンドはここには 1 つも無い。CloudFormation の叩き方は cfn-apply.yml、DB 操作は
+# db-task.yml が唯一の正で、こちらは workflow_call で「どの順に呼ぶか」だけを持つ(→ ADR-0009)。
 #
 # 【2 段階デプロイになっている理由】
 # 必要な順序は「RDS 作成 → DB ユーザー作成 → マイグレーション → サービス起動」だが、
@@ -10,6 +15,18 @@
 # 起動できない状態で作るとスタックが失敗する。
 # そこで DesiredCount=0 で作り(0 タスクなら即座に安定する)、Run Task を回してから
 # もう一度スタックを更新して N に上げる。
+#
+# 【cfn-apply.yml に渡している 3 つの入力】
+# web_desired_count / allow_missing_stack / allow_zero_desired_count は cfn-apply.yml の
+# workflow_call にしか宣言されていない入力で、既存環境向けの guard を外すためのもの。
+# guard のエラーメッセージはどちらも「cfn-deploy.yml を使ってください」と言っており、
+# 呼び出し元がこのワークフロー本人ならその案内は意味を持たない(→ cfn-apply.yml 冒頭)。
+#
+# 【途中で失敗したら、このワークフローをもう一度流す】
+# 中途半端な環境は必ず「WebDesiredCount=0」に収束するので、再実行が安全に通る。
+# 1 段目は差分ゼロで素通りし、4 段目が 0 → params の値に上げ直す。
+# 例外は CREATE そのものが失敗した場合(ROLLBACK_COMPLETE)で、これは cfn-destroy.yml が先。
+# 対応表 → 手順書 §8「途中で失敗したとき」。
 name: CloudFormation スタックを作成/更新
 
 on:
@@ -25,20 +42,20 @@ on:
         type: string
         required: true
       dry_run:
-        description: Change Set を作るだけで実行しない(差分を確認したいとき)
+        description: Change Set を作るだけで実行しない(テンプレートの検証と権限の確認)
         type: boolean
         default: false
 
-env:
-  AWS_REGION: ap-northeast-1
-  TEMPLATE: cloudformation/app.yml
-
+# 呼ばれる側の権限は「呼び出し側を上限として下げられる」だけなので、ここを削ると
+# cfn-apply.yml / db-task.yml の AssumeRole が落ちる。
 permissions:
   id-token: write
   contents: read
 
 # 同じ環境に対して同時にデプロイしない(CloudFormation 側でも弾かれるが、
-# 途中で Run Task が走る構成なので手前で止める)
+# 途中で Run Task が走る構成なので手前で止める)。
+# cfn-destroy.yml と同じグループ。cfn-apply.yml は concurrency を持たない
+# (呼ばれる側が同じグループを持つと親子で枠を取り合って止まるため → cfn-apply.yml 冒頭)
 concurrency:
   group: cfn-deploy-${{ inputs.env }}
   cancel-in-progress: false
@@ -48,127 +65,15 @@ jobs:
   # 1 段目: DesiredCount=0 でスタックを作成 / 更新する
   # ---------------------------------------------------------------------------
   deploy-zero:
-    runs-on: ubuntu-latest
-    environment: ${{ inputs.env }}
-    outputs:
-      desired_count: ${{ steps.params.outputs.desired_count }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: AWS に AssumeRole する(OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # テンプレートが 51,200 バイト(リクエストに直接載せられる上限)を超えているので、
-      # deploy に --s3-bucket を渡して S3 経由にする必要がある。渡さないと aws-cli が
-      # AWS を呼ぶ前に DeployBucketRequiredError で落ちる。
-      # バケットは手動管理の常駐リソース(→ 手順書 §3)。名前はアカウント ID から組み立てる。
-      - name: テンプレート置き場のバケット名を組み立てる
-        id: bucket
-        run: |
-          set -euo pipefail
-          account=$(aws sts get-caller-identity --query Account --output text)
-          echo "name=nuxt-java-practice-cfn-templates-${account}" >> "$GITHUB_OUTPUT"
-
-      # 2 段目で戻す値を params ファイルから読む。
-      # ここで読んでおくのは「テンプレートと実体がずれない」ようにするため
-      # (CloudFormation には ignore_changes が無いので、常に params の値へ収束させる)。
-      - name: params から DesiredCount を読む
-        id: params
-        run: |
-          set -euo pipefail
-          count=$(jq -r '.[] | select(.ParameterKey=="WebDesiredCount") | .ParameterValue' \
-            "cloudformation/params/${{ inputs.env }}.json")
-          echo "desired_count=$count" >> "$GITHUB_OUTPUT"
-          echo "params の WebDesiredCount = $count"
-
-      # deploy は内部で Change Set を作って即実行する。
-      # dry_run のときだけ --no-execute-changeset にして差分をサマリに出す。
-      # 実行しない Change Set はスタックに残るので、見終わったら消す。
-      - name: Change Set の差分を出す(dry run)
-        if: inputs.dry_run
-        run: |
-          set -euo pipefail
-          stack="nuxt-java-practice-${{ inputs.env }}"
-          name="dryrun-${GITHUB_RUN_ID}"
-
-          # 失敗しても下の差分表示まで進みたいので握り潰す。
-          # aws-cli v2 は差分ゼロでも終了コード 0 なので、ここで拾うのは
-          # テンプレートの検証エラーや権限不足で Change Set が作れなかった場合。
-          aws cloudformation deploy \
-            --template-file "$TEMPLATE" \
-            --stack-name "$stack" \
-            --s3-bucket "${{ steps.bucket.outputs.name }}" \
-            --s3-prefix templates \
-            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-execute-changeset \
-            --change-set-name "$name" \
-            --parameter-overrides \
-              $(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "cloudformation/params/${{ inputs.env }}.json" | tr '\n' ' ') \
-              ImageTag=${{ inputs.image_tag }} \
-              BasicAuthCredential='${{ secrets.BASIC_AUTH_CREDENTIAL }}' \
-            > /dev/null || true
-
-          # 初回作成でも Change Set は作られ(スタックは REVIEW_IN_PROGRESS になる)、
-          # describe-change-set で差分は読める。読めないのは Change Set 自体が
-          # 作られなかったときなので、Status を見て理由を出し分ける。
-          # なお差分ゼロのときは Status が FAILED になる(異常ではない)。
-          detail=$(aws cloudformation describe-change-set \
-            --stack-name "$stack" --change-set-name "$name" --output json 2>/dev/null || echo '{}')
-          status=$(echo "$detail" | jq -r '.Status // "NOT_FOUND"')
-          reason=$(echo "$detail" | jq -r '.StatusReason // ""')
-
-          {
-            echo "### Change Set の差分(実行していません)"
-            echo ""
-            if [ "$status" = "CREATE_COMPLETE" ]; then
-              echo '```'
-              aws cloudformation describe-change-set --stack-name "$stack" --change-set-name "$name" \
-                --query 'Changes[].ResourceChange.{操作:Action,種類:ResourceType,論理ID:LogicalResourceId,置換:Replacement}' \
-                --output table
-              echo '```'
-            elif echo "$reason" | grep -qi "didn't contain changes\|No updates are to be performed"; then
-              echo "差分がありませんでした。テンプレートと params は既にこのスタックへ反映済みです。"
-            else
-              echo "Change Set を作れませんでした(Status: $status)。テンプレートの検証エラーか権限不足を疑う。"
-              echo ""
-              echo '```'
-              echo "${reason:-理由はこのジョブのログを見る}"
-              echo '```'
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          # 実行しない Change Set を残さない(名前は実行ごとに変わるので衝突はしないが、溜め続ける意味がない)。
-          # ただし初回作成のときに作られたスタックの器は REVIEW_IN_PROGRESS のまま残る
-          # (delete-change-set が消すのはネストスタックだけ)。次の deploy は
-          # REVIEW_IN_PROGRESS のスタックを「無い」とみなして CREATE の Change Set を
-          # 作り直すので、放置して構わない(→ 手順書 §8)。
-          if [ "$status" != "NOT_FOUND" ]; then
-            aws cloudformation delete-change-set --stack-name "$stack" --change-set-name "$name" \
-              || echo "::warning::Change Set を削除できませんでした。手で消してください: $name"
-          fi
-
-      - name: スタックを作成/更新する(DesiredCount=0)
-        if: ${{ !inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          aws cloudformation deploy \
-            --template-file "$TEMPLATE" \
-            --stack-name "nuxt-java-practice-${{ inputs.env }}" \
-            --s3-bucket "${{ steps.bucket.outputs.name }}" \
-            --s3-prefix templates \
-            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset \
-            --tags Project=nuxt-java-practice Env=${{ inputs.env }} ManagedBy=cloudformation \
-            --parameter-overrides \
-              $(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "cloudformation/params/${{ inputs.env }}.json" | tr '\n' ' ') \
-              ImageTag=${{ inputs.image_tag }} \
-              WebDesiredCount=0 \
-              BasicAuthCredential='${{ secrets.BASIC_AUTH_CREDENTIAL }}'
+    uses: ./.github/workflows/cfn-apply.yml
+    with:
+      env: ${{ inputs.env }}
+      image_tag: ${{ inputs.image_tag }}
+      dry_run: ${{ inputs.dry_run }}
+      web_desired_count: "0"
+      allow_missing_stack: true
+      allow_zero_desired_count: true
+    secrets: inherit
 
   # ---------------------------------------------------------------------------
   # 2 段目: DB ユーザーを作る
@@ -195,61 +100,46 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 4 段目: サービスを起動する
+  #
+  # web_desired_count を渡さないので params の WebDesiredCount に収束する。
+  # allow_zero_desired_count が必要なのは「今の」値が 0(1 段目が入れた値)だから。
   # ---------------------------------------------------------------------------
   deploy-service:
-    needs: [deploy-zero, migrate]
+    needs: migrate
+    uses: ./.github/workflows/cfn-apply.yml
+    with:
+      env: ${{ inputs.env }}
+      image_tag: ${{ inputs.image_tag }}
+      allow_zero_desired_count: true
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # 5 段目: 締めのサマリ
+  #
+  # 値は 4 段目の outputs から受け取るので AWS を叩かない(AssumeRole も要らない)。
+  # ---------------------------------------------------------------------------
+  summary:
+    needs: deploy-service
     runs-on: ubuntu-latest
-    environment: ${{ inputs.env }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: AWS に AssumeRole する(OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      # ジョブが変わると steps の値は引き継がれないので、ここでも組み立てる
-      - name: テンプレート置き場のバケット名を組み立てる
-        id: bucket
-        run: |
-          set -euo pipefail
-          account=$(aws sts get-caller-identity --query Account --output text)
-          echo "name=nuxt-java-practice-cfn-templates-${account}" >> "$GITHUB_OUTPUT"
-
-      - name: DesiredCount を上げる
-        run: |
-          set -euo pipefail
-          aws cloudformation deploy \
-            --template-file "$TEMPLATE" \
-            --stack-name "nuxt-java-practice-${{ inputs.env }}" \
-            --s3-bucket "${{ steps.bucket.outputs.name }}" \
-            --s3-prefix templates \
-            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" \
-            --capabilities CAPABILITY_NAMED_IAM \
-            --no-fail-on-empty-changeset \
-            --tags Project=nuxt-java-practice Env=${{ inputs.env }} ManagedBy=cloudformation \
-            --parameter-overrides \
-              $(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "cloudformation/params/${{ inputs.env }}.json" | tr '\n' ' ') \
-              ImageTag=${{ inputs.image_tag }} \
-              WebDesiredCount=${{ needs.deploy-zero.outputs.desired_count }} \
-              BasicAuthCredential='${{ secrets.BASIC_AUTH_CREDENTIAL }}'
-
       - name: 結果をサマリに出す
+        env:
+          APP_URL: ${{ needs.deploy-service.outputs.app_url }}
+          ALB_DNS: ${{ needs.deploy-service.outputs.alb_dns }}
+          IMAGE_TAG: ${{ needs.deploy-service.outputs.image_tag }}
+          DESIRED_COUNT: ${{ needs.deploy-service.outputs.desired_count }}
         run: |
           set -euo pipefail
-          outputs=$(aws cloudformation describe-stacks \
-            --stack-name "nuxt-java-practice-${{ inputs.env }}" \
-            --query 'Stacks[0].Outputs' --output json)
-          get() { echo "$outputs" | jq -r --arg k "$1" '.[] | select(.OutputKey==$k) | .OutputValue'; }
+          # 4 段目が「差分なし」で素通りしたときは outputs が空で返る
           {
-            echo "### スタックを更新しました(${{ inputs.env }})"
+            echo ""
+            echo "### 構築が完了しました(${{ inputs.env }})"
             echo ""
             echo '```'
-            echo "URL          : $(get AppUrl)"
-            echo "ALB          : $(get LoadBalancerDnsName)"
-            echo "イメージタグ : ${{ inputs.image_tag }}"
-            echo "タスク数     : ${{ needs.deploy-zero.outputs.desired_count }}"
+            echo "URL          : ${APP_URL:-(取得できませんでした)}"
+            echo "ALB          : ${ALB_DNS:-(取得できませんでした)}"
+            echo "イメージタグ : ${IMAGE_TAG:-(取得できませんでした)}"
+            echo "タスク数     : ${DESIRED_COUNT:-(取得できませんでした)}"
             echo '```'
             echo ""
             echo "**SES の検証が完了するまでメールは飛びません。**スタックの成功とは無関係です"
