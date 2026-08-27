@@ -8,7 +8,7 @@
 
 結論を先に言うと:
 
-- **void0(VoidZero)は会社名。** Vite の作者 Evan You が 2024 年に設立した JavaScript ツーリング専業の会社で、**2026 年に Cloudflare に参加**している。
+- **void0(VoidZero)は会社名。** Vite の作者 Evan You が 2024 年に設立した JavaScript ツーリング専業の会社で、**2026 年に Cloudflare に買収され、その傘下に入った**。
 - **登場する名前は 4 層に分かれる。** 会社(VoidZero)/ 部品(Oxc・Rolldown)/ 個別ツール(oxlint・oxfmt・Vite・Vitest)/ 統合入口(Vite+)。
 - **「統合」の技術的な正体は「パーサーを 1 つにしたこと」。** CLI を 1 個にまとめた話ではない。
 - **Vite+ はビルドツールではなく「開発の入口」。** npm / nvm / Turborepo に相当する層まで飲み込んでいる。比較相手は ESLint 単体ではなく「npm + nvm + turbo + vite + vitest + eslint + prettier」のセット全部。
@@ -19,7 +19,7 @@
 
 | 層 | 名前 | 実体 |
 |---|---|---|
-| **会社** | **VoidZero**(void0) | Evan You が 2024 年に設立した会社。2026 年に Cloudflare に参加 |
+| **会社** | **VoidZero**(void0) | Evan You が 2024 年に設立した会社。2026 年に Cloudflare に買収され、現在は同社の傘下 |
 | **部品** | **Oxc** | Rust 製の言語ツールチェーン。パーサー / リゾルバ / トランスフォーマ / minifier の集合。**単体では使わない土台** |
 | **部品** | **Rolldown** | Rust 製バンドラ。Oxc の上に載る。Rollup の API 互換を狙う |
 | **個別ツール** | **oxlint** | Lint 担当。ESLint の位置 |
@@ -186,7 +186,7 @@ oxlint と oxfmt は**バンドラに依存しない単体ツール**で、や�
 
 ## 用語集
 
-- **VoidZero(void0)** — Evan You が 2024 年に設立した JavaScript ツーリング専業の会社。2026 年に Cloudflare に参加。**ツール名ではない**
+- **VoidZero(void0)** — Evan You が 2024 年に設立した JavaScript ツーリング専業の会社。2026 年に Cloudflare に買収され、同社の傘下に入った。**ツール名ではない**
 - **Oxc** — VoidZero 製の Rust 言語ツールチェーン。パーサー / リゾルバ / トランスフォーマ / minifier の集合。「JavaScript Oxidation Compiler」の略
 - **Rolldown** — Oxc の上に載る Rust 製バンドラ。Rollup の API 互換を狙う。Vite 8 以降のバンドラ
 - **oxlint** — Oxc 製の Lint ツール。ESLint の位置。870 以上のルールを内蔵し、ESLint 互換 API の JS プラグインも動かせる
