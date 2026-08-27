@@ -20,7 +20,7 @@
 | 9 | シードタスク | タスクモード(`--app.task=seed`)実装。users 1万 / posts 100万 / likes 300万 をセットベース SQL で投入 | 未着手 |
 | 10 | index 実験 | 検索ラボで実験用 index(複合・FULLTEXT)の before/after を検証し、結果を `docs/notes/` に記録 | 未着手 |
 | 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 完了 |
-| 12 | AWS 運用 | `db-task.yml`(ECS Run Task で bootstrap/migrate/任意SQL)、SES/S3 の本番設定。**フェーズ13 に取り込んで実施済み**(DB ユーザー分離により必須化したため)。残っているのは seed の実行(フェーズ9 待ち) | 完了 |
+| 12 | AWS 運用 | `db-task.yml`(ECS Run Task で create-db-users/migrate/任意SQL)、SES/S3 の本番設定。**フェーズ13 に取り込んで実施済み**(DB ユーザー分離により必須化したため)。残っているのは seed の実行(フェーズ9 待ち) | 完了 |
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)

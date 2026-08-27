@@ -14,7 +14,7 @@
   2. ECR リポジトリ             … フェーズ11 で作成済み
   3. OIDC プロバイダ            … フェーズ11 で作成済み
   4. IAM ロール(ECR push 用)   … フェーズ11 で作成済み
-  5. IAM ロール 2 つ(今回)     … §2
+  5. IAM ロール 3 つ(今回)     … §2
   6. テンプレート置き場の S3     … §3
   7. SSM の SecureString 4 つ   … §4
   8. GitHub の Environment      … §5
@@ -38,7 +38,7 @@
 |---|---|
 | Route53 ホストゾーン | 作り直すと NS レコードが変わり、X-Server 側の再設定と DNS 伝播待ちが発生する |
 | ECR リポジトリ | スタックより先に存在していないと push もデプロイもできない |
-| OIDC プロバイダ・IAM ロール | スタックに入れると循環依存になる(→ [github-actions-oidc.md](./github-actions-oidc.md)) |
+| OIDC プロバイダ・IAM ロール | スタックに入れると循環依存になる(→ [github-actions-oidc.md](./github-actions-oidc.md))。GitHub Actions が引き受けるロールは、それが操作する対象の外に置く |
 | SSM の SecureString | 外部サービス由来の値(Google)と、人が決める値(app / migrate のパスワード)なので AWS では生成できない |
 | テンプレート置き場の S3 バケット | `app.yml` が 54,178 バイトあり、**リクエストに直接載せられる上限 51,200 バイトを超えている**。CloudFormation がテンプレートを読める場所は S3(か SSM ドキュメント)だけなので中継が必要(→ §3) |
 
@@ -46,17 +46,24 @@ RDS のマスターパスワードは**手動管理ではない**。`ManageMaste
 
 ---
 
-## 2. IAM ロールを 2 つ作る
+## 2. IAM ロールを 3 つ作る
 
 **サービスロール方式**を採っている。Actions が持つのは「CloudFormation を叩く権限」だけで、リソースを作るのは CloudFormation が引き受けるロール。Actions の一時クレデンシャルが漏れても、**テンプレートに書かれていないことはできない**。
 
 ```
-Actions ロール(cloudformation:* + PassRole + ecs:RunTask …)
-  ↓ deploy --role-arn
+cfn-*.yml が引き受けるロール(cloudformation:* + PassRole)
+  ↓ create-change-set --role-arn
 CloudFormation サービスロール(リソース作成権限)
   ↓
 AWS リソース
+
+db-task.yml が引き受けるロール(ecs:RunTask + PassRole + logs 読み取り)
+  ↓ ecs run-task
+ECS タスク(db-ops / db-migrate)
 ```
+
+**Actions 側のロールは 2 つに分けている。** `db-task.yml` は任意 SQL を流せるワークフローなので、
+その実行に `cloudformation:*` を持つクレデンシャルを降ろさない(→ §2-3)。
 
 ### 2-1. CloudFormation サービスロール
 
@@ -127,7 +134,7 @@ aws iam list-role-policies --role-name "$ROLE"
 
 - `secretsmanager:CreateSecret` / `TagResource` / `kms:DescribeKey` は **`ManageMasterUserPassword` に必須**(RDS ユーザーガイドに明記されている)
 - `iam:CreateServiceLinkedRole` は ECS・RDS・Application Auto Scaling が初回にサービスリンクロールを作るのに要る
-- `iam:PassRole` は、作ったタスクロールを ECS に渡すのに要る
+- `iam:PassRole` は、作ったロール(実行ロール / タスクロール)を ECS に渡すのに要る
 
 ### 2-2. GitHub Actions が引き受けるロール
 
@@ -189,30 +196,6 @@ aws iam put-role-policy \
         }
       },
       {
-        "Sid": "RunDbTask",
-        "Effect": "Allow",
-        "Action": ["ecs:RunTask", "ecs:DescribeTasks"],
-        "Resource": "*"
-      },
-      {
-        "Sid": "PassTaskRoles",
-        "Effect": "Allow",
-        "Action": "iam:PassRole",
-        "Resource": [
-          "arn:aws:iam::${ACCOUNT_ID}:role/nuxt-java-practice-stg-task-execution-role",
-          "arn:aws:iam::${ACCOUNT_ID}:role/nuxt-java-practice-stg-bootstrap-task-role"
-        ],
-        "Condition": {
-          "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" }
-        }
-      },
-      {
-        "Sid": "ReadTaskLogs",
-        "Effect": "Allow",
-        "Action": ["logs:DescribeLogStreams", "logs:GetLogEvents"],
-        "Resource": "arn:aws:logs:ap-northeast-1:${ACCOUNT_ID}:log-group:/ecs/nuxt-java-practice-stg:*"
-      },
-      {
         "Sid": "PutTemplate",
         "Effect": "Allow",
         "Action": ["s3:PutObject", "s3:GetObject"],
@@ -238,6 +221,135 @@ aws iam put-role-policy \
 **`--description` に日本語は使えない**(`[	
 
  -~¡-ÿ]*` の制約。フェーズ11 で踏んだ)。
+
+### 2-3. `db-task.yml` が引き受けるロール
+
+`nuxt-java-practice-gha-dbtask-stg` を作る。**信頼ポリシーは §2-2 と同じ**(同じリポジトリの同じ Environment から引き受けるため)。
+
+```bash
+# ${ACCOUNT_ID} は自分のアカウント ID に置き換える
+aws iam create-role \
+  --role-name nuxt-java-practice-gha-dbtask-stg \
+  --description "GitHub Actions: run one-off DB tasks on the stg stack" \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::${ACCOUNT_ID}:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:0000masa@134136756/nuxt-java-practice@1303585339:environment:stg"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:ref": "refs/heads/main"
+        }
+      }
+    }]
+  }'
+```
+
+権限ポリシー。**`db-task.yml` が実際に呼ぶ 5 つだけ**で、すべてリソースを特定している。
+
+```bash
+aws iam put-role-policy \
+  --role-name nuxt-java-practice-gha-dbtask-stg \
+  --policy-name RunDbTask \
+  --policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "ReadStackOutputs",
+        "Effect": "Allow",
+        "Action": "cloudformation:DescribeStacks",
+        "Resource": "arn:aws:cloudformation:ap-northeast-1:${ACCOUNT_ID}:stack/nuxt-java-practice-stg/*"
+      },
+      {
+        "Sid": "RunDbTask",
+        "Effect": "Allow",
+        "Action": "ecs:RunTask",
+        "Resource": [
+          "arn:aws:ecs:ap-northeast-1:${ACCOUNT_ID}:task-definition/nuxt-java-practice-stg-db-ops:*",
+          "arn:aws:ecs:ap-northeast-1:${ACCOUNT_ID}:task-definition/nuxt-java-practice-stg-db-migrate:*"
+        ],
+        "Condition": {
+          "ArnEquals": {
+            "ecs:cluster": "arn:aws:ecs:ap-northeast-1:${ACCOUNT_ID}:cluster/nuxt-java-practice-stg-cluster"
+          }
+        }
+      },
+      {
+        "Sid": "WatchDbTask",
+        "Effect": "Allow",
+        "Action": "ecs:DescribeTasks",
+        "Resource": "arn:aws:ecs:ap-northeast-1:${ACCOUNT_ID}:task/nuxt-java-practice-stg-cluster/*",
+        "Condition": {
+          "ArnEquals": {
+            "ecs:cluster": "arn:aws:ecs:ap-northeast-1:${ACCOUNT_ID}:cluster/nuxt-java-practice-stg-cluster"
+          }
+        }
+      },
+      {
+        "Sid": "PassTaskRoles",
+        "Effect": "Allow",
+        "Action": "iam:PassRole",
+        "Resource": [
+          "arn:aws:iam::${ACCOUNT_ID}:role/nuxt-java-practice-stg-task-execution-role",
+          "arn:aws:iam::${ACCOUNT_ID}:role/nuxt-java-practice-stg-db-ops-execution-role"
+        ],
+        "Condition": {
+          "StringEquals": { "iam:PassedToService": "ecs-tasks.amazonaws.com" }
+        }
+      },
+      {
+        "Sid": "ReadTaskLogs",
+        "Effect": "Allow",
+        "Action": "logs:GetLogEvents",
+        "Resource": "arn:aws:logs:ap-northeast-1:${ACCOUNT_ID}:log-group:/ecs/nuxt-java-practice-stg:*"
+      }
+    ]
+  }'
+```
+
+**`iam:PassRole` が要るのは、ロールを「引き受ける」からではなく「ECS に渡す」から。** タスク定義には `ExecutionRoleArn` と `TaskRoleArn` が書かれていて、`run-task` を呼ぶとその 2 本を ECS(`ecs-tasks.amazonaws.com`)に引き受けさせることになる。この許可が独立しているのは権限昇格を防ぐためで、無条件に許すと弱い権限の主体が強いロールのタスクを起動して、そのタスク越しに強い権限を使えてしまう。ここで 2 本に限定しているのは、実行ロールが **SSM の SecureString** を読み、`db-ops-execution-role` に至っては **RDS のマスターパスワードのシークレット**まで読めるため。
+
+渡し先の**タスク定義**は `nuxt-java-practice-stg-db-ops` と `nuxt-java-practice-stg-db-migrate` の 2 つ。どちらもタスクロールを持たず(AWS を呼ばないので不要)、**実行ロールだけが違う**。
+
+| タスク定義 | 実行ロール | 何を読めるか |
+|---|---|---|
+| `...-db-migrate` | `...-task-execution-role`(アプリと共有) | SSM の SecureString 4 つ |
+| `...-db-ops` | `...-db-ops-execution-role`(専用) | DB のパスワード 2 つ + **RDS のマスターシークレット** |
+
+**実行ロールを分けているのが最小権限の実体。** 共有ロールにマスターシークレットを入れると、アプリのタスク定義からもマスターの値を注入できてしまい、「マスターに触るのは `db-ops` だけ」が成立しない(→ [ADR-0005](../adr/0005-separate-db-users-for-app-and-migration.md))。
+
+| | 実行ロール(`ExecutionRoleArn`) | タスクロール(`TaskRoleArn`) |
+|---|---|---|
+| 誰が使うか | **ECS エージェント**(タスクを起動するために) | **コンテナの中のプロセス**(AWS SDK で AWS を呼ぶために) |
+| 何に使うか | ECR から pull / ログを書く / `Secrets` の値を取ってコンテナに渡す | アプリなら SES 送信・S3 の読み書き・ECS Exec |
+| 省略 | できない | できる(AWS を呼ばないタスクなら不要) |
+
+**DB への接続にはどちらのロールも関係しない。** RDS には MySQL のユーザー名とパスワードで繋ぐ。パスワードは `Secrets` 経由で実行ロールが取得し、コンテナには環境変数として渡るだけなので、コンテナ自身は AWS を一度も呼ばない。`db-migrate` がタスクロールを持たないのはそのため(Flyway は AWS API を使わない)。ネットワーク到達性は SG(ECS → RDS の 3306)が担保している。
+同じ形は AWS のマネージドポリシー [`AmazonEC2ContainerServiceEventsRole`](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEC2ContainerServiceEventsRole.html)(EventBridge が ECS タスクを起動するためのロール)でも使われている。
+
+**`ecs:RunTask` のリソースはタスク定義。** [Identity-based policy examples for Amazon ECS](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/security_iam_id-based-policy-examples.html) に「The resources for `RunTask` are task definitions」と明記されていて、クラスタは `ecs:cluster` 条件で絞る。`:*` は「そのファミリーの全リビジョン」の意味で、スタックを更新するたびにリビジョンが上がるので必須。`ecs:DescribeTasks` 側のリソースはタスク ARN(`task/<クラスタ名>/<タスク ID>`)で、タスク ID は実行のたびに変わるのでワイルドカードにしている。
+
+**タスク定義を増やしたら、このポリシーにも足すこと。** 絞った代償で、`app.yml` に DB タスクを追加しただけでは `run-task` が `AccessDeniedException` になる。
+
+#### 既存のロールから権限を移すときの順序
+
+`nuxt-java-practice-gha-cfn-stg` から `RunDbTask` / `PassTaskRoles` / `ReadTaskLogs` を外す作業は、**新しいロールに切り替わってから**行う。
+
+```
+1. 新ロールを作る(上の 2 コマンド)
+2. Environment stg に AWS_DB_TASK_ROLE_ARN を登録する(→ §5)
+3. db-task.yml の変更を main に反映する
+4. gha-cfn-stg のポリシーを §2-2 の内容(3 つを外したもの)に貼り替える
+```
+
+4 を先にやると、その間 `db-task.yml` が動かなくなる。
 
 ---
 
@@ -304,13 +416,14 @@ RDS のマスターパスワードはここに置かない(RDS が Secrets Manag
 
 ## 5. GitHub 側の設定
 
-**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 3 つ登録する。
+**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 4 つ登録する。
 
-| Secret 名 | 値 |
-|---|---|
-| `AWS_CFN_DEPLOY_ROLE_ARN` | `nuxt-java-practice-gha-cfn-stg` の ARN |
-| `AWS_CFN_SERVICE_ROLE_ARN` | `nuxt-java-practice-cfn-service-stg` の ARN |
-| `BASIC_AUTH_CREDENTIAL` | `user:password` の形(コロン区切りの生の文字列) |
+| Secret 名 | 値 | 使うワークフロー |
+|---|---|---|
+| `AWS_CFN_DEPLOY_ROLE_ARN` | `nuxt-java-practice-gha-cfn-stg` の ARN | `cfn-apply` / `cfn-destroy` |
+| `AWS_CFN_SERVICE_ROLE_ARN` | `nuxt-java-practice-cfn-service-stg` の ARN | 同上(`--role-arn` に渡す) |
+| `AWS_DB_TASK_ROLE_ARN` | `nuxt-java-practice-gha-dbtask-stg` の ARN | `db-task` |
+| `BASIC_AUTH_CREDENTIAL` | `user:password` の形(コロン区切りの生の文字列) | `cfn-apply` |
 
 **Environment secrets にしているのがポイント。** prod を作るときは Environment `prod` に同じ名前で別の値を入れれば、ワークフローのコードは一切変えずに切り替わる。
 
@@ -364,7 +477,7 @@ aws sesv2 create-email-identity --email-identity <自分のメールアドレス
 
    中で 5 段動く:
      deploy-zero    … DesiredCount=0 でスタック作成   (cfn-apply.yml を呼ぶ)
-     bootstrap      … app / migrate ユーザーを作る    (db-task.yml を呼ぶ)
+     create-db-users … app / migrate ユーザーを作る   (db-task.yml を呼ぶ)
      migrate        … Flyway                          (db-task.yml を呼ぶ)
      deploy-service … DesiredCount を params の値に上げる (cfn-apply.yml を呼ぶ)
      summary        … 締めのサマリ(AWS は叩かない)
@@ -395,13 +508,13 @@ aws sesv2 create-email-identity --email-identity <自分のメールアドレス
 |---|---|---|---|
 | 1 段目(新規作成) | `ROLLBACK_COMPLETE` | 「作成に失敗したスタックは更新できません」 | **`cfn-destroy` → `cfn-deploy`** |
 | 1 段目(既存への更新) | `UPDATE_ROLLBACK_COMPLETE` / `DesiredCount=0` | 「`WebDesiredCount` が 0 です」 | `cfn-deploy` を再実行 |
-| 2 段目(bootstrap) | `CREATE_COMPLETE` / `DesiredCount=0` | 同上 | `db-task`(bootstrap)単体、または `cfn-deploy` 再実行 |
+| 2 段目(create-db-users) | `CREATE_COMPLETE` / `DesiredCount=0` | 同上 | `db-task`(create-db-users)単体、または `cfn-deploy` 再実行 |
 | 3 段目(migrate) | 同上 | 同上 | `db-task`(migrate)単体、または `cfn-deploy` 再実行 |
 | 4 段目(サービス起動) | `UPDATE_ROLLBACK_COMPLETE` / **`DesiredCount` は 0 に巻き戻る** | 同上 | 原因を直して `cfn-deploy` 再実行 |
 
 4 段目の巻き戻りは都合が良い方向に働く。CloudFormation が UPDATE をロールバックすると `WebDesiredCount` パラメータも前の値(0)に戻るので、**どこで失敗しても「`DesiredCount=0`」という 1 つの状態に収束**し、`cfn-apply` の precheck の 1 行がそれを全部拾う。
 
-bootstrap の失敗で多いのは **SSM に入れたパスワードに `'` か `\` が含まれている**ケース(SQL の文字列リテラルに埋め込まれるため → §4)。ログは Actions のジョブサマリに出るロググループとタスク ID から辿る。
+create-db-users の失敗で多いのは **SSM に入れたパスワードに `'` か `\` が含まれている**ケース(SQL の文字列リテラルに埋め込まれるため → §4)。ログは Actions のジョブサマリに出るロググループとタスク ID から辿る。
 
 ---
 
@@ -431,7 +544,7 @@ Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
 | 何も無い状態から環境を建てる | `cfn-deploy.yml`(構築) |
 | `app.yml` / `params` の変更を反映する | **`cfn-apply.yml`(反映)** |
 | 新しいイメージをデプロイする | **`cfn-apply.yml`** に `image_tag` を渡す |
-| bootstrap / migrate をやり直す、任意 SQL | `db-task.yml` |
+| create-db-users / migrate をやり直す、任意 SQL | `db-task.yml` |
 | 環境を消す | `cfn-destroy.yml`(撤収) |
 
 ### 差分だけ見たいとき
@@ -454,7 +567,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 **このワークフローは stg 専用。** 本番のスタックを消すボタンは作らない。
 
-**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 3 つ / SSM の SecureString 4 つ / ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
+**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 4 つ / ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
 
 撤収し忘れると課金が続くもの: **NAT Gateway(約 $0.062/時)・RDS・ALB・WAF(Web ACL 月 $5 + ルール 月 $1 の時間割り)**。
 
@@ -464,9 +577,11 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 | 症状 | 見るところ |
 |---|---|
+| `db-task` だけ `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Environment に `AWS_DB_TASK_ROLE_ARN` を登録したか(→ §2-3・§5)。信頼ポリシーは `gha-cfn-stg` と同じ形 |
+| `run-task` が `AccessDeniedException` / `is not authorized to perform: iam:PassRole` | §2-3 のポリシーがタスク定義名・クラスタ名・ロール名と一致しているか。**リソースまで絞っているので、タスク定義を増やしたら IAM 側にも足す** |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 信頼ポリシーの `sub`。`environment:` を使うと末尾が `environment:stg` になる。実際のクレームを出す手順 → [github-actions-oidc.md](./github-actions-oidc.md) §8 |
 | スタックは成功したのにメールが来ない | **SES の検証待ち。** `AWS::SES::EmailIdentity` は検証完了を待たずに `CREATE_COMPLETE` になる |
-| `Service ARN did not stabilize` | タスクが起動できていない。`bootstrap` / `migrate` を流したか。CloudWatch Logs の `/ecs/nuxt-java-practice-stg` を見る |
+| `Service ARN did not stabilize` | タスクが起動できていない。`create-db-users` / `migrate` を流したか。CloudWatch Logs の `/ecs/nuxt-java-practice-stg` を見る |
 | ブラウザに認証ダイアログが出ずアクセスできない | WAF のカスタムレスポンスに `www-authenticate` が入っているか。ALB の `fixed-response` ではヘッダーを付けられないのでこの経路は使えない |
 | 検索ラボ(フェーズ8)の検索が弾かれる | WAF にマネージドルールを足していないか。SQL に似たキーワードが SQLi ルールに引っかかる |
 | `DELETE_FAILED` で撤収が止まる | 画像バケットが空になっているか。詰まったら `delete-stack --deletion-mode FORCE_DELETE_STACK` か `--retain-resources` |
@@ -475,7 +590,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 | `Template file size ... must be deployed via an S3 Bucket`(`DeployBucketRequiredError`) | テンプレートが 51,200 バイトを超えている。`deploy` に `--s3-bucket` が渡っているか。バケットを作ったか(→ §3) |
 | 反映が `作り直しが含まれています` で止まった | **意図した変更か確かめる。** `Database` が対象なら実行すると中のデータが消える。意図的なら `allow_replacement=true` で再実行 |
 | 反映が `差分がありませんでした` で終わる | 既に反映済み。テンプレートを直したつもりで直っていない(コミットし忘れ)可能性も見る |
-| 反映が `WebDesiredCount が 0 です` で止まった | `cfn-deploy.yml` が bootstrap / migrate で失敗して止まっている。先に `cfn-deploy.yml` を完走させる |
+| 反映が `WebDesiredCount が 0 です` で止まった | `cfn-deploy.yml` が create-db-users / migrate で失敗して止まっている。先に `cfn-deploy.yml` を完走させる |
 | 反映が `状態が ROLLBACK_COMPLETE です` で止まった | 作成に失敗したスタックは更新できない。`cfn-destroy.yml` で削除してから建て直す |
 | 建てていないのにスタックが `REVIEW_IN_PROGRESS` で存在する | `dry_run=true` で初回の差分を見たときに残る、リソースを持たないスタック。次の構築でそのまま使われるので放置してよい(→ §8) |
 | デプロイしたはずのイメージが古いものに戻った | CloudFormation の外から `ecs update-service` していないか(→ §9 の最後) |

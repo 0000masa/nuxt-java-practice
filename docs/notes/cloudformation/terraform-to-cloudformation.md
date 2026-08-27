@@ -188,9 +188,9 @@ resource "aws_foo" "bar" {
 CloudFormation は `Conditions` に名前を付けて、リソースに `Condition` を貼る。
 
 ```yaml
-# app.yml:192
+# app.yml:204
 Conditions:
-  # DesiredCount が 0 の段(ブートストラップ待ち)ではオートスケーリングを作らない。
+  # DesiredCount が 0 の段(DB ユーザー作成待ち)ではオートスケーリングを作らない。
   ServiceEnabled: !Not [!Equals [!Ref WebDesiredCount, 0]]
   BasicAuthEnabled: !Equals [!Ref EnableBasicAuth, "true"]
   EnhancedMonitoringEnabled: !Not [!Equals [!Ref DbMonitoringInterval, 0]]

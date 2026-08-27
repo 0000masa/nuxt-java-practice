@@ -506,7 +506,7 @@ parameters=$(jq --arg tag "$IMAGE_TAG" --arg cred "$BASIC_AUTH_CREDENTIAL" --arg
 
 | ロール | 誰が引き受けるか | 何ができるか |
 |---|---|---|
-| `AWS_CFN_DEPLOY_ROLE_ARN` | **GitHub Actions**(OIDC で AssumeRole) | `cloudformation:*` と S3・ECS の限定的な権限 |
+| `AWS_CFN_DEPLOY_ROLE_ARN` | **GitHub Actions**(OIDC で AssumeRole) | `cloudformation:*` と S3 の限定的な権限 |
 | `AWS_CFN_SERVICE_ROLE_ARN` | **CloudFormation**(`--role-arn` で渡す) | `AdministratorAccess`(実リソースを作る) |
 
 **これが効くのは「実行者の資格情報が漏れても、テンプレートに書かれていないことはできない」という性質。** Actions のロールは VPC も RDS も直接作れない。作れるのは CloudFormation に頼むことだけで、CloudFormation はテンプレートに書かれた通りにしか動かない。権限の詳細 → [手順書 §2](../../infrastructure/cloudformation-operations.md)。
@@ -593,7 +593,7 @@ deploy --template-file --stack-name [--s3-bucket] [--force-upload] [--s3-prefix]
 このリポジトリの 2 つのロールで見ると:
 
 - **CloudFormation サービスロール** — `AdministratorAccess` なので満たす(→ [手順書 §2-1](../../infrastructure/cloudformation-operations.md))
-- **GitHub Actions が引き受けるロール** — `cloudformation:*` と S3・ECS の限定的な権限だけで、**リソースの `Describe*` 系を持たない**(同 §2-2 の `--policy-name DeployStack`)
+- **GitHub Actions が引き受けるロール** — `cloudformation:*` と S3 の限定的な権限だけで、**リソースの `Describe*` 系を持たない**(同 §2-2 の `--policy-name DeployStack`)
 
 **未検証:** 変更セット作成時の実状態の読み取りが、スタックに紐づくサービスロールで行われるのか、呼び出し側の資格情報で行われるのか、公式ドキュメントに明記がない。前者なら追加不要、後者なら Actions のロールに `ec2:Describe*` / `rds:Describe*` / `ecs:Describe*` / `elasticloadbalancing:Describe*` などが要る。**判別するには、権限を足さずに一度流して `ResourceDriftStatus` が全部 `NOT_CHECKED` で返るかを見るのが早い。**
 
