@@ -62,6 +62,9 @@ flowchart LR
 | WAF | 検証環境の Basic 認証。ALB に関連付ける。ALB の `fixed-response` は `WWW-Authenticate` を付けられないので WAF でしか実現できない(→ [ADR-0006](../adr/0006-basic-auth-with-waf.md)) |
 | Secrets Manager | RDS のマスターパスワード。RDS が生成・保持し、DB を削除すると一緒に消える |
 | SSM Parameter Store | `app` / `migrate` の DB パスワードと Google の資格情報(手動作成・常駐) |
+| CloudWatch | ログの保管、アラーム 7 本(RDS のメトリクス 4 / RDS のログ 2 / ECS のタスク数不足 1)、RDS ログのメトリクスフィルタ 2 |
+| SNS | アラームと RDS イベント購読の通知先。トピック 2 本 + メール購読。**建てるたびに購読確認メールを踏む必要がある**(→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)) |
+| Data Firehose | ECS のログを S3 に長期アーカイブする配信ストリーム。**ただしスタックと一緒に消えるので保全機能としては動いていない**(同上) |
 
 ## ドメインと管理範囲
 
@@ -144,7 +147,7 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 - **依存関係を CloudFormation が自動で解決する。** 1 スタック内なら `!Ref` / `!GetAtt` で参照するだけで、作成順序も削除順序も自動で決まる
 - **リソース数の上限(1 テンプレート 500)に遠く届かない。** この構成はせいぜい 50〜60 個
 
-代わりにテンプレートは 1 ファイルに集まる。**書き上げた `app.yml` は 1365 行・54,178 バイトで、「リクエストに直接載せられるテンプレートの上限 51,200 バイト」を超えた。** そのためテンプレート置き場の S3 バケットが手動管理の常駐リソースとして 1 つ増えている(CloudFormation がテンプレートを読める場所は S3 か SSM ドキュメントだけで、GitHub の raw URL は渡せない)。決定の理由と却下案 → [ADR-0008](../adr/0008-template-bucket-as-resident-resource.md)。
+代わりにテンプレートは 1 ファイルに集まる。**書き上げた `app.yml` は 54,178 バイト(フェーズ14 の監視・検知層を足して 82,361 バイト)で、「リクエストに直接載せられるテンプレートの上限 51,200 バイト」を超えた。** そのためテンプレート置き場の S3 バケットが手動管理の常駐リソースとして 1 つ増えている(CloudFormation がテンプレートを読める場所は S3 か SSM ドキュメントだけで、GitHub の raw URL は渡せない)。決定の理由と却下案 → [ADR-0008](../adr/0008-template-bucket-as-resident-resource.md)。
 
 ### 構築・反映・撤収フロー
 
@@ -170,7 +173,8 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 [撤収するとき]
 1. cfn-destroy.yml を実行(stg 専用。confirm に destroy と入力)
-     画像バケットを空にする → delete-stack + wait
+     バケット 2 つ(画像 / ログアーカイブ)を空にする → delete-stack + wait
+     BucketNotEmpty で失敗したら 1 回だけやり直す(Firehose が書き足すため)
    ホストゾーン・ECR・IAM・SSM・テンプレート置き場は手動管理なので残る
 ```
 
@@ -194,6 +198,7 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 - **RDS の `DeletionPolicy` は既定が `Delete` ではなく `Snapshot`。** 明示的に `Delete` を指定しないと、スタックを消してもスナップショットが残り課金され続ける
 - **S3 バケットはオブジェクトが残っていると削除に失敗する。** 素の CloudFormation に Terraform の `force_destroy` 相当は無い(ドキュメントに明記されている)。**撤収ワークフローが `aws s3 rm --recursive` してから `delete-stack` する**ことで解決している。カスタムリソース(CDK の `autoDeleteObjects` の中身)は書いていない → [ADR-0006](../adr/0006-basic-auth-with-waf.md) ではなく[設計書](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)の決定14
+- **`force_destroy` が無いことは、書き手がいるバケットで競合になる。** ログアーカイブのバケットには Firehose が 900 秒ごとに自動で書きにくるので、「空にする → `delete-stack`」の間にフラッシュが挟まると `BucketNotEmpty` で `DELETE_FAILED` になる。撤収ワークフローが 1 回だけやり直す(2 回目は Firehose が既に消えているので確実に成功する)→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)
 - **Termination protection を有効にしたスタックは削除できない。** このリポジトリでは有効にしない
 - **ECS サービスは安定するまで最大 3 時間ポーリングされる。** タスクが起動できない状態で作ると、3 時間待たされた末に `Service ARN did not stabilize` で失敗する。これが 2 段階デプロイを採った理由
 - **CloudFormation は実リソースの状態を読み直さない。** 更新時に比較するのは「前回のテンプレート」と「今回のテンプレート」だけ。ECS が Blue/Green で ALB のリスナールールの重みを書き換えても追従しないので、Terraform の `ignore_changes` に相当する指定は要らない。ただし**そのリソースの定義を後で編集すると、そのとき重みもテンプレートの値に戻る**。なお既定の Change Set に限った話で、`create-change-set --deployment-mode REVERT_DRIFT`(drift-aware change set)は実物を読んで三方比較する。このリポジトリでは使っていない
@@ -204,6 +209,7 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 - 撤収し忘れると ALB・RDS・NAT Gateway 等で課金が続くため、検証後は必ずスタックを削除する
 - Route53 のホストゾーンとドメイン代は環境の有無にかかわらず発生する(手動管理で常駐するため)
 - ACM の証明書は発行済みで放置しても無料
+- 監視・検知層はほぼ無料枠に収まる。CloudWatch アラームは 10 本まで無料(このスタックは 7 本)、カスタムメトリクス 2 本と Firehose の取り込み量は数時間ぶんなら誤差。**Container Insights(`enhanced`)だけは取り込み量に応じて課金される**ので、費用が気になるときは `params` を `enabled` に落とす(`disabled` は選べない。ECS タスク数不足のアラームが動かなくなるため)
 
 ## ディレクトリ
 

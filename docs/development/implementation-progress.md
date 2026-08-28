@@ -22,6 +22,7 @@
 | 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 完了 |
 | 12 | AWS 運用 | `db-task.yml`(ECS Run Task で create-db-users/migrate/任意SQL)、SES/S3 の本番設定。**フェーズ13 に取り込んで実施済み**(DB ユーザー分離により必須化したため)。残っているのは seed の実行(フェーズ9 待ち) | 完了 |
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
+| 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -33,6 +34,24 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ14: 監視・検知層を実装した(実機未検証)**(2026-08-28):
+  - **方針を先に決めた** → **[ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)**。参考にした Terraform リポジトリの検知層を**構成を変えずに**移植し、**作り捨て運用との不整合は運用で吸収する**。目的が「実務で通用する構成を書けるようになること」なので、運用の都合に合わせて検知層を削ると学習題材としての価値が落ちるため
+  - **設計** → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)(決定 10 件)
+  - **作ったもの**: CloudWatch アラーム 7 本(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ メトリクスフィルタ 2 本 + RDS イベント購読 + SNS トピック 2 本と購読 + ログの S3 アーカイブ(サブスクリプションフィルタ → Firehose → S3)。`app.yml` は 54,178 → **82,361 バイト**(パラメータ 41 / リソース 83 / 出力 16)
+  - **アプリのエラーログ通知(Terraform 側の Lambda 経由)は移植していない。** 通知本文にログを入れられないと管理しづらいため、Sentry 等を別途検討する。`EcsLogGroup` のサブスクリプションフィルタ枠は 1/2 しか使っていない(上限 2 本)ので後から足せる
+  - **受け入れた 4 つの帰結**(全部 ADR-0010 に記録):
+    - 建てるたびに **SNS の購読確認メールを 2 通踏む**。踏むまで通知は 1 通も届かないのに**スタックは緑になる**(SES の EmailIdentity と同じ形)
+    - 建てるたびに **「OK になりました」通知が 7 通届く**。新規アラームは `INSUFFICIENT_DATA` → `OK` の遷移でも `OKActions` が発火するため
+    - **ログアーカイブは撤収のたびに全部消える。** ライフサイクル(30 日 / 365 日)は一度も発火しない。**保全機能としては動いていない**
+    - **スロークエリのアラームはフェーズ8・10 の実験中に鳴り続ける。** 閾値は緩めず人が無視する。**WAF のマネージドルールを入れなかったのと同じ衝突がこれで 2 回目**
+  - **フェーズ13 で新しく開いていた穴を 1 つ塞いだ。** `ContainerInsights` の `AllowedValues` から `disabled` を外した。ECS タスク数不足のアラームは `ECS/ContainerInsights` の `RunningTaskCount` に依存していて、標準の `AWS/ECS` に代替が無い。`params` を 1 行変えるだけで**アラームが残ったまま二度と鳴らなくなる**経路だった(Terraform 側は `enhanced` の直書きで、この穴は無かった)
+  - **CloudFormation 固有で踏んだこと**:
+    - **`{{resolve:ssm-secure:...}}` の対応プロパティ 11 個に `AWS::SNS::Subscription.Endpoint` は入っていない。** 通知先メールは `BasicAuthCredential` と同じく GitHub の Environment secret から渡す(`ALERT_EMAIL`)。`Default` を置かない必須パラメータにして、渡し忘れたら構築が止まるようにした
+    - **メトリクスフィルタの出力にはディメンションが無い。** 名前空間に環境名を含めないと stg と prod のメトリクスが合算される(Terraform は `project_name` 自体が環境名込みだったので問題にならなかった)
+    - **`force_destroy` が無いことが、書き手のいるバケットで競合になる。** Firehose が 900 秒ごとに書きにくるので、「空にする → `delete-stack`」の間にフラッシュが挟まると `BucketNotEmpty` で `DELETE_FAILED`(確率 10〜20%、しかも 15 分待たされた末に分かる)。`cfn-destroy.yml` に 1 回だけのリトライを入れた
+  - **着手前に必要な手動作業が 2 つある(やらないと動かない)**: ① Environment `stg` に secret `ALERT_EMAIL` を登録 ② `gha-cfn-stg` ロールの `EmptyBuckets` にログアーカイブのバケット ARN を追加(→ 手順書 §2-2・§5)
+  - **実機未検証。** 実測で覆りうる項目は設計書 §5 に一覧化した(OK 通知の実数、MySQL の起動時に `[ERROR]` が出るか、`# Query_time:` パターンが MySQL でも一致するか、撤収リトライの発生頻度)
 
 - **フェーズ13 追補: CloudFormation を叩くのを `cfn-apply.yml` 1 本に集約**(2026-08-24):
   - **`cfn-deploy.yml` から aws コマンドを全部消した。** `workflow_call` で `cfn-apply.yml`(1 段目・4 段目)と `db-task.yml`(2 段目・3 段目)を呼ぶだけの 5 ジョブになり、258 行 → 147 行(ほぼコメント)。`cfn-apply.yml` と重複していた「テンプレートを S3 経由で渡す」「params を jq で組み立てる」「`--tags` を毎回渡す」が 1 か所に寄った → **[ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md)**

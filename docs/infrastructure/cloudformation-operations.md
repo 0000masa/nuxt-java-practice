@@ -25,7 +25,8 @@
 [環境を建てる]        §8
 [変更を反映する]      §9
 [撤収する]            §10
-[詰まったとき]        §11
+[監視・検知]          §11
+[詰まったとき]        §12
 ```
 
 **ワークフローは 5 本あるが、AWS を叩くのは 3 本だけ。** `cfn-apply.yml`(CloudFormation)/ `db-task.yml`(ECS Run Task)/ `cfn-destroy.yml`(削除)が実際の操作を持ち、`cfn-deploy.yml`(構築)は **`workflow_call` で前の 2 本を呼ぶ順序だけ**を持っている(→ [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md))。`ecr-push.yml` はイメージの push 専用。
@@ -202,12 +203,14 @@ aws iam put-role-policy \
         "Resource": "arn:aws:s3:::nuxt-java-practice-cfn-templates-${ACCOUNT_ID}/*"
       },
       {
-        "Sid": "EmptyImageBucket",
+        "Sid": "EmptyBuckets",
         "Effect": "Allow",
         "Action": ["s3:ListBucket", "s3:DeleteObject"],
         "Resource": [
           "arn:aws:s3:::nuxt-java-practice-stg-images",
-          "arn:aws:s3:::nuxt-java-practice-stg-images/*"
+          "arn:aws:s3:::nuxt-java-practice-stg-images/*",
+          "arn:aws:s3:::nuxt-java-practice-stg-logs-archive",
+          "arn:aws:s3:::nuxt-java-practice-stg-logs-archive/*"
         ]
       }
     ]
@@ -217,6 +220,8 @@ aws iam put-role-policy \
 **`iam:PassedToService` の条件を付けているのが要点。** これが無いと「ロールを渡す」権限がどのサービスにでも使えてしまい、権限昇格の経路になる。
 
 `PutTemplate` はテンプレートを S3 に置くために要る(→ §3)。**CloudFormation サービスロール側は `s3:*` を持っているので追加不要**(置いたテンプレートを読むのは CloudFormation)。
+
+**`EmptyBuckets` にはバケットが 2 つ並ぶ。** 素の CloudFormation に `force_destroy` 相当が無いので、撤収ワークフローが `aws s3 rm --recursive` で空にしてから消している。**フェーズ14 でログアーカイブのバケットが増えたので、ここに ARN を足していないと撤収が必ず失敗する。**
 
 **`--description` に日本語は使えない**(`[	
 
@@ -416,7 +421,7 @@ RDS のマスターパスワードはここに置かない(RDS が Secrets Manag
 
 ## 5. GitHub 側の設定
 
-**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 4 つ登録する。
+**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 5 つ登録する。
 
 | Secret 名 | 値 | 使うワークフロー |
 |---|---|---|
@@ -424,10 +429,13 @@ RDS のマスターパスワードはここに置かない(RDS が Secrets Manag
 | `AWS_CFN_SERVICE_ROLE_ARN` | `nuxt-java-practice-cfn-service-stg` の ARN | 同上(`--role-arn` に渡す) |
 | `AWS_DB_TASK_ROLE_ARN` | `nuxt-java-practice-gha-dbtask-stg` の ARN | `db-task` |
 | `BASIC_AUTH_CREDENTIAL` | `user:password` の形(コロン区切りの生の文字列) | `cfn-apply` |
+| `ALERT_EMAIL` | アラートの通知先メールアドレス | `cfn-apply` |
 
 **Environment secrets にしているのがポイント。** prod を作るときは Environment `prod` に同じ名前で別の値を入れれば、ワークフローのコードは一切変えずに切り替わる。
 
 Basic 認証の値は `params/stg.json` には置かない。**base64 化はテンプレート側の `Fn::Base64` が行う**ので、ここには生の `user:password` を入れる。
+
+**`ALERT_EMAIL` は必須。** テンプレート側の `AlertEmail` パラメータに `Default` を置いていないので、登録し忘れると `cfn-apply.yml` がガードで落ちる(→ §11)。SSM の SecureString に置けないのは、`{{resolve:ssm-secure:...}}` の対応プロパティ 11 個に `AWS::SNS::Subscription.Endpoint` が入っていないため(`BasicAuthCredential` と同じ制約)。
 
 なお **GitHub Free のプライベートリポジトリでは protection rules(required reviewers・ブランチ制限)が使えない。** ブランチ制限は IAM の信頼ポリシー(§2-2)で、任意 SQL の制限はワークフロー側の分岐で埋めている。
 
@@ -573,7 +581,47 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 ---
 
-## 11. 詰まったときの見どころ
+## 11. 監視・検知(通知を受け取れる状態にする)
+
+> 設計 → [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)
+
+スタックはアラーム 7 本と SNS トピック 2 本を作る。**建てただけでは通知は 1 通も届かない。**
+
+### 11-1. 建てるたびに購読確認メールを 2 通踏む
+
+`AWS::SNS::Subscription` を `Protocol: email` で作ると、CloudFormation は購読を `PendingConfirmation` のまま作り、**確認を待たずに `CREATE_COMPLETE` になる。** `ALERT_EMAIL` 宛てに *AWS Notification - Subscription Confirmation* が 2 通届くので、両方のリンクを踏む。
+
+| トピック | 何が飛んでくるか |
+|---|---|
+| `nuxt-java-practice-stg-ecs-task-shortage` | ECS のタスク数不足 |
+| `nuxt-java-practice-stg-rds-alerts` | RDS のログ / メトリクス / イベント |
+
+- **踏み忘れても何も起きない。** スタックは緑、アラームも全部ある、通知だけ来ない。SES の検証待ちと同じ形
+- **片方だけ踏むとその系統だけ無音になる**
+- **確認リンクは 3 日で失効し、SNS に再送 API は無い。** 失効させたらスタックを作り直すか、手で `aws sns subscribe` する
+- 状態は `aws sns list-subscriptions-by-topic --topic-arn <ARN>` で見られる(`SubscriptionArn` が `PendingConfirmation` なら未確認)。ただし **Actions のロールにこの権限は与えていない**ので、手元の管理者クレデンシャルで叩く
+
+`cfn-deploy.yml` の締めのサマリに同じ内容のリマインダが出る。
+
+### 11-2. 建てた直後に届く通知は異常ではない
+
+**「OK になりました」通知が 7 通届く。** CloudWatch アラームのアクションは状態遷移で発火し、新規作成されたアラームは `INSUFFICIENT_DATA` → `OK` を必ず通るため。異常が起きたわけではない。
+
+### 11-3. フェーズ8・10 の実験中はスロークエリアラームが鳴り続ける
+
+`long_query_time` は 1 秒、アラームは「5 分間に 5 件以上」。検索ラボ(フェーズ8)と index 実験(フェーズ10)は**遅いクエリを意図的に出す**のが目的なので、実験中は鳴る。**閾値は緩めていない。人が無視する。**
+
+うるさければ、実験中だけコンソールでアラームのアクションを止められる(CloudWatch → アラーム → **アクション → 無効化**)。CloudFormation から見ればドリフトになるが、撤収すれば消えるので実害は無い。
+
+### 11-4. アーカイブされたログは撤収で消える
+
+`nuxt-java-practice-stg-logs-archive` バケットはスタックの一部なので、**撤収するとアーカイブも全部消える。** ライフサイクル(30 日で Glacier IR / 365 日で削除)は一度も発火しない。**保全機能としては動いていない**(意図した割り切り → ADR-0010)。残したいログがあれば撤収前に自分で落とす。
+
+Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3 に着く前に消える**。配線が正しいかを確かめたいときは、建ててから 15 分ほど待って `aws s3 ls s3://nuxt-java-practice-stg-logs-archive/app-logs/ --recursive` を見る。オブジェクトが 1 つも無く原因を知りたいときは、ロググループ `/aws/kinesisfirehose/nuxt-java-practice-stg-logs-archive` の `S3Delivery` ストリームに配信エラーの理由が出る。
+
+---
+
+## 12. 詰まったときの見どころ
 
 | 症状 | 見るところ |
 |---|---|
@@ -584,7 +632,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 | `Service ARN did not stabilize` | タスクが起動できていない。`create-db-users` / `migrate` を流したか。CloudWatch Logs の `/ecs/nuxt-java-practice-stg` を見る |
 | ブラウザに認証ダイアログが出ずアクセスできない | WAF のカスタムレスポンスに `www-authenticate` が入っているか。ALB の `fixed-response` ではヘッダーを付けられないのでこの経路は使えない |
 | 検索ラボ(フェーズ8)の検索が弾かれる | WAF にマネージドルールを足していないか。SQL に似たキーワードが SQLi ルールに引っかかる |
-| `DELETE_FAILED` で撤収が止まる | 画像バケットが空になっているか。詰まったら `delete-stack --deletion-mode FORCE_DELETE_STACK` か `--retain-resources` |
+| `DELETE_FAILED` で撤収が止まる | バケット 2 つ(画像 / ログアーカイブ)が空になっているか。**ワークフローは 1 回だけ自動でやり直す**ので、それでも止まったら別の原因。詰まったら `delete-stack --deletion-mode FORCE_DELETE_STACK` か `--retain-resources` |
 | Run Task が成功したように見えるがマイグレーションされていない | `describe-tasks` の `exitCode` を見ているか。`run-task` は起動するだけで完了を待たない |
 | Google ログインで `redirect_uri_mismatch` | Google Console の承認済みリダイレクト URI と `APP_BASE_URL` が一致しているか |
 | `Template file size ... must be deployed via an S3 Bucket`(`DeployBucketRequiredError`) | テンプレートが 51,200 バイトを超えている。`deploy` に `--s3-bucket` が渡っているか。バケットを作ったか(→ §3) |
@@ -594,3 +642,10 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 | 反映が `状態が ROLLBACK_COMPLETE です` で止まった | 作成に失敗したスタックは更新できない。`cfn-destroy.yml` で削除してから建て直す |
 | 建てていないのにスタックが `REVIEW_IN_PROGRESS` で存在する | `dry_run=true` で初回の差分を見たときに残る、リソースを持たないスタック。次の構築でそのまま使われるので放置してよい(→ §8) |
 | デプロイしたはずのイメージが古いものに戻った | CloudFormation の外から `ecs update-service` していないか(→ §9 の最後) |
+| 反映が `Environment secret ALERT_EMAIL が未登録です` で止まった | Environment に `ALERT_EMAIL` を登録する(→ §5)。`AlertEmail` は `Default` を持たない必須パラメータ |
+| `DELETE_FAILED` で `EmptyBuckets` の権限エラーが出る | `gha-cfn-stg` の `EmptyBuckets` にログアーカイブのバケット ARN を足したか(→ §2-2)。**フェーズ14 で増えた** |
+| アラームは `ALARM` になっているのにメールが来ない | **SNS の購読を確認していない。** `list-subscriptions-by-topic` で `PendingConfirmation` を見る(→ §11-1) |
+| 建てた直後に「OK になりました」メールが大量に来る | 正常。新規アラームは `INSUFFICIENT_DATA` → `OK` の遷移で `OKActions` が発火する(→ §11-2) |
+| スロークエリのアラームが鳴り止まない | 検索ラボ / index 実験の最中でないか(→ §11-3)。仕様として鳴らしている |
+| ECS タスク数不足のアラームが一度も鳴らない | `ContainerInsights` が有効か。`RunningTaskCount` は Container Insights が発行するもので、`AWS/ECS` には無い |
+| ログアーカイブの S3 にオブジェクトが無い | Firehose のバッファは最大 900 秒。15 分待つ。それでも無ければ `/aws/kinesisfirehose/...` の `S3Delivery` ストリームに配信エラーの理由が出る(→ §11-4) |

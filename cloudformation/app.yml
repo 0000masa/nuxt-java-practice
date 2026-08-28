@@ -176,7 +176,45 @@ Parameters:
     Description: Blue/Green の切替後に blue を残す時間。stg は 0、prod は自動ロールバックの猶予として 30〜60
   ContainerInsights:
     Type: String
-    AllowedValues: [enhanced, enabled, disabled]
+    # disabled を許していない。ECS タスク数不足のアラーム(EcsRunningLessThanDesiredAlarm)は
+    # ECS/ContainerInsights 名前空間の RunningTaskCount / DesiredTaskCount を読むので、
+    # 切るとアラームは残ったまま二度と鳴らなくなる(標準の AWS/ECS にタスク数のメトリクスは無い)。
+    # 費用を抑えたいときは enhanced -> enabled に落とす。→ docs/adr/0010
+    AllowedValues: [enhanced, enabled]
+
+  # --- 監視・検知(→ docs/adr/0010) ---
+  # 通知先のメールアドレス。GitHub の Environment secret ALERT_EMAIL から
+  # cfn-apply.yml が渡す(params ファイルにも SSM にも置かない)。
+  # Default を置いていないのは意図的で、渡し忘れると Change Set の作成が
+  # 「Parameters: [AlertEmail] must have values」で落ちる。検知層が黙って死ぬより、
+  # 構築が止まるほうがマシという判断。
+  # SSM の SecureString は使えない。{{resolve:ssm-secure:...}} の対応プロパティ 11 個に
+  # AWS::SNS::Subscription.Endpoint が入っていないため(BasicAuthCredential と同じ制約)。
+  AlertEmail:
+    Type: String
+    NoEcho: true
+    Description: アラートの通知先メールアドレス。購読確認メールのリンクを踏むまで通知は届かない
+
+  # 以下 4 つは AWS 公式の推奨アラーム(Best Practice Recommended Alarms)ベース。
+  # インスタンスクラスとストレージ容量に連動するので環境ごとに渡す。
+  # CloudFormation に算術の組み込み関数が無いため、計算済みの値を params に書く。
+  RdsCpuThresholdPercent:
+    Type: Number
+    MinValue: 1
+    MaxValue: 100
+    Description: CPUUtilization がこれを超えた状態が 5 分続いたら通知
+  RdsFreeStorageThresholdBytes:
+    Type: Number
+    Description: FreeStorageSpace がこれを下回ったら通知。割当ストレージの 10% が目安
+  RdsFreeableMemoryThresholdBytes:
+    Type: Number
+    Description: FreeableMemory がこれを下回ったら通知。インスタンスの RAM の 25% が目安
+  RdsConnectionsThreshold:
+    Type: Number
+    Description: >-
+      DatabaseConnections がこれを超えたら通知。max_connections は
+      {DBInstanceClassMemory/12582880} でメモリ連動なので、
+      インスタンスクラスを変えたらこの値も見直す
 
   # --- その他 ---
   LogRetentionDays:
@@ -1351,6 +1389,470 @@ Resources:
         ScaleInCooldown: 180
         ScaleOutCooldown: 60
 
+  # ===========================================================================
+  # 監視・検知(SNS + CloudWatch アラーム + RDS イベント購読)
+  # ===========================================================================
+  # 設計 → docs/superpowers/specs/2026-08-28-phase14-monitoring-design.md
+  # 方針 → docs/adr/0010-monitoring-in-ephemeral-stack.md
+  #
+  # 【前提】これは「常時稼働する stg」を前提に書かれた検知層を、作り捨ての環境に
+  # そのまま移植したもの。生じる不整合は構成を歪めて解決せず、運用で吸収する。
+  # 受け入れている帰結は 4 つ。詳細は ADR-0010。
+  #   1. 建てるたびに SNS の購読確認メールを 2 通踏む(踏むまで通知は 1 通も届かない)
+  #   2. 建てるたびに「OK になりました」通知が 7 通届く
+  #      (新規アラームは INSUFFICIENT_DATA -> OK も状態遷移なので OKActions が発火する)
+  #   3. ログアーカイブは撤収のたびに全部消える。保全機能としては動いていない
+  #   4. スロークエリのアラームはフェーズ8・10 の実験中に鳴り続ける
+  # ===========================================================================
+
+  # --- SNS ---------------------------------------------------------------
+  # トピックを 2 本に分けているのは Terraform 側と 1 対 1 に対応させるため。
+  # 宛先は 2 本とも同じ AlertEmail なので、届いたメールはアラーム名で判別する。
+  #
+  # 【重要】email の購読は PendingConfirmation の状態で作られ、CloudFormation は
+  # 確認を待たずに CREATE_COMPLETE になる。リンクを踏むまで通知は 1 通も飛ばない。
+  # SES の EmailIdentity(上の方)と同じ「スタックは成功したのに機能していない」形。
+  # 確認リンクは 3 日で失効し、SNS に再送 API は無い。
+  # cfn-deploy.yml がジョブサマリにリマインダを出す。
+  EcsTaskShortageTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvName}-ecs-task-shortage
+      DisplayName: !Sub ${ProjectName}-${EnvName} ECS
+
+  EcsTaskShortageSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref EcsTaskShortageTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # RDS の 3 系統(ログ由来 / メトリクス / イベント購読)をこの 1 本に集約する
+  RdsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvName}-rds-alerts
+      DisplayName: !Sub ${ProjectName}-${EnvName} RDS
+
+  RdsAlertsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref RdsAlertsTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+
+  # トピックポリシーは付けない。CloudWatch アラームと RDS イベント購読は
+  # 同一アカウント内なら既定のトピックポリシーで publish できる。
+
+  # --- D: ECS タスク数不足(Metric Math) ---------------------------------
+  # RunningTaskCount < DesiredTaskCount なら 1、そうでなければ 0 を返す式を作り、
+  # その式の結果だけを閾値 1 と比較する。
+  # 2 つの生メトリクスは計算材料なので ReturnData: false。判定対象はちょうど 1 つでなければならない。
+  #
+  # DesiredCount が 0 の段(1〜3 段目)では 0 < 0 が偽になるので鳴らない。
+  EcsRunningLessThanDesiredAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-ecs-running-less-than-desired
+      AlarmDescription: ECS service running tasks is less than desired tasks
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      # メトリクス未取得で誤爆しないように
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EcsTaskShortageTopic
+      OKActions:
+        - !Ref EcsTaskShortageTopic
+      Metrics:
+        - Id: m_running
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ECS/ContainerInsights
+              MetricName: RunningTaskCount
+              Dimensions:
+                - Name: ClusterName
+                  Value: !Ref Cluster
+                - Name: ServiceName
+                  Value: !GetAtt Service.Name
+            Period: 60
+            Stat: Minimum
+        - Id: m_desired
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ECS/ContainerInsights
+              MetricName: DesiredTaskCount
+              Dimensions:
+                - Name: ClusterName
+                  Value: !Ref Cluster
+                - Name: ServiceName
+                  Value: !GetAtt Service.Name
+            Period: 60
+            Stat: Minimum
+        - Id: e_shortage
+          ReturnData: true
+          Label: running < desired
+          Expression: IF(m_running < m_desired, 1, 0)
+
+  # --- A: RDS メトリクスアラーム 4 本 -------------------------------------
+  # 評価は AWS 公式推奨どおり「60 秒 x 5 データポイント連続」。一過性のスパイクで鳴らさない。
+  RdsCpuHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-cpu-high
+      AlarmDescription: RDS CPUUtilization is too high (burst credit exhaustion / runaway query)
+      Namespace: AWS/RDS
+      MetricName: CPUUtilization
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      Statistic: Average
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RdsCpuThresholdPercent
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # ストレージ枯渇は DB 停止に直結するので、悪化方向に安全側の Minimum で評価する
+  RdsFreeStorageLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-free-storage-low
+      AlarmDescription: RDS FreeStorageSpace is running low (risk of DB stopping)
+      Namespace: AWS/RDS
+      MetricName: FreeStorageSpace
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      Statistic: Minimum
+      Period: 60
+      ComparisonOperator: LessThanThreshold
+      Threshold: !Ref RdsFreeStorageThresholdBytes
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  RdsFreeableMemoryLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-freeable-memory-low
+      AlarmDescription: RDS FreeableMemory is running low (swap / OOM precursor)
+      Namespace: AWS/RDS
+      MetricName: FreeableMemory
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      Statistic: Average
+      Period: 60
+      ComparisonOperator: LessThanThreshold
+      Threshold: !Ref RdsFreeableMemoryThresholdBytes
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  RdsConnectionsHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-connections-high
+      AlarmDescription: RDS DatabaseConnections near max_connections (connection leak / pool exhaustion)
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref Database
+      Statistic: Average
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RdsConnectionsThreshold
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # --- B: RDS ログ由来のメトリクスとアラーム ------------------------------
+  # 名前空間に EnvName を含めているのは、メトリクスフィルタの出力にディメンションが
+  # 無いため。含めないと stg と prod の値が同じメトリクスに合算される。
+  # (参考にした Terraform 側は project_name 自体が "practice-stg" と環境名込みなので、
+  #  これは形を変えたのではなく同じ挙動に揃えたもの)
+  #
+  # エラーログ: 深刻度タグ [ERROR] の行だけ数える。
+  # エラーログは名前に反してエラー以外も流れる。起動・シャットダウン・InnoDB 初期化などは
+  # [System] / [Note]、軽微な警告は [Warning] で出るので、正常稼働中は [ERROR] が出ない。
+  # つまり「ログは流れているのにメトリクスが出ない」のが正常。
+  # フィルタ構文では引用符なしの [...] は「スペース区切りのフィールド分解」という別機能に
+  # なってしまうので、リテラルとして扱うには引用符で囲んだタームにする。
+  RdsErrorLogMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: !Sub ${ProjectName}-${EnvName}-rds-error-log
+      LogGroupName: !Ref RdsErrorLogGroup
+      FilterPattern: '"[ERROR]"'
+      MetricTransformations:
+        # MetricValue を固定の 1 にすることで「1 件マッチ = 1」の件数カウントになる
+        # (アラーム側は Sum で合計して件数を判定する)
+        - MetricName: RdsErrorLogCount
+          MetricNamespace: !Sub ${ProjectName}-${EnvName}/RDS
+          MetricValue: "1"
+
+  # スロークエリ: 1 エントリが複数行(# Time: / # User@Host: / # Query_time: / SQL 本文)に
+  # またがるので、行数ではなくエントリごとに 1 回だけ出る「# Query_time:」を数える
+  RdsSlowQueryMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      FilterName: !Sub ${ProjectName}-${EnvName}-rds-slowquery-log
+      LogGroupName: !Ref RdsSlowQueryLogGroup
+      FilterPattern: '"# Query_time:"'
+      MetricTransformations:
+        - MetricName: RdsSlowQueryCount
+          MetricNamespace: !Sub ${ProjectName}-${EnvName}/RDS
+          MetricValue: "1"
+
+  # エラーは 1 件でも異常なので「5 分間に 1 件以上」で即通知
+  RdsErrorLogAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-error-log
+      AlarmDescription: RDS error log contains [ERROR] entries
+      Namespace: !Sub ${ProjectName}-${EnvName}/RDS
+      MetricName: RdsErrorLogCount
+      Statistic: Sum
+      Period: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      # メトリクスフィルタはマッチが無いとデータ自体を出さないので、データ無し = 正常
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # スロークエリは 1 件ごとに通知するとアラート疲れを起こすので「5 分間に 5 件以上」の急増だけ拾う。
+  # どの SQL が遅いかは通知後に CloudWatch Logs Insights で見に行く(stg は Performance Insights 非対応)。
+  #
+  # 【既知の衝突】フェーズ8(検索ラボ)とフェーズ10(index 実験)は、100 万件の posts に
+  # index 無しのクエリを投げる実験なので、long_query_time=1 秒をまたぐクエリが連続して出る。
+  # 実験中はこのアラームが鳴り続ける。閾値を緩めず、通知を人が無視する運用にしている。→ ADR-0010
+  RdsSlowQuerySurgeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-slowquery-surge
+      AlarmDescription: RDS slow query count surged (>= 5 in 5 minutes)
+      Namespace: !Sub ${ProjectName}-${EnvName}/RDS
+      MetricName: RdsSlowQueryCount
+      Statistic: Sum
+      Period: 300
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 5
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # --- C: RDS イベント購読 -------------------------------------------------
+  # ログにもメトリクスにも出ない「RDS 自体のライフサイクル事象」を拾う。
+  # creation / deletion のカテゴリは購読していないので、建て直しのたびには飛ばない。
+  # configuration change は RDS の設定を変える cfn-apply のたびに自分にも通知が来るが、
+  # 実務と同じ構成を維持する判断。
+  RdsEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      SubscriptionName: !Sub ${ProjectName}-${EnvName}-rds-events
+      SnsTopicArn: !Ref RdsAlertsTopic
+      SourceType: db-instance
+      SourceIds:
+        - !Ref Database
+      Enabled: true
+      EventCategories:
+        - availability          # 停止・再起動
+        - configuration change  # DB 設定変更(ガバナンス用途)
+        - failover              # Multi-AZ フェイルオーバー
+        - failure               # インスタンス障害
+        - low storage           # ストレージ残量逼迫
+        - maintenance           # メンテナンスウィンドウでの再起動等
+
+  # ===========================================================================
+  # ログの S3 アーカイブ(CloudWatch Logs -> Firehose -> S3)
+  # ===========================================================================
+  # 【重要】このスタックは撤収のたびに消えるので、アーカイブされたログも毎回全部消える。
+  # ライフサイクルの 30 日 / 365 日は一度も発火しない。**保全機能としては動いていない。**
+  # 常駐リソースを増やさないこと・Terraform と 1 対 1 に対応させることを優先した意図的な
+  # 割り切りで、設計ミスではない。→ docs/adr/0010
+  # ===========================================================================
+  LogArchiveBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub ${ProjectName}-${EnvName}-logs-archive
+      # 監査目的のログなので公開は全面ブロック
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          # 128KB 超だけ Glacier IR へ。小さいオブジェクトは移行課金の無駄なので Standard 据え置き
+          - Id: transition-large-to-glacier-ir
+            Status: Enabled
+            ObjectSizeGreaterThan: 131072
+            Transitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 30
+          - Id: expire-all
+            Status: Enabled
+            ExpirationInDays: 365
+
+  # Firehose の「配信エラーの理由」を記録する。これが無いと S3 配信に失敗したときに
+  # 原因(IAM / バケット等)を追えない。失敗レコードの退避先(ErrorOutputPrefix)とは別物。
+  FirehoseErrorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/kinesisfirehose/${ProjectName}-${EnvName}-logs-archive
+      # 運用診断用なので保持は短め。アーカイブ対象ではない(自分自身は Firehose に流さない)
+      RetentionInDays: 14
+
+  # ストリームを先に 1 本作っておくことで、Firehose のロールの権限を logs:PutLogEvents だけに
+  # 絞れる(自動生成させると logs:CreateLogStream も要る)
+  FirehoseErrorLogStream:
+    Type: AWS::Logs::LogStream
+    Properties:
+      LogGroupName: !Ref FirehoseErrorLogGroup
+      LogStreamName: S3Delivery
+
+  FirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-firehose-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: firehose.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WriteLogArchive
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PutObjects
+                Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt LogArchiveBucket.Arn
+                  - !Sub ${LogArchiveBucket.Arn}/*
+              - Sid: WriteDeliveryErrors
+                Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                # ロググループの Arn は末尾が :* なので、その配下のログストリームも含む
+                Resource: !GetAtt FirehoseErrorLogGroup.Arn
+
+  # CloudWatch Logs が Firehose に流すために引き受けるロール。
+  # 配信先が Lambda の場合はリソースベースポリシー(AWS::Lambda::Permission)で許可するので
+  # ロールが要らないが、Firehose にはそれが無いのでこちら側でロールを渡す。
+  CwlToFirehoseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-cwl-to-firehose-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: !Sub logs.${AWS::Region}.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PutToFirehose
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PutRecords
+                Effect: Allow
+                Action:
+                  - firehose:PutRecord
+                  - firehose:PutRecordBatch
+                Resource: !GetAtt LogArchiveDeliveryStream.Arn
+
+  # 圧縮について: CloudWatch Logs は subscription に gzip 圧縮済みで流すため、
+  # ここでは展開も再圧縮もせず届いたデータをそのまま置く(CompressionFormat: UNCOMPRESSED)。
+  # 展開すると取り込み課金が解凍後のバイト数基準になって割高になる。
+  LogArchiveDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: !Sub ${ProjectName}-${EnvName}-logs-archive
+      DeliveryStreamType: DirectPut
+      ExtendedS3DestinationConfiguration:
+        RoleARN: !GetAtt FirehoseRole.Arn
+        BucketARN: !GetAtt LogArchiveBucket.Arn
+        CompressionFormat: UNCOMPRESSED
+        # 低トラフィックでも 1 オブジェクトを大きくするため時間は最大(900 秒)。
+        # サイズ 64MB は大量時の上限で、低トラフィックでは時間側が先に効く。
+        # 【注意】このスタックは数時間で消えるので、生成されるオブジェクトは数個で、
+        # 最後の最大 15 分ぶんは配信前に消える。撤収時の競合対策は cfn-destroy.yml 側。
+        BufferingHints:
+          IntervalInSeconds: 900
+          SizeInMBs: 64
+        # 日付パーティション(Athena で読むときのスキャン量を減らす)
+        Prefix: "app-logs/!{timestamp:yyyy/MM/dd/}"
+        # S3 書き込みに失敗したレコードの退避先
+        ErrorOutputPrefix: "errors/!{firehose:error-output-type}/!{timestamp:yyyy/MM/dd/}"
+        CloudWatchLoggingOptions:
+          Enabled: true
+          LogGroupName: !Ref FirehoseErrorLogGroup
+          LogStreamName: !Ref FirehoseErrorLogStream
+
+  # 全ログを長期アーカイブへ。FilterPattern が空文字 = 全件マッチ。
+  # このロググループには app / db-migrate / db-ops の 3 つが書くので、任意 SQL の
+  # 実行結果もアーカイブに含まれる。
+  # サブスクリプションフィルタは 1 ロググループあたり 2 本までで、これで 1/2。
+  # 残りの 1 本はアプリのエラー通知(Sentry 等)を足すときのために空けてある。
+  EcsLogArchiveSubscriptionFilter:
+    Type: AWS::Logs::SubscriptionFilter
+    Properties:
+      FilterName: !Sub ${ProjectName}-${EnvName}-ecs-log-to-firehose-archive
+      LogGroupName: !Ref EcsLogGroup
+      FilterPattern: ""
+      DestinationArn: !GetAtt LogArchiveDeliveryStream.Arn
+      RoleArn: !GetAtt CwlToFirehoseRole.Arn
+
 # -----------------------------------------------------------------------------
 # 出力
 # -----------------------------------------------------------------------------
@@ -1409,3 +1911,15 @@ Outputs:
   SesIdentity:
     Description: 検証が完了するまでメールは送れない(スタックの成功とは無関係)
     Value: !Ref EmailIdentity
+
+  LogArchiveBucketName:
+    Description: 撤収時に空にするバケット(2 つ目)。Firehose が書き続けるので競合対策が要る
+    Value: !Ref LogArchiveBucket
+
+  EcsTaskShortageTopicArn:
+    Description: ECS の検知の通知先。購読確認メールを踏むまで通知は届かない
+    Value: !Ref EcsTaskShortageTopic
+
+  RdsAlertsTopicArn:
+    Description: RDS の検知の通知先(ログ / メトリクス / イベントの 3 系統を集約)
+    Value: !Ref RdsAlertsTopic
