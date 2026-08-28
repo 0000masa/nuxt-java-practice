@@ -1,7 +1,7 @@
 # 作り捨ての環境に、常時稼働前提の検知層をそのまま持ち込む
 
 日付: 2026-08-28
-ステータス: accepted
+ステータス: accepted(**帰結 1 は [ADR-0011](./0011-slack-notification-with-chatbot.md) で解消。通知先はメールではなく Slack**)
 
 ## 決定
 
@@ -27,7 +27,9 @@
 
 ## 結果として生じること(受け入れた 4 つ)
 
-### 1. 建てるたびに SNS の購読確認メールを 2 通踏む
+> **後日の追記(2026-08-28)**: このうち **1 は解消した。** 通知先をメールから Slack(Amazon Q Developer in chat applications)に移し、SNS のメール購読そのものを無くしたため → [ADR-0011](./0011-slack-notification-with-chatbot.md)。**2・3・4 は残っている。**以下は当時の記録としてそのまま残す。
+
+### 1. 建てるたびに SNS の購読確認メールを 2 通踏む(→ ADR-0011 で解消)
 
 `AWS::SNS::Subscription` を `Protocol: email` で作ると、CloudFormation は購読を `PendingConfirmation` のまま作り、**確認を待たずに `CREATE_COMPLETE` になる。** リンクを踏むまでアラートは 1 通も届かない。**スタックは緑、アラームも全部ある、なのに誰にも届かない**という壊れ方をする。これは `AWS::SES::EmailIdentity` で既に踏んでいるのと同じ形。
 
@@ -67,7 +69,9 @@ CloudWatch アラームのアクションは**状態遷移**で発火する。�
 
 - **ALB のアラームを足す**(`TargetResponseTime` / `HTTPCode_ELB_5XX_Count`)— `TargetResponseTime` は「遅いが落ちてはいない」を捕まえる、この構成で唯一の目になるはずだった(B のスロークエリは DB 内の時間しか見ないので、速いクエリを 200 回投げる N+1 は素通りする)。Terraform に無いものを増やさない判断で見送った
 
-- **アプリのエラーログ通知(E)をメトリクスフィルタ + アラームで作る** — Lambda を持ち込まずに済むが、**通知本文にログの中身が入らない。** Terraform 側が Lambda を挟んでいるのはそのためで、そこを落とすと管理しづらい。CloudFormation で Lambda を持つとコード zip の置き場が常駐 S3 として増えるので、どちらも採らず Sentry などを別途検討する
+- **アプリのエラーログ通知(E)をメトリクスフィルタ + アラームで作る** — Lambda を持ち込まずに済むが、**通知本文にログの中身が入らない。** Terraform 側が Lambda を挟んでいるのはそのためで、そこを落とすと管理しづらい。どちらも採らず Sentry などを別途検討する
+
+  > **訂正(2026-08-28)**: ここには当初「CloudFormation で Lambda を持つとコード zip の置き場が常駐 S3 として増える」と書いていたが、**これは誤り。** `AWS::Lambda::Function` の `Code.ZipFile` は Python / Node.js を 4096 文字以内でインラインに書けるので S3 は要らない。**E を移植しないという結論は変わらない**(理由は「アプリケーション以外のコードを持ちたくない」であって、S3 が増えることではなかった)。なお **Chatbot に移しても E は実現しない** — CloudWatch Logs のサブスクリプションフィルタは SNS に送れないため → [ADR-0011](./0011-slack-notification-with-chatbot.md)
 
 - **スロークエリの閾値をパラメータに開き、実験時に上げる** — `params` を書き換えて `cfn-apply` するので commit が要る。実験のたびには重い
 

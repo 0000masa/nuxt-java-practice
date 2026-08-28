@@ -25,6 +25,7 @@ cloudformation/
 | `WebDesiredCount` | `cfn-deploy.yml`(1 段目は 0、4 段目で `params` の値)。`cfn-apply.yml` は `params` の値をそのまま渡す |
 | `BasicAuthCredential` | GitHub の Environment secret |
 | `HostedZoneId` | `params`。秘密ではないがアカウント固有なので手で埋める |
+| `SlackWorkspaceId` / `SlackChannelIdEcs` / `SlackChannelIdRds` | `params`。同上。**Slack の ID は秘密ではない**(認可済みの AWS アカウントからしか使えないため)→ [docs/slack/README.md](../docs/slack/README.md) |
 
 **`app.yml` は 51,200 バイトを超えている。** CloudFormation が**リクエストに直接受け取れるテンプレートの上限**で、`CreateStack` / `UpdateStack` / **`ValidateTemplate`** に等しく掛かる。そのため:
 

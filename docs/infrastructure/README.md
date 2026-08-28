@@ -63,7 +63,7 @@ flowchart LR
 | Secrets Manager | RDS のマスターパスワード。RDS が生成・保持し、DB を削除すると一緒に消える |
 | SSM Parameter Store | `app` / `migrate` の DB パスワードと Google の資格情報(手動作成・常駐) |
 | CloudWatch | ログの保管、アラーム 7 本(RDS のメトリクス 4 / RDS のログ 2 / ECS のタスク数不足 1)、RDS ログのメトリクスフィルタ 2 |
-| SNS | アラームと RDS イベント購読の通知先。トピック 2 本 + メール購読。**建てるたびに購読確認メールを踏む必要がある**(→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)) |
+| SNS | アラームと RDS イベント購読の通知先。トピック 2 本。**宛先は Slack**(Amazon Q Developer in chat applications がトピック 1 本を 1 チャンネルに転送する)。→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) |
 | Data Firehose | ECS のログを S3 に長期アーカイブする配信ストリーム。**ただしスタックと一緒に消えるので保全機能としては動いていない**(同上) |
 
 ## ドメインと管理範囲
