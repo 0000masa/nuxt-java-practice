@@ -25,7 +25,8 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 ```
 ├── frontend/    Nuxt 4 プロジェクト
 ├── backend/     Spring Boot プロジェクト
-├── cloudformation/  CloudFormation テンプレート
+├── cloudformation/  CloudFormation テンプレート(このリポジトリの IaC)
+├── terraform/   参考用にコピーした他リポジトリのコード(このリポジトリの IaC ではない → 下記)
 ├── docker/      Dockerfile 置き場(docker-compose.yml はリポジトリ直下)
 └── docs/        ドキュメント
 ```
@@ -37,6 +38,30 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 3. S3 + CloudFront は**ユーザーアップロード画像専用**
 4. REST API はすべて `/api/**` 配下。フロントは相対パス `/api` を呼ぶ(開発時は Nuxt の devProxy が backend:8080 へ転送)
 5. AWS 環境は使い終わったらスタックを削除して撤収する運用。**Route53 ホストゾーンと ECR は手動管理**で常駐させ、それ以外を 1 スタックで作り捨てる(理由 → `docs/adr/0001-cloudformation-yaml-over-terraform.md` と `docs/infrastructure/README.md`)
+
+## 参考コード置き場 — `terraform/`
+
+`terraform/` は **別リポジトリ(Laravel + nginx 構成)の Terraform コードを、CloudFormation を書くときの参考としてコピーしたもの**。このリポジトリの AWS 環境を定義しているわけではない。`docs/notes/cloudformation/` の対訳ノートがここからコード例を引いているので、当面リポジトリに残す。
+
+- **`terraform init` / `plan` / `apply` / `destroy` は実行しない。`terraform/` 配下のファイルは編集しない**(ユーザーから明示的に頼まれた場合を除く)
+- **構成はこのリポジトリと違う。そのまま写さないこと。** 重なるのはリソースの種類(ALB / ECS / RDS / S3 / SES / SSM / CloudWatch)までで、1:1 の移植ではない
+
+| `terraform/` にあるもの | このリポジトリでは |
+| --- | --- |
+| nginx + Laravel の 2 コンテナ | Nginx なし。Spring Boot 単体(決定事項 1) |
+| フロントを S3 + CloudFront で配信(`s3.tf` の `frontend_bucket`、`cloudfront.tf` の 2 ディストリビューション) | SSG 出力を Spring Boot の `static/` から配信。S3 + CloudFront は画像専用(決定事項 2・3) |
+| SQS キューワーカー(`sqs.tf` / `ecs_queue.tf`)、EventBridge バッチ(`event_bridge.tf`)、Lambda 通知(`lambda.tf`) | 採用しない |
+| CloudFront スコープの WAF(`waf.tf`) | Basic 認証の方式が異なる → `docs/adr/0006-basic-auth-with-waf.md` |
+| ecspresso でのデプロイ、preview 環境(`stg/preview_shared.tf`) | デプロイまで CloudFormation スタック内で完結(`docs/adr/0007-app-deploy-inside-cloudformation.md`)。preview 環境はない |
+| `terraform-aws-modules/vpc` などの外部モジュール、`stg/` という環境ディレクトリ | 素の YAML 1 スタックを作り捨て。環境ごとの値は `cloudformation/params/` |
+
+参考にしてよいのは、変数化の粒度と「共通部分 + 環境ごとの値」の分け方(`variables.tf` ↔ `Parameters` / `params/`)、IAM ポリシーの切り方、CloudWatch アラームのしきい値設計、ログまわりの構成。
+
+関連ドキュメント:
+
+- `docs/adr/0001-cloudformation-yaml-over-terraform.md` — Terraform をやめた理由
+- `docs/notes/cloudformation/terraform-to-cloudformation.md` — Terraform 経験者向けの対訳ノート(コード例を両方から引いている)
+- `docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md` — `terraform/` から何を写して何を採らなかったかの記録
 
 ## ドキュメント
 
