@@ -18,9 +18,10 @@
   6. テンプレート置き場の S3     … §3
   7. SSM の SecureString 4 つ   … §4
   8. GitHub の Environment      … §5
-  9. params/stg.json を埋める   … §6
- 10. Google Cloud Console       … §7
- 11. SES の受信アドレス検証     … §7
+  9. Slack と AWS を接続        … docs/slack/README.md
+ 10. params/stg.json を埋める   … §6
+ 11. Google Cloud Console       … §7
+ 12. SES の受信アドレス検証     … §7
 
 [環境を建てる]        §8
 [変更を反映する]      §9
@@ -42,6 +43,7 @@
 | OIDC プロバイダ・IAM ロール | スタックに入れると循環依存になる(→ [github-actions-oidc.md](./github-actions-oidc.md))。GitHub Actions が引き受けるロールは、それが操作する対象の外に置く |
 | SSM の SecureString | 外部サービス由来の値(Google)と、人が決める値(app / migrate のパスワード)なので AWS では生成できない |
 | テンプレート置き場の S3 バケット | `app.yml` が 54,178 バイトあり、**リクエストに直接載せられる上限 51,200 バイトを超えている**。CloudFormation がテンプレートを読める場所は S3(か SSM ドキュメント)だけなので中継が必要(→ §3) |
+| Slack ワークスペースの認可とチャンネル | **認可はコンソールでしか行えない**(CloudFormation 不可)。チャンネルと `/invite` も Slack 側の操作。いずれも 1 回きりで、スタックを作り直しても消えない(→ [docs/slack/README.md](../slack/README.md)) |
 
 RDS のマスターパスワードは**手動管理ではない**。`ManageMasterUserPassword: true` により RDS が生成して Secrets Manager が保持し、DB を削除するとシークレットも一緒に消える。
 
@@ -421,7 +423,7 @@ RDS のマスターパスワードはここに置かない(RDS が Secrets Manag
 
 ## 5. GitHub 側の設定
 
-**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 5 つ登録する。
+**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 4 つ登録する。
 
 | Secret 名 | 値 | 使うワークフロー |
 |---|---|---|
@@ -429,13 +431,12 @@ RDS のマスターパスワードはここに置かない(RDS が Secrets Manag
 | `AWS_CFN_SERVICE_ROLE_ARN` | `nuxt-java-practice-cfn-service-stg` の ARN | 同上(`--role-arn` に渡す) |
 | `AWS_DB_TASK_ROLE_ARN` | `nuxt-java-practice-gha-dbtask-stg` の ARN | `db-task` |
 | `BASIC_AUTH_CREDENTIAL` | `user:password` の形(コロン区切りの生の文字列) | `cfn-apply` |
-| `ALERT_EMAIL` | アラートの通知先メールアドレス | `cfn-apply` |
 
 **Environment secrets にしているのがポイント。** prod を作るときは Environment `prod` に同じ名前で別の値を入れれば、ワークフローのコードは一切変えずに切り替わる。
 
 Basic 認証の値は `params/stg.json` には置かない。**base64 化はテンプレート側の `Fn::Base64` が行う**ので、ここには生の `user:password` を入れる。
 
-**`ALERT_EMAIL` は必須。** テンプレート側の `AlertEmail` パラメータに `Default` を置いていないので、登録し忘れると `cfn-apply.yml` がガードで落ちる(→ §11)。SSM の SecureString に置けないのは、`{{resolve:ssm-secure:...}}` の対応プロパティ 11 個に `AWS::SNS::Subscription.Endpoint` が入っていないため(`BasicAuthCredential` と同じ制約)。
+**アラートの通知先はここには無い。** Slack に流すようになり、必要なのはワークスペース ID とチャンネル ID の 3 つだけになった。**いずれも秘密ではないので `params` に平文で置く**(→ §6・[ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。フェーズ14 まであった `ALERT_EMAIL` は不要。
 
 なお **GitHub Free のプライベートリポジトリでは protection rules(required reviewers・ブランチ制限)が使えない。** ブランチ制限は IAM の信頼ポリシー(§2-2)で、任意 SQL の制限はワークフロー側の分岐で埋めている。
 
@@ -443,13 +444,19 @@ Basic 認証の値は `params/stg.json` には置かない。**base64 化はテ�
 
 ## 6. `params/stg.json` を埋める
 
-`HostedZoneId` が `REPLACE_WITH_HOSTED_ZONE_ID` のままなので置き換える。
+`REPLACE_WITH_...` のプレースホルダが 4 つある。
+
+**`HostedZoneId`**:
 
 ```bash
 aws route53 list-hosted-zones-by-name --dns-name mylabinfra.com \
   --query 'HostedZones[0].Id' --output text
 # /hostedzone/Z0123456789ABCDEFG のように返るので、末尾の Z... だけを使う
 ```
+
+**`SlackWorkspaceId` / `SlackChannelIdEcs` / `SlackChannelIdRds`**: Slack 側の手動作業で得る → **[docs/slack/README.md](../slack/README.md)**。
+
+置き換え忘れると **Change Set の作成が `must match pattern` で落ちる**(テンプレート側に `AllowedPattern` を付けてある)。プレースホルダのまま構築が成功して通知が無音になるより、止まるほうがマシという判断。
 
 ---
 
@@ -583,23 +590,25 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 ## 11. 監視・検知(通知を受け取れる状態にする)
 
-> 設計 → [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)
+> 設計 → [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md) / [フェーズ15 の設計書](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)
 
-スタックはアラーム 7 本と SNS トピック 2 本を作る。**建てただけでは通知は 1 通も届かない。**
+スタックはアラーム 7 本と SNS トピック 2 本を作り、**通知は Slack に流れる。**
 
-### 11-1. 建てるたびに購読確認メールを 2 通踏む
+### 11-1. 通知は Slack。毎回踏む手作業は無い
 
-`AWS::SNS::Subscription` を `Protocol: email` で作ると、CloudFormation は購読を `PendingConfirmation` のまま作り、**確認を待たずに `CREATE_COMPLETE` になる。** `ALERT_EMAIL` 宛てに *AWS Notification - Subscription Confirmation* が 2 通届くので、両方のリンクを踏む。
+| トピック | チャンネル | 何が飛んでくるか |
+|---|---|---|
+| `nuxt-java-practice-stg-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足 |
+| `nuxt-java-practice-stg-rds-alerts` | `#njp-alerts-rds` | RDS のログ / メトリクス / イベント |
 
-| トピック | 何が飛んでくるか |
-|---|---|
-| `nuxt-java-practice-stg-ecs-task-shortage` | ECS のタスク数不足 |
-| `nuxt-java-practice-stg-rds-alerts` | RDS のログ / メトリクス / イベント |
+**フェーズ14 まではメール通知で、建てるたびに SNS の購読確認メールを 2 通踏む必要があった。**踏むまで 1 通も届かないのにスタックは緑になり、片方だけ踏み忘れるとその系統だけ無音になる、という運用だった。Slack のチャンネル転送には購読確認の概念が無いので、**この手作業は丸ごと消えた**(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
-- **踏み忘れても何も起きない。** スタックは緑、アラームも全部ある、通知だけ来ない。SES の検証待ちと同じ形
-- **片方だけ踏むとその系統だけ無音になる**
-- **確認リンクは 3 日で失効し、SNS に再送 API は無い。** 失効させたらスタックを作り直すか、手で `aws sns subscribe` する
-- 状態は `aws sns list-subscriptions-by-topic --topic-arn <ARN>` で見られる(`SubscriptionArn` が `PendingConfirmation` なら未確認)。ただし **Actions のロールにこの権限は与えていない**ので、手元の管理者クレデンシャルで叩く
+代わりに **Slack 側に 1 回きりの前提が 2 つある。**どちらもスタックを作り直しても消えないが、**欠けているとスタックは成功するのに通知だけ届かない。**
+
+1. AWS コンソールで Slack ワークスペースを認可してあること(CloudFormation では自動化できない)
+2. 2 つのチャンネルそれぞれで `/invite @Amazon Q` を実行してあること
+
+手順と ID の取り方 → **[docs/slack/README.md](../slack/README.md)**。配線の確認は Chatbot コンソールの **テストメッセージを送信** が早い。
 
 `cfn-deploy.yml` の締めのサマリに同じ内容のリマインダが出る。
 
@@ -628,7 +637,7 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 | `db-task` だけ `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Environment に `AWS_DB_TASK_ROLE_ARN` を登録したか(→ §2-3・§5)。信頼ポリシーは `gha-cfn-stg` と同じ形 |
 | `run-task` が `AccessDeniedException` / `is not authorized to perform: iam:PassRole` | §2-3 のポリシーがタスク定義名・クラスタ名・ロール名と一致しているか。**リソースまで絞っているので、タスク定義を増やしたら IAM 側にも足す** |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 信頼ポリシーの `sub`。`environment:` を使うと末尾が `environment:stg` になる。実際のクレームを出す手順 → [github-actions-oidc.md](./github-actions-oidc.md) §8 |
-| スタックは成功したのにメールが来ない | **SES の検証待ち。** `AWS::SES::EmailIdentity` は検証完了を待たずに `CREATE_COMPLETE` になる |
+| スタックは成功したのにアプリからメールが送れない | **SES の検証待ち。** `AWS::SES::EmailIdentity` は検証完了を待たずに `CREATE_COMPLETE` になる(アラート通知とは無関係) |
 | `Service ARN did not stabilize` | タスクが起動できていない。`create-db-users` / `migrate` を流したか。CloudWatch Logs の `/ecs/nuxt-java-practice-stg` を見る |
 | ブラウザに認証ダイアログが出ずアクセスできない | WAF のカスタムレスポンスに `www-authenticate` が入っているか。ALB の `fixed-response` ではヘッダーを付けられないのでこの経路は使えない |
 | 検索ラボ(フェーズ8)の検索が弾かれる | WAF にマネージドルールを足していないか。SQL に似たキーワードが SQLi ルールに引っかかる |
@@ -642,10 +651,11 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 | 反映が `状態が ROLLBACK_COMPLETE です` で止まった | 作成に失敗したスタックは更新できない。`cfn-destroy.yml` で削除してから建て直す |
 | 建てていないのにスタックが `REVIEW_IN_PROGRESS` で存在する | `dry_run=true` で初回の差分を見たときに残る、リソースを持たないスタック。次の構築でそのまま使われるので放置してよい(→ §8) |
 | デプロイしたはずのイメージが古いものに戻った | CloudFormation の外から `ecs update-service` していないか(→ §9 の最後) |
-| 反映が `Environment secret ALERT_EMAIL が未登録です` で止まった | Environment に `ALERT_EMAIL` を登録する(→ §5)。`AlertEmail` は `Default` を持たない必須パラメータ |
+| 反映が `Parameter 'SlackWorkspaceId' must match pattern` などで止まった | `params` の `REPLACE_WITH_...` を置き換えたか(→ §6・[docs/slack/README.md](../slack/README.md)) |
 | `DELETE_FAILED` で `EmptyBuckets` の権限エラーが出る | `gha-cfn-stg` の `EmptyBuckets` にログアーカイブのバケット ARN を足したか(→ §2-2)。**フェーズ14 で増えた** |
-| アラームは `ALARM` になっているのにメールが来ない | **SNS の購読を確認していない。** `list-subscriptions-by-topic` で `PendingConfirmation` を見る(→ §11-1) |
-| 建てた直後に「OK になりました」メールが大量に来る | 正常。新規アラームは `INSUFFICIENT_DATA` → `OK` の遷移で `OKActions` が発火する(→ §11-2) |
+| アラームは `ALARM` になっているのに Slack に来ない | **`/invite @Amazon Q` を忘れていないか**(→ §11-1)。Chatbot コンソールの **テストメッセージを送信** で切り分ける。転送の失敗理由は `/aws/chatbot/...` に出る |
+| 建てた直後に「OK になりました」通知が大量に来る | 正常。新規アラームは `INSUFFICIENT_DATA` → `OK` の遷移で `OKActions` が発火する(→ §11-2) |
+| スタックの作成が Chatbot のリソースで失敗する | Slack ワークスペースの認可を済ませたか(→ §11-1)。`ConfigurationName` の衝突なら、コンソールで手動のチャンネル設定を作っていないか |
 | スロークエリのアラームが鳴り止まない | 検索ラボ / index 実験の最中でないか(→ §11-3)。仕様として鳴らしている |
 | ECS タスク数不足のアラームが一度も鳴らない | `ContainerInsights` が有効か。`RunningTaskCount` は Container Insights が発行するもので、`AWS/ECS` には無い |
 | ログアーカイブの S3 にオブジェクトが無い | Firehose のバッファは最大 900 秒。15 分待つ。それでも無ければ `/aws/kinesisfirehose/...` の `S3Delivery` ストリームに配信エラーの理由が出る(→ §11-4) |

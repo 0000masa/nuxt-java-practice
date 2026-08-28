@@ -23,6 +23,7 @@
 | 12 | AWS 運用 | `db-task.yml`(ECS Run Task で create-db-users/migrate/任意SQL)、SES/S3 の本番設定。**フェーズ13 に取り込んで実施済み**(DB ユーザー分離により必須化したため)。残っているのは seed の実行(フェーズ9 待ち) | 完了 |
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
 | 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 作業中 |
+| 15 | 通知先の Slack 化 | アラートの宛先をメールから Slack へ。Amazon Q Developer in chat applications(旧 AWS Chatbot)で SNS トピック 2 本を 2 チャンネルに転送。**設計 → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)**、方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -34,6 +35,23 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ15: アラートの通知先を Slack に移した(実機未検証)**(2026-08-28):
+  - **方針** → **[ADR-0011](../adr/0011-slack-notification-with-chatbot.md)**、**設計** → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)(決定 9 件)、**手順書を新設** → [docs/slack/README.md](../slack/README.md)
+  - **動機は ADR-0010 の帰結 1 の解消。** メール購読は「建てるたびに購読確認を 2 通踏む / 踏むまで 1 通も届かないのにスタックは緑 / 片方だけ踏み忘れるとその系統だけ無音」で、**環境を建てるたびに必ず発生し、失敗しても何も起きない**種類の手作業だった。Slack のチャンネル転送には購読確認の概念が無い
+  - **配線は Chatbot に任せ、webhook も Lambda も使わない。** **SNS の HTTPS 購読で Slack の webhook URL を直接叩く構成は成立しない**(Slack が `SubscriptionConfirmation` に応答しないので購読が永久に `PendingConfirmation`。ペイロード形式も合わない)。webhook を使うなら整形役が必須で、その役を AWS に持たせた。**アプリケーション以外のコードを持ちたくない**という判断
+  - **作ったもの**: `AWS::Chatbot::SlackChannelConfiguration` 2 本 + Chatbot 用 IAM ロール 1 本。**消したもの**: SNS の email 購読 2 本 + `AlertEmail` パラメータ + `cfn-apply.yml` の `ALERT_EMAIL` ガードと積み込み + Environment secret 1 つ。`app.yml` は 82,361 → **86,936 バイト**(パラメータ 43 / リソース 84 / 出力 18)
+  - **アラームの構成には一切触っていない。** SNS トピック 2 本も分割の軸もそのまま。今回は宛先の付け替えだけ。チャンネルは `#njp-alerts-ecs` / `#njp-alerts-rds` で、**stg と prod は共用**(通知にアラーム名が入るので判別できる。分けたくなったら `params` の値を差し替えるだけ)
+  - **Slack の ID は `params` に平文で置いた。** ワークスペース ID もチャンネル ID も**秘密ではない**(認可済みの AWS アカウントからしか使えず、「知っていれば誰でも投稿できる」webhook URL とは違う)。`HostedZoneId` と同じ扱い。**結果として仕組みが 1 つ減った**(Environment secret が 5 つ → 4 つ)
+  - **踏んだ / 確かめたこと**:
+    - **`GuardrailPolicies` を省略すると `AdministratorAccess` が既定で適用される。** 通知の受信に権限は要らないので `AWSDenyAll` を明示した
+    - **Chatbot のチャンネル設定は常駐にできない。** トピック名固定で ARN は変わらないが、設定は対象トピックに自分自身を購読させる形で動くので、撤収でトピックが消えると購読も失われる(帰結 1 が形を変えて再発する)
+    - **CloudWatch Logs のサブスクリプションフィルタは SNS に送れない**(送信先は Kinesis / Firehose / Lambda / OpenSearch の 4 つだけ)。**E(アプリのエラーログ通知)は Chatbot でも実現しない**ので、ADR-0010 の結論は変わらない
+    - **Chatbot の API エンドポイントは us-east-2 の 1 本だけ**だが、ap-northeast-1 のスタックから作ってよい。東京は対応リージョン
+    - **IAM の手動作業はゼロ。** リソースを作るのは `AdministratorAccess` を持つ CloudFormation サービスロールなので、`chatbot:*` を足す必要がない(フェーズ14 では `EmptyBuckets` の追加が必要だった)
+  - **ADR-0010 の記述を 1 つ訂正した。** 「CloudFormation で Lambda を持つとコード zip の置き場が常駐 S3 として増える」は**事実として誤り**(`Code.ZipFile` にインラインで書ける)。**E を移植しない結論は変わらない**が、理由が間違っていた
+  - **着手前に必要な手動作業は Slack 側の 2 つだけ**(どちらも 1 回きり・撤収しても消えない): ① AWS コンソールでワークスペースを認可 ② チャンネル 2 つを作り `/invite @Amazon Q`。得た 3 つの ID を `params` のプレースホルダと置き換える
+  - **実機未検証。** 実測で覆りうる項目は設計書 §5 に一覧化した(`/invite` 忘れでも作成が成功するか、RDS イベントの表示形式、OK 通知 7 通の体感、`/aws/chatbot/...` のログ量)
 
 - **フェーズ14: 監視・検知層を実装した(実機未検証)**(2026-08-28):
   - **方針を先に決めた** → **[ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)**。参考にした Terraform リポジトリの検知層を**構成を変えずに**移植し、**作り捨て運用との不整合は運用で吸収する**。目的が「実務で通用する構成を書けるようになること」なので、運用の都合に合わせて検知層を削ると学習題材としての価値が落ちるため
