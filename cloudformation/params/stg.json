@@ -40,6 +40,10 @@
   { "ParameterKey": "RdsFreeableMemoryThresholdBytes", "ParameterValue": "268435456" },
   { "ParameterKey": "RdsConnectionsThreshold",         "ParameterValue": "72" },
 
+  { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "REPLACE_WITH_SLACK_WORKSPACE_ID" },
+  { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "REPLACE_WITH_SLACK_CHANNEL_ID_ECS" },
+  { "ParameterKey": "SlackChannelIdRds",               "ParameterValue": "REPLACE_WITH_SLACK_CHANNEL_ID_RDS" },
+
   { "ParameterKey": "LogRetentionDays",                "ParameterValue": "7" },
   { "ParameterKey": "EnableBasicAuth",                 "ParameterValue": "true" }
 ]
