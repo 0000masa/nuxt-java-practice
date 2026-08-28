@@ -72,6 +72,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 - `docs/setup/` — 新しい PC への開発環境構築手順(`new-machine.md`)と、Nuxt / Spring Boot の環境構築手順
 - `docs/test/` — テストの実行方法と方針(テスト専用 database `app_test` の作り方、テスト一覧)
 - `docs/api/` — REST API ドキュメント(エンドポイントごとに1ファイル。API を変更したら必ず更新すること)
+- `docs/slack/` — アラートを Slack に流すための Slack 側の手動作業の手順書
 - `docs/notes/` — 学習メモ(セッションで解説した内容の記録。1 トピック 1 ファイル)
 - `docs/superpowers/specs/` — 設計書(スペック)置き場(アプリ設計は `2026-07-19-app-design-overview.md`、用語集はリポジトリ直下 `CONTEXT.md`)
 - `docs/development/implementation-progress.md` — **実装フェーズ計画と進捗。実装に着手する前に必ず読み、フェーズの開始・完了時に更新すること**
