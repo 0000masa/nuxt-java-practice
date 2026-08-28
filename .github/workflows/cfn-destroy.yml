@@ -62,31 +62,66 @@ jobs:
 
       # 素の CloudFormation には Terraform の force_destroy に相当する機能が無く、
       # オブジェクトが残っているバケットは削除に失敗する。ここで空にしてから消す。
-      - name: 画像バケットを空にする
-        if: steps.check.outputs.exists == 'true'
-        run: |
-          set -euo pipefail
-          bucket=$(aws cloudformation describe-stacks --stack-name "nuxt-java-practice-$ENV_NAME" \
-            --query "Stacks[0].Outputs[?OutputKey=='ImageBucketName'].OutputValue | [0]" --output text)
-          if [ -n "$bucket" ] && [ "$bucket" != "None" ]; then
-            echo "空にします: s3://$bucket"
-            aws s3 rm "s3://$bucket" --recursive
-          fi
-
-      - name: スタックを削除する
+      #
+      # バケットは 2 つある。画像バケットの書き手はアプリだけなので撤収時は静かだが、
+      # ログアーカイブのバケットには **Firehose が 900 秒ごとに自動で書きにくる**。
+      # 「空にする → delete-stack」の間(ECS サービスの削除などで 1〜3 分)にフラッシュが
+      # 挟まると BucketNotEmpty になり、15 分待たされた末に DELETE_FAILED で終わる。
+      #
+      # そのため 1 回だけリトライする。2 回目が確実に成功するのは、1 回目の削除で
+      # Firehose とサブスクリプションフィルタが既に消えていて書き手がいないため
+      # (バケットは Firehose に依存されているので、CloudFormation は Firehose を先に消す)。
+      # → docs/adr/0010
+      - name: バケットを空にしてスタックを削除する
         if: steps.check.outputs.exists == 'true'
         run: |
           set -euo pipefail
           stack="nuxt-java-practice-$ENV_NAME"
+
+          # バケット名は先に控える。DELETE_FAILED になった後のスタックからは
+          # Outputs を読めるとは限らないため、リトライ時に引き直さない。
+          buckets=""
+          for key in ImageBucketName LogArchiveBucketName; do
+            b=$(aws cloudformation describe-stacks --stack-name "$stack" \
+              --query "Stacks[0].Outputs[?OutputKey=='$key'].OutputValue | [0]" --output text)
+            if [ -n "$b" ] && [ "$b" != "None" ]; then
+              buckets="$buckets $b"
+            fi
+          done
+
+          empty_buckets() {
+            for b in $buckets; do
+              echo "空にします: s3://$b"
+              aws s3 rm "s3://$b" --recursive
+            done
+          }
+
           # サービスロールを明示する。省略しても create-change-set が渡したロールが
           # スタックに紐づいている(Stack の RoleARN)ので通常は同じ結果になるが、
           # 紐づいていないスタック(手で作った場合など)では Actions のロール
           # (cloudformation:* しか持たない)の一時セッションで削除が試みられ、
           # リソースを消せずに DELETE_FAILED になる。明示すればその分岐が消える。
-          aws cloudformation delete-stack --stack-name "$stack" \
-            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}"
+          delete_stack() {
+            aws cloudformation delete-stack --stack-name "$stack" \
+              --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" &&
+            aws cloudformation wait stack-delete-complete --stack-name "$stack"
+          }
+
+          empty_buckets
           echo "削除を待ちます(RDS と NAT Gateway があるので 10〜15 分かかる)"
-          aws cloudformation wait stack-delete-complete --stack-name "$stack"
+          # if の条件にすると関数の中でも errexit が効かないので、失敗を握って分岐できる
+          if delete_stack; then
+            exit 0
+          fi
+
+          echo "::warning::1 回目の削除に失敗しました。失敗したリソースは以下です"
+          aws cloudformation describe-stack-events --stack-name "$stack" \
+            --query "StackEvents[?ResourceStatus=='DELETE_FAILED'].[LogicalResourceId,ResourceStatusReason]" \
+            --output text | head -20 || true
+
+          echo "バケットを空にして 1 回だけやり直します"
+          empty_buckets
+          delete_stack
 
       - name: 結果をサマリに出す
         if: always()

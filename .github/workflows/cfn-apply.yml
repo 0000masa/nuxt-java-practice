@@ -208,6 +208,7 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
           WEB_DESIRED_COUNT: ${{ inputs.web_desired_count }}
           BASIC_AUTH_CREDENTIAL: ${{ secrets.BASIC_AUTH_CREDENTIAL }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
         run: |
           set -euo pipefail
           stack="${{ steps.pre.outputs.stack }}"
@@ -220,17 +221,28 @@ jobs:
             exit 1
           fi
 
-          # params ファイルがパラメータの唯一の正。動的な 3 つを先頭に積み、unique_by で同じキーを潰す。
-          # 残るのは先頭側なので、params に有る WebDesiredCount は上書き、無い 2 つは追記になる
+          # AlertEmail はテンプレート側に Default が無い必須パラメータ。ここで弾かなくても
+          # create-change-set が "Parameters: [AlertEmail] must have values" で落ちるが、
+          # 原因が分かるメッセージを先に出す。
+          # 意図的に必須にしている。登録し忘れたまま構築が成功すると、アラームは全部あるのに
+          # 購読が 1 つも無い(= 検知層が黙って死んでいる)状態になるため。→ docs/adr/0010
+          if [ -z "$ALERT_EMAIL" ]; then
+            echo "::error::Environment secret ALERT_EMAIL が未登録です(→ 手順書 §5)"
+            exit 1
+          fi
+
+          # params ファイルがパラメータの唯一の正。動的な 4 つを先頭に積み、unique_by で同じキーを潰す。
+          # 残るのは先頭側なので、params に有る WebDesiredCount は上書き、無い 3 つは追記になる
           # (同じ ParameterKey が 2 つ並ぶと CloudFormation が弾くため、上書きでなければならない)。
           # 空文字は select で落ちるので、渡さなかった入力は params の値がそのまま残る。
           # ImageTag が空のままなら UsePreviousValue を足して、今デプロイされているタグを維持する。
           # `. as $params` は必須。| の後の . は元の入力ではなく直前の値になる。
-          parameters=$(jq --arg tag "$IMAGE_TAG" --arg cred "$BASIC_AUTH_CREDENTIAL" --arg desired "$WEB_DESIRED_COUNT" '
+          parameters=$(jq --arg tag "$IMAGE_TAG" --arg cred "$BASIC_AUTH_CREDENTIAL" --arg mail "$ALERT_EMAIL" --arg desired "$WEB_DESIRED_COUNT" '
             . as $params
             | [ {ParameterKey: "ImageTag",            ParameterValue: $tag},
                 {ParameterKey: "WebDesiredCount",     ParameterValue: $desired},
-                {ParameterKey: "BasicAuthCredential", ParameterValue: $cred} ]
+                {ParameterKey: "BasicAuthCredential", ParameterValue: $cred},
+                {ParameterKey: "AlertEmail",          ParameterValue: $mail} ]
             | map(select(.ParameterValue != "")) + $params
             | unique_by(.ParameterKey)
             | if any(.ParameterKey == "ImageTag") then . else . + [{ParameterKey: "ImageTag", UsePreviousValue: true}] end
