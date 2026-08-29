@@ -312,12 +312,38 @@ jobs:
           # Replacement は True / False / Conditional の三値(→ 学習メモ §7-2)。
           # Conditional は「実行時の値によって作り直しになるかもしれない」で、Change Set の
           # 時点では確定しない。確定しないだけで危険度は True と変わらないので同じく止める。
+          #
+          # 【AWS::ECS::TaskDefinition だけは停止の判定から外す】
+          # タスク定義は 19 プロパティのうち 17 が createOnlyProperties(更新できるのは Tags だけ)で、
+          # イメージタグを変えるだけでも必ず Replacement: True になる。そしてタスク定義はそもそも
+          # イミュータブルで、更新とは「新しいリビジョンを登録して古い方を deregister する」ことなので、
+          # これは回避不能かつ無害な作り直しである(Database の作り直しと違い、失われるデータが無い)。
+          #
+          # ここで止めると image_tag を変えるたびに必ず引っかかり、解除する操作が手順の一部になる。
+          # そうなると Database が本当に作り直されるときにも同じ反射で解除してしまい、ガードが
+          # 守りたかった 1 回を守れなくなる。差分の表には今までどおり出したうえで、判定からだけ外す。
+          EXEMPT_TYPE=AWS::ECS::TaskDefinition
+
           ids() {
-            echo "$detail" | jq -r --arg v "$1" \
-              '[.Changes[].ResourceChange | select(.Replacement == $v) | .LogicalResourceId] | join(" ")'
+            echo "$detail" | jq -r --arg v "$1" --arg exempt "$EXEMPT_TYPE" \
+              '[.Changes[].ResourceChange
+                | select(.Replacement == $v and .ResourceType != $exempt)
+                | .LogicalResourceId] | join(" ")'
           }
           replaced=$(ids True)
           maybe=$(ids Conditional)
+
+          # 外したものは黙って消さずにサマリへ残す。「止まらなかった」ことが見えるようにする
+          exempt_ids=$(echo "$detail" | jq -r --arg exempt "$EXEMPT_TYPE" \
+            '[.Changes[].ResourceChange
+              | select(.ResourceType == $exempt and (.Replacement == "True" or .Replacement == "Conditional"))
+              | .LogicalResourceId] | join(" ")')
+          if [ -n "$exempt_ids" ]; then
+            {
+              echo ""
+              echo "\`$EXEMPT_TYPE\` の作り直しは新しいリビジョンの登録なので停止しません: \`$exempt_ids\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           if [ -n "${replaced}${maybe}" ] && [ "${{ inputs.allow_replacement }}" != "true" ]; then
             {
@@ -333,6 +359,13 @@ jobs:
               echo "\`Conditional\` は実行時の値に依存するため、実行してみるまで作り直しになるか分かりません。"
               echo ""
               echo "意図した変更であれば allow_replacement=true で再実行してください(True と Conditional の両方が開きます)。"
+              echo ""
+              echo "**cfn-deploy.yml から呼ばれている場合、この口はありません。**"
+              echo "allow_replacement は cfn-apply.yml の workflow_dispatch にしか無く、意図的に渡していません"
+              echo "(毎回の解除が手順化してガードが形骸化するため)。次のどちらかで進めてください。"
+              echo ""
+              echo "- 環境が建ち切っている(WebDesiredCount >= 1)なら、cfn-apply.yml を直接 allow_replacement=true で実行する"
+              echo "- 建てている途中(WebDesiredCount=0)なら、cfn-destroy.yml で撤収してから建て直す(作り捨て前提の環境なので、これが正しい)"
             } >> "$GITHUB_STEP_SUMMARY"
             aws cloudformation delete-change-set --stack-name "$stack" --change-set-name "$name"
             echo "::error::作り直しの可能性があります(True: ${replaced:-なし} / Conditional: ${maybe:-なし})。allow_replacement=false のため停止しました"
