@@ -694,7 +694,8 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 | Run Task が成功したように見えるがマイグレーションされていない | `describe-tasks` の `exitCode` を見ているか。`run-task` は起動するだけで完了を待たない |
 | Google ログインで `redirect_uri_mismatch` | Google Console の承認済みリダイレクト URI と `APP_BASE_URL` が一致しているか |
 | `Template file size ... must be deployed via an S3 Bucket`(`DeployBucketRequiredError`) | テンプレートが 51,200 バイトを超えている。`deploy` に `--s3-bucket` が渡っているか。バケットを作ったか(→ §3) |
-| 反映が `作り直しが含まれています` で止まった | **意図した変更か確かめる。** `Database` が対象なら実行すると中のデータが消える。意図的なら `allow_replacement=true` で再実行 |
+| 反映が `作り直しが含まれています` で止まった | **意図した変更か確かめる。** `Database` が対象なら実行すると中のデータが消える。意図的なら `cfn-apply.yml` を `allow_replacement=true` で再実行。`cfn-deploy.yml` からは渡せないので、建てている途中(`WebDesiredCount=0`)なら `cfn-destroy.yml` で撤収して建て直す |
+| イメージタグを変えただけで `作り直し` で止まる | **もう止まらない。** `AWS::ECS::TaskDefinition` は 19 プロパティ中 17 が `createOnlyProperties` で、イメージを変えれば必ず `Replacement: True` になる。回避不能かつ無害(新しいリビジョンの登録)なので停止の判定から外してある。差分の表には出る(→ [学習メモ §7-2](../notes/cloudformation/cli-commands-and-change-sets.md)) |
 | 反映が `差分がありませんでした` で終わる | 既に反映済み。テンプレートを直したつもりで直っていない(コミットし忘れ)可能性も見る |
 | 反映が `WebDesiredCount が 0 です` で止まった | `cfn-deploy.yml` が create-db-users / migrate で失敗して止まっている。先に `cfn-deploy.yml` を完走させる |
 | 反映が `状態が ROLLBACK_COMPLETE です` で止まった | 作成に失敗したスタックは更新できない。`cfn-destroy.yml` で削除してから建て直す |

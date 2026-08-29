@@ -27,18 +27,18 @@
 | ステップ | コマンド | 呼ばれる API | 本ノート |
 |---|---|---|---|
 | 前提を確かめる(`:141`) | `describe-stacks` | `DescribeStacks` | §4-3, §9-3 |
-| テンプレートを S3 に置く(`:194-198`) | `sts get-caller-identity` / `s3 cp` | (CloudFormation ではない) | §5-2 |
-| Change Set を作る(`:241`) | `create-change-set` | `CreateChangeSet` | §5 |
-| 同(`:254`) | `wait change-set-create-complete` | `DescribeChangeSet` をポーリング | §4-1, §4-2 |
-| 同(`:257`) | `describe-change-set` | `DescribeChangeSet` | §6, §7 |
-| 同(`:265`) | `delete-change-set` | `DeleteChangeSet` | §8-2 |
-| 差分を確認する(`:290`, `:315`) | `describe-change-set` | `DescribeChangeSet` | §7 |
-| 同(`:327`) | `delete-change-set` | `DeleteChangeSet` | §8-2 |
-| dry run(`:346`) | `delete-change-set` | `DeleteChangeSet` | §8-2 |
-| Change Set を実行する(`:362`) | `execute-change-set` | `ExecuteChangeSet` | §8-1 |
-| 同(`:373`) | `wait stack-create-complete` / `stack-update-complete` | `DescribeStacks` をポーリング | §4-2 |
-| 同(`:375`) | `describe-stack-events` | `DescribeStackEvents` | §9-4 |
-| 結果をサマリに出す(`:389`) | `describe-stacks` | `DescribeStacks` | §9-3 |
+| テンプレートを S3 に置く(`:196-200`) | `sts get-caller-identity` / `s3 cp` | (CloudFormation ではない) | §5-2 |
+| Change Set を作る(`:240`) | `create-change-set` | `CreateChangeSet` | §5 |
+| 同(`:253`) | `wait change-set-create-complete` | `DescribeChangeSet` をポーリング | §4-1, §4-2 |
+| 同(`:256`) | `describe-change-set` | `DescribeChangeSet` | §6, §7 |
+| 同(`:264`) | `delete-change-set` | `DeleteChangeSet` | §8-2 |
+| 差分を確認する(`:289`, `:305`) | `describe-change-set` | `DescribeChangeSet` | §7 |
+| 同(`:370`) | `delete-change-set` | `DeleteChangeSet` | §8-2 |
+| dry run(`:379`) | `delete-change-set` | `DeleteChangeSet` | §8-2 |
+| Change Set を実行する(`:395`) | `execute-change-set` | `ExecuteChangeSet` | §8-1 |
+| 同(`:406`) | `wait stack-create-complete` / `stack-update-complete` | `DescribeStacks` をポーリング | §4-2 |
+| 同(`:408`) | `describe-stack-events` | `DescribeStackEvents` | §9-4 |
+| 結果をサマリに出す(`:422`) | `describe-stacks` | `DescribeStacks` | §9-3 |
 
 ### `cfn-destroy.yml`(撤収)
 
@@ -101,7 +101,7 @@ Outputs:     [{AppUrl: https://...}, {LoadBalancerDnsName: ...}]
 | 消すコマンド | `delete-stack` | `delete-change-set` |
 | 消したときに起きること | **実リソースが削除される** | **何も削除されない** |
 
-**`delete-stack` と `delete-change-set` の差がいちばん分かりやすい対比。** 後者は予定リストを捨てるだけで AWS 上のものは何も減らない。`cfn-apply.yml:334` が Replacement を検出したときに `delete-change-set` を呼んでいるのは「危険な予定リストを実行可能なまま残さない」という意味で、リソースには一切触っていない(→ §8-3)。
+**`delete-stack` と `delete-change-set` の差がいちばん分かりやすい対比。** 後者は予定リストを捨てるだけで AWS 上のものは何も減らない。`cfn-apply.yml:370` が Replacement を検出したときに `delete-change-set` を呼んでいるのは「危険な予定リストを実行可能なまま残さない」という意味で、リソースには一切触っていない(→ §8-3)。
 
 #### スタックがあることは、リソースがあることを意味しない
 
@@ -950,7 +950,7 @@ aws cloudformation describe-change-set --stack-name nuxt-java-practice-stg \
 | `LogicalResourceId` | 論理 ID | サマリの表に出す |
 | `PhysicalResourceId` | 実リソースの ID。**`Add` では無い**(まだ存在しないため) | — |
 | `ResourceType` | `AWS::RDS::DBInstance` など | サマリの表に出す |
-| `Replacement` | **作り直しになるか。** `True` / `False` / `Conditional` | **表に出し、`True` か `Conditional` があれば停止** |
+| `Replacement` | **作り直しになるか。** `True` / `False` / `Conditional` | **表に出し、`True` か `Conditional` があれば停止**(ただし `AWS::ECS::TaskDefinition` は判定から除外 → 下記) |
 | `Scope` | 何が引き金か。`Properties` / `Metadata` / `CreationPolicy` / `UpdatePolicy` / `DeletionPolicy` / `UpdateReplacePolicy` / `Tags` | — |
 | `Details` | `Modify` のときの詳細(`ResourceChangeDetail` の配列) | — |
 | `PolicyAction` | **実リソースがどうなるか。** `Delete` / `Retain` / `Snapshot` / `ReplaceAndDelete` / `ReplaceAndRetain` / `ReplaceAndSnapshot` | — |
@@ -968,12 +968,16 @@ aws cloudformation describe-change-set --stack-name nuxt-java-practice-stg \
 >
 > If you have multiple changes with different `RequiresRecreation` values, the `Replacement` value depends on the change with the most impact.
 
-**`cfn-apply.yml:312-317` は `True` と `Conditional` の両方を拾う。**
+**`cfn-apply.yml` は `True` と `Conditional` の両方を拾い、`AWS::ECS::TaskDefinition` だけ除外する。**
 
 ```bash
+EXEMPT_TYPE=AWS::ECS::TaskDefinition
+
 ids() {
-  echo "$detail" | jq -r --arg v "$1" \
-    '[.Changes[].ResourceChange | select(.Replacement == $v) | .LogicalResourceId] | join(" ")'
+  echo "$detail" | jq -r --arg v "$1" --arg exempt "$EXEMPT_TYPE" \
+    '[.Changes[].ResourceChange
+      | select(.Replacement == $v and .ResourceType != $exempt)
+      | .LogicalResourceId] | join(" ")'
 }
 replaced=$(ids True)
 maybe=$(ids Conditional)
@@ -988,11 +992,119 @@ maybe=$(ids Conditional)
 - 作り直しになるかもしれない(`Conditional`): `WebService`
 ```
 
-**未検証で、運用してみないと分からないことが 1 つある。** `Conditional` がこのテンプレートで日常的に出るなら、`allow_replacement=true` を毎回付ける習慣がついて `True` の安全弁も一緒に無効化される。**そうなったら `allow_replacement` を `True` 用と `Conditional` 用の 2 つの入力に分けるのが筋。** 今は 1 つで足りると見込んでいる(→ §12 の #10)。
+### 実機で起きたこと — `AWS::ECS::TaskDefinition` を判定から外した
+
+上の設計には「日常的に出る `Replacement` があると、解除が習慣化して安全弁ごと無効になる」という懸念を書いていた。**懸念していたのは `Conditional` だったが、実際に起きたのは `True` のほうだった。**
+
+イメージタグを変えて `cfn-deploy.yml` を実行したところ、ここで止まった。
+
+```
+Error: 作り直しの可能性があります(True: AppTaskDefinition MigrateTaskDefinition / Conditional: なし)。
+       allow_replacement=false のため停止しました
+```
+
+原因はタスク定義の性質にある。`AWS::ECS::TaskDefinition` は**リソーススキーマ上、19 個のプロパティのうち 17 個が `createOnlyProperties`** で、更新できるのは `Tags` だけである。つまり `ContainerDefinitions`(= イメージタグ)を変えれば必ず `Replacement: True` になる。
+
+そしてこれは**回避不能かつ無害**である。ECS のタスク定義はそもそもイミュータブルなリビジョンで、更新とは「新しいリビジョンを登録して古い方を deregister する」ことだからだ。`Database` の作り直し(新しい空の RDS に置き換わる)とは意味が違い、失われるデータが無い。
+
+**ここで止め続けると、イメージを更新するたびに必ず引っかかる。** 解除する操作が手順の一部になり、`Database` が本当に作り直されるときにも同じ反射で解除してしまう。ガードが守りたかった 1 回を守れなくなる。
+
+そこで**差分の表には今までどおり出したうえで、停止の判定からだけ外した。** 外したものはサマリに「停止しません」と明記して、黙って消えないようにしてある。
+
+```
+`AWS::ECS::TaskDefinition` の作り直しは新しいリビジョンの登録なので停止しません: `AppTaskDefinition MigrateTaskDefinition`
+```
+
+**`allow_replacement` を `cfn-deploy.yml` から渡せるようにする案は採らなかった。** それは「無害な Replacement で止まること」を直さずに逃げ道を増やす対処で、上に書いた形骸化がそのまま起きる。`cfn-apply.yml` の `workflow_dispatch` には `allow_replacement` があるので、環境が建ち切っていれば意図的な作り直しはそちらから通せる。建てている途中(`WebDesiredCount=0`)で作り直しが要るなら、作り捨て前提の環境なので `cfn-destroy.yml` で撤収して建て直すのが正しい。
+
+**`Conditional` 側の懸念も、この直後に現実になった** → 下記。
 
 `Replacement` と `Update requires` の関係、置換事故の話 → [Terraform 経験者のための CloudFormation §6](./terraform-to-cloudformation.md)。
 
 **`PolicyAction` は見る価値がある。** `ReplaceAndSnapshot` が出ていれば「置き換えて古い方はスナップショットを取る」と分かる。`cfn-apply.yml` のサマリは「`Database` が含まれている場合、新しい空の RDS に置き換わります(DeletionPolicy が Snapshot なのでスナップショットは残る)」と文章で説明しているが、**`PolicyAction` を表に出せばテンプレートの設定を読まずに確認できる。**
+
+### 実機で起きたこと(2) — `Conditional` はテンプレートの書き方で消した
+
+タスク定義を除外した次のイメージ更新で、今度は `Conditional` で止まった。
+
+```
+Error: 作り直しの可能性があります(True: なし / Conditional: CpuScalingPolicy MemoryScalingPolicy ScalableTarget)。
+       allow_replacement=false のため停止しました
+```
+
+**原因は Auto Scaling 側ではなく、タスク定義から伸びた依存の鎖だった。**
+
+```
+ImageTag 変更
+  └→ AppTaskDefinition / MigrateTaskDefinition が Replacement: True(除外済みなので止まらない)
+       └→ Service が Modify(TaskDefinition: !Ref AppTaskDefinition が新 ARN になる)
+            ├→ ScalableTarget が Conditional
+            │    ResourceId: !Sub service/${Cluster}/${Service.Name}
+            └→ CpuScalingPolicy / MemoryScalingPolicy が Conditional
+                 ScalingTargetId: !Ref ScalableTarget
+```
+
+鍵は上の引用にある `Evaluation` である。**Change Set は「その Change Set で変更されるリソースへの `Ref` / `GetAtt`」を実行時まで解決しない**(`Evaluation: Dynamic`)。`Service` が `Modify` に入っている以上 `Service.Name` は Dynamic で、それが `ScalableTarget` の createOnlyProperty である `ResourceId` に入っているため `RequiresRecreation: Always` × `Evaluation: Dynamic` = `Conditional` になる。`ScalingPolicy` 2 本は `ScalableTarget` を `!Ref` しているので芋づる。
+
+`Ref` か `GetAtt` かは関係がない。**判定の分かれ目は「参照先が Change Set に入っているか」だけ。** 同じ `!Sub` の中でも `${Cluster}` は Static(Cluster は変更されない)、`${Service.Name}` は Dynamic になる。
+
+**除外リストに 2 型を足す案は採らなかった。** タスク定義の除外が安全なのは「その型の `Replacement` はどんな変更で出ても新リビジョン登録であり、常に無害」という**型の性質**に基づくからで、失う情報がゼロだった。`ScalableTarget` にその性質は無い。ここで出た `Conditional` は型の性質ではなく**テンプレートの書き方**に由来する。型ごと外すと、`ServiceName` やクラスタを変えて**本当に登録し直しが起きる**変更まで恒久的に見逃す。しかも鎖は残るので、実際には何も変わらない 3 リソースが差分表に並び続ける。
+
+**採ったのは、参照そのものを断って値を静的に確定させることだった。**
+
+```yaml
+# 変更前
+  ScalableTarget:
+    Properties:
+      ResourceId: !Sub service/${Cluster}/${Service.Name}
+
+# 変更後(app.yml:1379 付近)
+  ScalableTarget:
+    DependsOn: Service
+    Properties:
+      ResourceId: !Sub service/${Cluster}/${ProjectName}-${EnvName}-app
+```
+
+`Service` の `ServiceName: !Sub ${ProjectName}-${EnvName}-app` と同じ式を書いている。解決後の文字列は前と一致する(実測で確認 → 下記)。同じ理由で `EcsRunningLessThanDesiredAlarm` の `ServiceName` 次元 2 か所も書き換えた(こちらは次元が更新可能プロパティなので `Replacement: False` どまりだったが、毎回差分表に並ぶノイズだった)。
+
+`Outputs` の `ServiceName` は `!GetAtt Service.Name` のまま残した。**`Outputs` は `Changes` に現れない**ので Dynamic であっても判定に影響しない。
+
+**`DependsOn` が必要になったのは副作用のほうである。** CloudFormation の作成順は `Ref` / `GetAtt` / `Sub` の参照から自動で組まれる。参照を消すと値だけでなく順序の辺も消えるので、`ScalableTarget` が `Service` と並列に作られて「そんなサービスは無い」で落ちうる。並列実行のタイミング次第で成否が変わる種類の不具合になるため、明示した。アラームのほうは次元がただの文字列で、`Service` が無くてもアラーム自体は作れる(メトリクスが来ないだけで `TreatMissingData: notBreaching`)ので足していない。
+
+**これで ECS のイメージ更新時の差分は 3 行になった。** `AppTaskDefinition` / `MigrateTaskDefinition`(除外されて止まらない)と `Service` だけで、起きていることの正確な表現になっている。`allow_replacement` を `True` 用と `Conditional` 用に分ける案(→ §12 の #10)は、当面必要なくなった。
+
+**外した予測 — 「値が同じなら差分は出ない」は成り立たない。** この書き換えを push して `cfn-apply.yml` を回したところ、差分ゼロにはならず、しかも `Conditional` が `True` に変わった。
+
+```
+Modify | AWS::ApplicationAutoScaling::ScalingPolicy   | True  | CpuScalingPolicy
+Modify | AWS::CloudWatch::Alarm                       | False | EcsRunningLessThanDesiredAlarm
+Modify | AWS::ApplicationAutoScaling::ScalingPolicy   | True  | MemoryScalingPolicy
+Modify | AWS::ApplicationAutoScaling::ScalableTarget  | True  | ScalableTarget
+```
+
+値が本当に変わったのかを実物で確かめた。
+
+```bash
+aws application-autoscaling describe-scalable-targets \
+  --service-namespace ecs --query 'ScalableTargets[].ResourceId' --output text
+# service/nuxt-java-practice-stg-cluster/nuxt-java-practice-stg-app
+```
+
+**新しい式が解決する文字列と完全に一致していた。** つまり値は変わっていない。それでも差分になったということは、**CloudFormation は「動的参照 → 静的値」の書き換えを、解決後の値が同じでも変更として扱う**ということになる。`ResourceId` は createOnly なので、新しい値が `Static` に確定したぶん `Conditional` ではなく `True` に振り切れた(`RequiresRecreation: Always` × `Evaluation: Static`)。`ScalingPolicy` 2 本は `ScalingTargetId: !Ref ScalableTarget` で巻き込まれ、アラームは `RequiresRecreation: Never` なので `False` のまま出た。
+
+**これは移行のとき 1 回だけのコストで、実測で確認できた。** `allow_replacement=true` で 1 回通したあと、次のイメージ更新を `allow_replacement=false` で流したところ、差分は狙いどおり 3 行になり、ガードに止められずに反映できた。
+
+```
+Modify | AWS::ECS::TaskDefinition | True  | AppTaskDefinition       ← 型ごと除外
+Modify | AWS::ECS::TaskDefinition | True  | MigrateTaskDefinition   ← 型ごと除外
+Modify | AWS::ECS::Service        | False | Service                 ← 本当に変わっている
+```
+
+`ScalableTarget` / `ScalingPolicy` / アラームは差分から消えた。**残っている 3 行はすべて「実際に起きること」で、差分表が嘘をつかなくなった。** 新規に建てる場合は全リソースが `Add` なので、この移行コスト自体が発生しない。
+
+**判定の材料を出せていなかったのが、この調査を遠回りにした。** `describe-change-set` には `--include-property-values` があり、付けると `Details[].Target` に `BeforeValue` / `AfterValue` が入る(付けないと `null`)。付けていれば「前後で同じ文字列なのに変更扱い」がその場で読めた。→ §12 の課題。
+
+依存と参照の話 → [Terraform 経験者のための CloudFormation §4-2 / §4-5](./terraform-to-cloudformation.md)。
 
 ### 7-3. ページング
 
@@ -1081,12 +1193,12 @@ aws cloudformation delete-stack --stack-name nuxt-java-practice-stg
 | 箇所 | 状況 | 消す理由 |
 |---|---|---|
 | `cfn-apply.yml:262` | 差分ゼロ(`Status: FAILED`) | **`FAILED` の Change Set も残る。** 実行はできないが、スタックの Change Set 一覧に溜まる |
-| `cfn-apply.yml:334` | `Replacement: True` を検出して停止 | **実行可能なまま残すと危険。** 名前を知っていれば誰でも `execute-change-set` できる |
+| `cfn-apply.yml:370` | `Replacement: True` を検出して停止 | **実行可能なまま残すと危険。** 名前を知っていれば誰でも `execute-change-set` できる |
 | `cfn-apply.yml:343` | `dry_run=true` | 「見るだけ」なので溜めない |
 
 **3 箇所とも「実行しないと決めた」ときに呼んでいる。** 逆に `execute-change-set` に進む経路では消さない —— 実行すると CloudFormation が自動で消すため(→ §2-2)。
 
-**溜めるとどうなるか。** 1 スタックあたりの Change Set 数には上限がある(CloudFormation クォータ)。それ以上に、`Replacement: True` を含む Change Set が残っていると「止めたはずの危険な操作が実行可能な状態で置かれている」ことになる。**`:327` の削除は安全弁として効いている。**
+**溜めるとどうなるか。** 1 スタックあたりの Change Set 数には上限がある(CloudFormation クォータ)。それ以上に、`Replacement: True` を含む Change Set が残っていると「止めたはずの危険な操作が実行可能な状態で置かれている」ことになる。**`:370` の削除は安全弁として効いている。**
 
 ---
 
@@ -1386,12 +1498,12 @@ waiter_config = {'Delay': 30, 'MaxAttempts': 120}
 
 | 追加分 | 場所 |
 |---|---|
-| 差分をジョブサマリに表として出す | `:293-310` |
-| `Replacement` が `True` / `Conditional` のものを検出して停止する | `:312-340` |
-| dry run で Change Set を消す | `:342-352` |
-| 失敗時にイベントを表として出す | `:375-377` |
-| 前提が崩れている状態を「代わりに何をすべきか」で弾く | `:151-182` |
-| 結果を outputs として返す | `:383-403` |
+| 差分をジョブサマリに表として出す | `:292-310` |
+| `Replacement` が `True` / `Conditional` のものを検出して停止する(`AWS::ECS::TaskDefinition` は除外) | `:312-373` |
+| dry run で Change Set を消す | `:375-385` |
+| 失敗時にイベントを表として出す | `:408-410` |
+| 前提が崩れている状態を「代わりに何をすべきか」で弾く | `:151-184` |
+| 結果を outputs として返す | `:416-436` |
 
 **「`deploy` を捨てた」の実質は、この 6 つを足すために 4 つを引き受けた、という交換。**
 
