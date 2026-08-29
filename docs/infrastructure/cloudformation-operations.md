@@ -68,6 +68,8 @@ ECS タスク(db-ops / db-migrate)
 **Actions 側のロールは 2 つに分けている。** `db-task.yml` は任意 SQL を流せるワークフローなので、
 その実行に `cloudformation:*` を持つクレデンシャルを降ろさない(→ §2-3)。
 
+> **どのコマンドにどの権限が要るのか、`--role-arn` がスタックに紐づくとはどういうことか、`iam:PassRole` は何を審査している権限なのか** — この節のポリシーがなぜこの形なのかの解説 → [コマンドと IAM 権限](../notes/cloudformation/iam-roles-and-command-permissions.md)
+
 ### 2-1. CloudFormation サービスロール
 
 `nuxt-java-practice-cfn-service-stg` を作る。信頼するのは CloudFormation 自身。
@@ -408,7 +410,7 @@ P=/nuxt-java-practice/stg
 
 # DB のユーザー(→ docs/adr/0005)。
 # 注意: この値は SQL の文字列リテラルに埋め込まれるので、
-# シングルクォートとバックスラッシュを含めないこと。
+# シングルクォートとバックスラッシュを含めないこと(詳細 → §4-1)。
 aws ssm put-parameter --type SecureString --name "$P/app_db_password"     --value '<32文字くらいの英数字>'
 aws ssm put-parameter --type SecureString --name "$P/migrate_db_password" --value '<32文字くらいの英数字>'
 
@@ -418,6 +420,39 @@ aws ssm put-parameter --type SecureString --name "$P/google_client_secret" --val
 ```
 
 RDS のマスターパスワードはここに置かない(RDS が Secrets Manager に作る)。
+
+### 4-1. DB パスワードの長さと使えない文字
+
+**MySQL 側にはほぼ制限が無い。効いてくるのは `app.yml` の経路のほう。**
+
+| | 制限 |
+|---|---|
+| MySQL のパスワード長 | **実質上限なし。** 平文は保存されず `caching_sha2_password` の固定長ハッシュになる |
+| MySQL が禁じる文字 | **無い。** エスケープさえ正しければ `'` も `\` も通る |
+| 複雑性の要求 | `validate_password` コンポーネントが入っていれば掛かるが、**RDS MySQL 8.0 の既定パラメータグループには入っていない。** 確かめるなら `db-task`(任意 SQL)で `SELECT * FROM mysql.component;` |
+| SSM SecureString の値 | 標準ティアで 4,096 文字まで。32 文字なら余裕 |
+| (参考)MySQL のユーザー名 | **32 文字**(`mysql.user.User` が `char(32)`)。MySQL 側で唯一のハードな長さ制限。決めるのは `params` の `DbAppUsername` / `DbMigrateUsername` |
+
+**`'` と `\` が使えないのは MySQL のせいではなく db-ops タスクのせい。** パスワードをエスケープせず SQL の文字列リテラルに直接埋め込んでいる(`IDENTIFIED BY '$APP_DB_PASSWORD'`)ので、この 2 文字だけが構文を壊す。
+
+| 文字 | 可否 |
+|---|---|
+| `'` | **NG。** リテラルが途切れて構文エラーになる |
+| `\` | **NG。** MySQL の文字列リテラルではエスケープ文字 |
+| `"` / `` ` `` / `$` / `&` / `;` / `%` / `/` / `+` / `=` などの記号 | **OK。** シェルは変数展開の結果を再解釈しないので、`$` やバッククォートが混ざっても展開されない |
+| 空白・改行・非 ASCII | 避ける。動く見込みはあるが試す価値がない |
+| `${` という並び | 避ける。`application.yml` の `password: ${DB_PASSWORD:password}` はプレースホルダを再帰的に解決するので、値の中の `${...}` が解釈されうる |
+
+**英数字 32 文字にしておけば全部避けられる。**
+
+```bash
+LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
+
+# base64 でもよい。出力に現れる A-Za-z0-9/+= に ' と \ は含まれない
+openssl rand -base64 24
+```
+
+**RDS のマスターパスワードのルールはこれとは別物**(8〜41 文字、印字可能 ASCII から `/` `"` `@` と空白を除く)。ただし生成するのは RDS なので、人が満たしにいくことはない。
 
 ---
 
