@@ -182,18 +182,34 @@ Parameters:
     # 費用を抑えたいときは enhanced -> enabled に落とす。→ docs/adr/0010
     AllowedValues: [enhanced, enabled]
 
-  # --- 監視・検知(→ docs/adr/0010) ---
-  # 通知先のメールアドレス。GitHub の Environment secret ALERT_EMAIL から
-  # cfn-apply.yml が渡す(params ファイルにも SSM にも置かない)。
-  # Default を置いていないのは意図的で、渡し忘れると Change Set の作成が
-  # 「Parameters: [AlertEmail] must have values」で落ちる。検知層が黙って死ぬより、
-  # 構築が止まるほうがマシという判断。
-  # SSM の SecureString は使えない。{{resolve:ssm-secure:...}} の対応プロパティ 11 個に
-  # AWS::SNS::Subscription.Endpoint が入っていないため(BasicAuthCredential と同じ制約)。
-  AlertEmail:
+  # --- 監視・検知(→ docs/adr/0010・docs/adr/0011) ---
+  # 通知先は Slack。Amazon Q Developer in chat applications(旧 AWS Chatbot)が
+  # SNS トピックを購読してチャンネルに転送する。手順 → docs/slack/README.md
+  #
+  # 【この 3 つを params に平文で置いている理由】秘密ではないため。
+  # ID を知っていても、ワークスペースを認可済みの AWS アカウントからしか使えない。
+  # Slack の Incoming Webhook URL(知っていれば誰でも投稿できる)とはここが違う。
+  # HostedZoneId と同じ「秘密ではないがアカウント固有」の値として扱う。
+  # メールアドレスと違って NoEcho も Environment secret も要らない。→ docs/adr/0011
+  #
+  # AllowedPattern を付けているのは、params のプレースホルダ(REPLACE_WITH_...)のまま
+  # 反映しようとしたときに Change Set の作成で落とすため。付けないと Chatbot リソースの
+  # 作成まで進んでから同じ理由で失敗する。かつての AlertEmail に Default を置かなかったのと同じ判断で、
+  # 検知層が黙って死ぬより構築が止まるほうがマシ。
+  SlackWorkspaceId:
     Type: String
-    NoEcho: true
-    Description: アラートの通知先メールアドレス。購読確認メールのリンクを踏むまで通知は届かない
+    AllowedPattern: ^[0-9A-Z]{1,255}$
+    Description: Slack ワークスペースの ID。AWS コンソールでの認可を済ませると得られる(→ docs/slack/README.md)
+
+  SlackChannelIdEcs:
+    Type: String
+    AllowedPattern: ^[A-Za-z0-9]+$
+    Description: ECS の検知を流す Slack チャンネルの ID(#njp-alerts-ecs)
+
+  SlackChannelIdRds:
+    Type: String
+    AllowedPattern: ^[A-Za-z0-9]+$
+    Description: RDS の検知を流す Slack チャンネルの ID(#njp-alerts-rds)
 
   # 以下 4 つは AWS 公式の推奨アラーム(Best Practice Recommended Alarms)ベース。
   # インスタンスクラスとストレージ容量に連動するので環境ごとに渡す。
@@ -1397,35 +1413,29 @@ Resources:
   #
   # 【前提】これは「常時稼働する stg」を前提に書かれた検知層を、作り捨ての環境に
   # そのまま移植したもの。生じる不整合は構成を歪めて解決せず、運用で吸収する。
-  # 受け入れている帰結は 4 つ。詳細は ADR-0010。
-  #   1. 建てるたびに SNS の購読確認メールを 2 通踏む(踏むまで通知は 1 通も届かない)
-  #   2. 建てるたびに「OK になりました」通知が 7 通届く
+  # 受け入れている帰結は 3 つ。詳細は ADR-0010。
+  #   1. 建てるたびに「OK になりました」通知が 7 通届く
   #      (新規アラームは INSUFFICIENT_DATA -> OK も状態遷移なので OKActions が発火する)
-  #   3. ログアーカイブは撤収のたびに全部消える。保全機能としては動いていない
-  #   4. スロークエリのアラームはフェーズ8・10 の実験中に鳴り続ける
+  #   2. ログアーカイブは撤収のたびに全部消える。保全機能としては動いていない
+  #   3. スロークエリのアラームはフェーズ8・10 の実験中に鳴り続ける
+  #
+  # ADR-0010 が受け入れていた帰結がもう 1 つ(建てるたびに SNS の購読確認メールを
+  # 2 通踏む)あったが、通知先を Slack に移して解消した。→ docs/adr/0011
   # ===========================================================================
 
   # --- SNS ---------------------------------------------------------------
   # トピックを 2 本に分けているのは Terraform 側と 1 対 1 に対応させるため。
-  # 宛先は 2 本とも同じ AlertEmail なので、届いたメールはアラーム名で判別する。
+  # 1 トピック = 1 Slack チャンネルに対応する(下の Chatbot 設定で紐づける)。
   #
-  # 【重要】email の購読は PendingConfirmation の状態で作られ、CloudFormation は
-  # 確認を待たずに CREATE_COMPLETE になる。リンクを踏むまで通知は 1 通も飛ばない。
-  # SES の EmailIdentity(上の方)と同じ「スタックは成功したのに機能していない」形。
-  # 確認リンクは 3 日で失効し、SNS に再送 API は無い。
-  # cfn-deploy.yml がジョブサマリにリマインダを出す。
+  # 購読(AWS::SNS::Subscription)はもう無い。Chatbot のチャンネル設定が自分自身を
+  # トピックに購読させるため、テンプレートに購読を書く必要がない。
+  # email の購読をやめた理由 → docs/adr/0011。PendingConfirmation のまま作られ、
+  # 確認リンクを踏むまで 1 通も届かないのにスタックは緑になる、という壊れ方をしていた。
   EcsTaskShortageTopic:
     Type: AWS::SNS::Topic
     Properties:
       TopicName: !Sub ${ProjectName}-${EnvName}-ecs-task-shortage
       DisplayName: !Sub ${ProjectName}-${EnvName} ECS
-
-  EcsTaskShortageSubscription:
-    Type: AWS::SNS::Subscription
-    Properties:
-      TopicArn: !Ref EcsTaskShortageTopic
-      Protocol: email
-      Endpoint: !Ref AlertEmail
 
   # RDS の 3 系統(ログ由来 / メトリクス / イベント購読)をこの 1 本に集約する
   RdsAlertsTopic:
@@ -1434,15 +1444,83 @@ Resources:
       TopicName: !Sub ${ProjectName}-${EnvName}-rds-alerts
       DisplayName: !Sub ${ProjectName}-${EnvName} RDS
 
-  RdsAlertsSubscription:
-    Type: AWS::SNS::Subscription
-    Properties:
-      TopicArn: !Ref RdsAlertsTopic
-      Protocol: email
-      Endpoint: !Ref AlertEmail
-
   # トピックポリシーは付けない。CloudWatch アラームと RDS イベント購読は
   # 同一アカウント内なら既定のトピックポリシーで publish できる。
+
+  # --- Slack への転送(Amazon Q Developer in chat applications)-------------
+  # 旧名 AWS Chatbot。CloudFormation の Type 名は AWS::Chatbot::... のまま。
+  # 設計 → docs/adr/0011、Slack 側の手順 → docs/slack/README.md
+  #
+  # 【前提】Slack ワークスペースの認可はコンソールでしか行えない(CloudFormation 不可)。
+  # 認可していないワークスペース ID を渡すとスタックの作成が失敗する。
+  # 認可自体は 1 回きりで、スタックを作り直しても消えない常駐の設定。
+  #
+  # 【チャンネル設定をスタック内に置いている理由】常駐にできないため。
+  # 設定は対象トピックに自分自身を購読させる形で動くので、撤収でトピックが消えると
+  # 購読も失われる。トピック名は固定なので次に建てても ARN は同じだが、Chatbot 側から
+  # 繋ぎ直すまで無音になる(ADR-0010 の帰結 1 が形を変えて再発する)。
+  #
+  # Chatbot の API エンドポイントは us-east-2 の 1 本しかなく、ap-northeast-1 の
+  # スタックから作っても内部的にそちらを呼ぶ。リージョンを合わせる必要はない。
+  ChatbotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-chatbot-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: chatbot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        # AWS が用意する AWS-Chatbot-NotificationsOnly-Policy と同じ内容。
+        # 通知の転送に必要な最小限で、アラーム通知にグラフを添えるための読み取りだけ。
+        - PolicyName: NotificationsOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:Describe*
+                  - cloudwatch:Get*
+                  - cloudwatch:List*
+                Resource: "*"
+
+  # 【重要】GuardrailPolicies を省略すると AdministratorAccess が既定で適用される。
+  # これはチャンネルのメンバーが Slack から AWS に対して実行できる操作の上限で、
+  # 通知を受け取るだけなら権限は一切要らない。明示的に全拒否する。
+  #
+  # ConfigurationName はアカウント内で一意でなければならず、変更すると作り直しになる。
+  EcsTaskShortageSlackChannel:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ${ProjectName}-${EnvName}-ecs-task-shortage
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelIdEcs
+      SnsTopicArns:
+        - !Ref EcsTaskShortageTopic
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      GuardrailPolicies:
+        - arn:aws:iam::aws:policy/AWSDenyAll
+      UserRoleRequired: false
+      # 転送に失敗した理由が /aws/chatbot/... に出る。実機で一度も動かしていないので
+      # ERROR にしてある(NONE にすると「届かない」ときに手掛かりが無くなる)。
+      LoggingLevel: ERROR
+
+  RdsAlertsSlackChannel:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ${ProjectName}-${EnvName}-rds-alerts
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelIdRds
+      SnsTopicArns:
+        - !Ref RdsAlertsTopic
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      GuardrailPolicies:
+        - arn:aws:iam::aws:policy/AWSDenyAll
+      UserRoleRequired: false
+      LoggingLevel: ERROR
 
   # --- D: ECS タスク数不足(Metric Math) ---------------------------------
   # RunningTaskCount < DesiredTaskCount なら 1、そうでなければ 0 を返す式を作り、
@@ -1917,9 +1995,17 @@ Outputs:
     Value: !Ref LogArchiveBucket
 
   EcsTaskShortageTopicArn:
-    Description: ECS の検知の通知先。購読確認メールを踏むまで通知は届かない
+    Description: ECS の検知の通知先。Chatbot 経由で #njp-alerts-ecs に流れる
     Value: !Ref EcsTaskShortageTopic
 
   RdsAlertsTopicArn:
-    Description: RDS の検知の通知先(ログ / メトリクス / イベントの 3 系統を集約)
+    Description: RDS の検知の通知先(ログ / メトリクス / イベントの 3 系統を集約)。#njp-alerts-rds に流れる
     Value: !Ref RdsAlertsTopic
+
+  EcsTaskShortageSlackChannelArn:
+    Description: ECS 用の Chatbot チャンネル設定
+    Value: !Ref EcsTaskShortageSlackChannel
+
+  RdsAlertsSlackChannelArn:
+    Description: RDS 用の Chatbot チャンネル設定
+    Value: !Ref RdsAlertsSlackChannel
