@@ -1376,13 +1376,47 @@ Resources:
   # DesiredCount が 0 の段では作らない(Condition)。
   # 作ってしまうと Application Auto Scaling が MinCapacity まで増やしてしまい、
   # ユーザーがまだ存在しない DB につなごうとしてクラッシュループする。
+  #
+  # 【ResourceId に !GetAtt Service.Name を使わない理由】
+  # かつては `!Sub service/${Cluster}/${Service.Name}` と書いていたが、これだと
+  # ECS のイメージ更新のたびに cfn-apply.yml の Replacement ガードに止められる。
+  #
+  #   1. ImageTag を変える → タスク定義は 19 プロパティ中 17 が createOnly なので
+  #      AppTaskDefinition / MigrateTaskDefinition が必ず Replacement: True になる
+  #      (これ自体は新リビジョンの登録なので無害。ガードも型ごと除外している)
+  #   2. Service が `TaskDefinition: !Ref AppTaskDefinition` で新しい ARN を受けるため、
+  #      Service も毎回 Modify に入る
+  #   3. Change Set は「更新対象に入っているリソースの Ref / GetAtt」を実行時まで
+  #      解決しない(Evaluation: Dynamic)。よって Service.Name は毎回 Dynamic 扱いになる
+  #   4. ResourceId は createOnlyProperty(変わるなら作り直すしかない)。
+  #      「変わるかもしれない値」が入っているので Replacement: Conditional が付く
+  #   5. ScalingPolicy 2 本は `ScalingTargetId: !Ref ScalableTarget` なので芋づるで Conditional
+  #
+  # 実際には ServiceName は固定文字列なので何も作り直されない。だが Change Set の時点では
+  # それを確定できず、ガードは Conditional も止める(→ 学習メモ §7-2)。結果として
+  # 「イメージを更新するたびに allow_replacement=true を付ける」手順が生まれ、
+  # Database が本当に作り直されるときにも同じ反射で解除してしまう。
+  # タスク定義のときは型ごと除外したが、同じ手はここでは使えない。タスク定義と違って
+  # ScalableTarget の Replacement は「常に無害」ではなく、本当に登録し直しが起きる変更
+  # (ServiceName やクラスタを変えたとき)も一緒に見逃すことになるため。
+  #
+  # そこで、参照そのものを断って値を静的に確定させる。下の式は Service の ServiceName と
+  # 同じものを書いており、解決後の文字列は前と一致するので差分は出ない。
+  # ServiceName を変えるときは 2 か所を揃えて直すこと。
+  #
+  # 【DependsOn: Service が要る理由】
+  # CloudFormation の作成順は Ref / GetAtt / Sub の参照から自動で組まれる。上の変更で
+  # Service への参照が消えた = 暗黙の依存も消えた。明示しないと Service と並列に作られ、
+  # まだ存在しないサービスを登録しようとして失敗する(タイミング次第で成否が変わる)。
+  # → 依存の話は docs/notes/cloudformation/terraform-to-cloudformation.md §4-5
   ScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Condition: ServiceEnabled
+    DependsOn: Service
     Properties:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
-      ResourceId: !Sub service/${Cluster}/${Service.Name}
+      ResourceId: !Sub service/${Cluster}/${ProjectName}-${EnvName}-app
       MinCapacity: !Ref WebMinCapacity
       MaxCapacity: !Ref WebMaxCapacity
 
@@ -1553,6 +1587,15 @@ Resources:
         - !Ref EcsTaskShortageTopic
       OKActions:
         - !Ref EcsTaskShortageTopic
+      # ServiceName の次元も !GetAtt Service.Name を使わず、Service の ServiceName と同じ式を
+      # 直に書いている。理由は ScalableTarget と同じ(更新対象の Service を参照すると
+      # Change Set が値を実行時まで解決できない)。こちらは次元が更新可能プロパティなので
+      # Replacement: False どまりでガードには止められないが、実質何も変わらないアラームが
+      # イメージ更新のたびに差分表へ並ぶと、差分を読む価値が下がる。
+      #
+      # ScalableTarget と違って DependsOn は足していない。次元はただの文字列なので Service が
+      # まだ無くてもアラームは作れる。メトリクスが来ないだけで、TreatMissingData: notBreaching
+      # により誤検知にもならない。
       Metrics:
         - Id: m_running
           ReturnData: false
@@ -1564,7 +1607,7 @@ Resources:
                 - Name: ClusterName
                   Value: !Ref Cluster
                 - Name: ServiceName
-                  Value: !GetAtt Service.Name
+                  Value: !Sub ${ProjectName}-${EnvName}-app
             Period: 60
             Stat: Minimum
         - Id: m_desired
@@ -1577,7 +1620,7 @@ Resources:
                 - Name: ClusterName
                   Value: !Ref Cluster
                 - Name: ServiceName
-                  Value: !GetAtt Service.Name
+                  Value: !Sub ${ProjectName}-${EnvName}-app
             Period: 60
             Stat: Minimum
         - Id: e_shortage
@@ -1963,6 +2006,9 @@ Outputs:
   ClusterName:
     Value: !Ref Cluster
 
+  # ここだけ !GetAtt のまま。Outputs は Change Set の Changes に現れないので、
+  # ScalableTarget やアラームで避けた「毎回 Dynamic になる」問題が起きない。
+  # 実物から読むぶん、名前の式を写し間違える余地も無い。
   ServiceName:
     Value: !GetAtt Service.Name
 
