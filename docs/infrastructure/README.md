@@ -135,6 +135,8 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 **`db-task.yml` は別のロールを使う。** 任意 SQL を流せるワークフローに `cloudformation:*` を持つクレデンシャルを降ろさないため、Run Task に必要な 5 つの権限だけを持つロールを分けている。
 
+**登録手順(値の集め方・画面での操作・確認)→ [GitHub に登録する Secrets(5 つ)](./github-secrets.md)。**
+
 **Secrets は Environment secrets に置く。** GitHub Free のプライベートリポジトリでも Environment と Environment secrets は使えるが、**protection rules(required reviewers・ブランチ制限)は使えない**。そのためブランチ制限は IAM の信頼ポリシー(`token.actions.githubusercontent.com:ref` 条件)で掛けている。
 
 ### スタック構成

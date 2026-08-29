@@ -16,7 +16,7 @@ Terraform をある程度書ける人が、素の CloudFormation テンプレー
 2. **CloudFormation には `locals` / `data` / `count` / `for_each` / `modules` に相当する仕組みがない。** 代わりに `Parameters` / `Mappings` / `Conditions` / `!Sub` で組む
 3. **`terraform plan` に相当するのは Change Set だが、同じものではない。** 比較対象が違い、作成・確認・実行の 3 手に分かれる
 
-関連ノート: [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) / [ECS のタスク定義は誰が持つか](./ecs-deploy-ownership.md) / [テンプレートの分割と置き場](./templates-and-prerequisites.md)
+関連ノート: [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) / [コマンドと IAM 権限](./iam-roles-and-command-permissions.md) / [ECS のタスク定義は誰が持つか](./ecs-deploy-ownership.md) / [テンプレートの分割と置き場](./templates-and-prerequisites.md) / [RDS / ECS の環境差分と IaC 2 ツールでの表現力](./environment-differences.md)
 
 ---
 
