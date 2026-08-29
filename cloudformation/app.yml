@@ -758,7 +758,7 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
-        IsIPV6Enabled: true
+        IPV6Enabled: true
         Comment: !Sub ${ProjectName}-${EnvName}-images
         Origins:
           - Id: image-bucket
