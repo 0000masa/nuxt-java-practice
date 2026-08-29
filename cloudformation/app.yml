@@ -16,7 +16,10 @@ AWSTemplateFormatVersion: "2010-09-09"
 # 建てる手順は 2 段階(DesiredCount を 0 → N)。理由は設計書の決定12。
 # =============================================================================
 
-Description: 投稿アプリの検証環境(ALB + ECS Fargate + RDS MySQL)
+# Description はマルチバイト文字を保持せず、コンソール上で ? に化ける
+# (AWS のドキュメントには 0〜1024 バイトとしか書かれていない、未文書の挙動)。
+# 日本語の説明は上のコメントブロックに置き、ここは英語で書く。
+Description: Verification environment for the posting app (ALB + ECS Fargate + RDS MySQL)
 
 # -----------------------------------------------------------------------------
 # パラメータ
@@ -448,6 +451,13 @@ Resources:
   # ===========================================================================
   # セキュリティグループ
   # ===========================================================================
+  # 【この下の Description は英語でなければならない】
+  # EC2 は SG のルールの説明に使える文字を a-zA-Z0-9 と . _-:/()#,@[]+=&;{}!$* と空白に
+  # 限っている。日本語を書くと EC2 が 400(Invalid rule description)を返し、
+  # CREATE_FAILED になる。テンプレートの構文は正しいので Change Set は通ってしまい、
+  # 実行して初めて落ちる(GroupDescription も同じ制約)。
+  # 日本語で書きたい説明は、この行のように YAML のコメントに置く。
+  #
   # ALB は 0.0.0.0/0 に開ける。外部からの隔離は WAF の Basic 認証が担う(→ docs/adr/0006)。
   AlbSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -459,12 +469,12 @@ Resources:
           FromPort: 80
           ToPort: 80
           CidrIp: 0.0.0.0/0
-          Description: HTTPS へのリダイレクト用
+          Description: Redirect to HTTPS
         - IpProtocol: tcp
           FromPort: 443
           ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: 本番の経路
+          Description: Production traffic
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-alb-sg
@@ -489,7 +499,7 @@ Resources:
       FromPort: 8080
       ToPort: 8080
       SourceSecurityGroupId: !Ref AlbSecurityGroup
-      Description: ALB からのみ
+      Description: From ALB only
 
   # 外向きは全開。ECR / CloudWatch Logs / SSM / Secrets Manager / SES / S3 に出る必要がある。
   EcsSecurityGroupEgress:
@@ -498,7 +508,7 @@ Resources:
       GroupId: !Ref EcsSecurityGroup
       IpProtocol: "-1"
       CidrIp: 0.0.0.0/0
-      Description: AWS の各サービスへ(NAT 経由)
+      Description: To AWS services via NAT
 
   RdsSecurityGroup:
     Type: AWS::EC2::SecurityGroup
@@ -510,7 +520,7 @@ Resources:
           FromPort: 3306
           ToPort: 3306
           SourceSecurityGroupId: !Ref EcsSecurityGroup
-          Description: ECS タスクからのみ(サービス / db-ops / db-migrate)
+          Description: From ECS tasks only (service / db-ops / db-migrate)
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-rds-sg
