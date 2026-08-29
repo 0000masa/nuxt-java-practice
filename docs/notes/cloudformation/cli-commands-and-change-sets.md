@@ -16,7 +16,7 @@
 2. **`Status` は 4 つある。** `Status`(Change Set)/ `ExecutionStatus` / `StackStatus` / `ResourceStatus` は軸が違い、混ぜると読めない。とくに**「差分ゼロ」が `Status: FAILED` として返る**のが最大の罠で、`StatusReason` の文字列を読まないと本物の異常と区別できない
 3. **`aws cloudformation deploy` は 3 手をまとめる代わりに、4 つのことを暗黙にやっている。** テンプレートの S3 アップロード / 渡さなかったパラメータの `UsePreviousValue` 化 / CREATE と UPDATE の判定 / 差分ゼロを成功として黙認(AWS CLI v2 の既定)。手組みに移ると**この 4 つが全部自分の責任になる**。`cfn-apply.yml` の一見冗長なコードは、ほぼこれの肩代わり
 
-関連ノート: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) / [テンプレートの分割と置き場](./templates-and-prerequisites.md) / [ECS のタスク定義は誰が持つか](./ecs-deploy-ownership.md)
+関連ノート: [コマンドと IAM 権限](./iam-roles-and-command-permissions.md) / [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) / [テンプレートの分割と置き場](./templates-and-prerequisites.md) / [ECS のタスク定義は誰が持つか](./ecs-deploy-ownership.md) / [RDS / ECS の環境差分と IaC 2 ツールでの表現力](./environment-differences.md)
 
 ---
 
@@ -512,6 +512,8 @@ parameters=$(jq --arg tag "$IMAGE_TAG" --arg cred "$BASIC_AUTH_CREDENTIAL" --arg
 **これが効くのは「実行者の資格情報が漏れても、テンプレートに書かれていないことはできない」という性質。** Actions のロールは VPC も RDS も直接作れない。作れるのは CloudFormation に頼むことだけで、CloudFormation はテンプレートに書かれた通りにしか動かない。権限の詳細 → [手順書 §2](../../infrastructure/cloudformation-operations.md)。
 
 **「CloudFormation uses this role for all future operations on the stack」が重要。** 一度渡すとスタックに紐づくので、以降の操作で省略しても同じロールが使われる(→ §9-2 で `delete-stack` の話に繋がる)。
+
+**なぜ `execute-change-set` に `--role-arn` が無いのか、渡さなかったら誰の資格情報で動くのか、`iam:PassRole` は何を審査しているのか** — IAM 側から見た説明は [コマンドと IAM 権限 §5・§6](./iam-roles-and-command-permissions.md) にある。
 
 ### 5-6. `--tags` — 省略するとスタックのタグが消える
 
