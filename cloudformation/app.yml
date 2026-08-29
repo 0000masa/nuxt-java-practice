@@ -1401,8 +1401,16 @@ Resources:
   # (ServiceName やクラスタを変えたとき)も一緒に見逃すことになるため。
   #
   # そこで、参照そのものを断って値を静的に確定させる。下の式は Service の ServiceName と
-  # 同じものを書いており、解決後の文字列は前と一致するので差分は出ない。
+  # 同じものを書いており、解決後の文字列も前と一致する
+  # (実測: service/nuxt-java-practice-stg-cluster/nuxt-java-practice-stg-app)。
   # ServiceName を変えるときは 2 か所を揃えて直すこと。
+  #
+  # 【ただし、この書き換え自体は一度だけ Replacement: True を出す】
+  # 値が同じでも CloudFormation は「動的参照 → 静的値」の書き換えを変更として扱う。
+  # ResourceId は createOnly なので Evaluation: Static x RequiresRecreation: Always = True になり、
+  # ScalingPolicy 2 本も ScalingTargetId 経由で巻き込まれる。移行のときだけ
+  # allow_replacement=true が要る(または撤収して建て直す。新規作成なら Add なので出ない)。
+  # 移行後は静的値どうしの比較になるので、イメージ更新でこの 3 つが差分に出ることはもう無い。
   #
   # 【DependsOn: Service が要る理由】
   # CloudFormation の作成順は Ref / GetAtt / Sub の参照から自動で組まれる。上の変更で
