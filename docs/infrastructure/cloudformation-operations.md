@@ -17,7 +17,7 @@
   5. IAM ロール 3 つ(今回)     … §2
   6. テンプレート置き場の S3     … §3
   7. SSM の SecureString 4 つ   … §4
-  8. GitHub の Environment      … §5
+  8. GitHub の Secrets 5 つ     … §5(手順 → github-secrets.md)
   9. Slack と AWS を接続        … docs/slack/README.md
  10. params/stg.json を埋める   … §6
  11. Google Cloud Console       … §7
@@ -457,6 +457,8 @@ openssl rand -base64 24
 
 ## 5. GitHub 側の設定
 
+> **値の集め方・画面での登録手順・確認方法まで通しで書いたもの → [GitHub に登録する Secrets(5 つ)](./github-secrets.md)。** ここには「何を登録するか」だけを置く。
+
 **Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 4 つ登録する。
 
 | Secret 名 | 値 | 使うワークフロー |
@@ -469,6 +471,8 @@ openssl rand -base64 24
 **Environment secrets にしているのがポイント。** prod を作るときは Environment `prod` に同じ名前で別の値を入れれば、ワークフローのコードは一切変えずに切り替わる。
 
 Basic 認証の値は `params/stg.json` には置かない。**base64 化はテンプレート側の `Fn::Base64` が行う**ので、ここには生の `user:password` を入れる。
+
+**この 4 つとは別に、Repository secret が 1 つある。** `ecr-push.yml` が使う `AWS_ECR_PUSH_ROLE_ARN` で、**あのワークフローだけ `environment:` を宣言していない**ため Environment secret では読めない。置き場を間違えると `ecr-push` だけが動かなくなる(→ [github-secrets.md](./github-secrets.md) §1・[github-actions-oidc.md](./github-actions-oidc.md) §6)。
 
 **アラートの通知先はここには無い。** Slack に流すようになり、必要なのはワークスペース ID とチャンネル ID の 3 つだけになった。**いずれも秘密ではないので `params` に平文で置く**(→ §6・[ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。フェーズ14 まであった `ALERT_EMAIL` は不要。
 
@@ -679,6 +683,7 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 | 症状 | 見るところ |
 |---|---|
 | `db-task` だけ `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Environment に `AWS_DB_TASK_ROLE_ARN` を登録したか(→ §2-3・§5)。信頼ポリシーは `gha-cfn-stg` と同じ形 |
+| `ecr-push` だけ `Credentials could not be loaded` | `AWS_ECR_PUSH_ROLE_ARN` を Environment secret に入れていないか。**あれだけ Repository secret**(→ [github-secrets.md](./github-secrets.md) §1) |
 | `run-task` が `AccessDeniedException` / `is not authorized to perform: iam:PassRole` | §2-3 のポリシーがタスク定義名・クラスタ名・ロール名と一致しているか。**リソースまで絞っているので、タスク定義を増やしたら IAM 側にも足す** |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 信頼ポリシーの `sub`。`environment:` を使うと末尾が `environment:stg` になる。実際のクレームを出す手順 → [github-actions-oidc.md](./github-actions-oidc.md) §8 |
 | スタックは成功したのにアプリからメールが送れない | **SES の検証待ち。** `AWS::SES::EmailIdentity` は検証完了を待たずに `CREATE_COMPLETE` になる(アラート通知とは無関係) |

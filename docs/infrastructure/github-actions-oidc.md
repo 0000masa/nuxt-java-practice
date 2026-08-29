@@ -413,6 +413,8 @@ GitHub のリポジトリ → **Settings** → **Secrets and variables** → **A
 | Name | `AWS_ECR_PUSH_ROLE_ARN` |
 | Secret | `arn:aws:iam::<アカウントID>:role/nuxt-java-practice-gha-ecr-push` |
 
+**これは Repository secret にする。Environment secret ではない。** `ecr-push.yml` のジョブは `environment:` を宣言していないので、Environment secret を置いても値が空に見えて `Credentials could not be loaded` になる。CloudFormation 系の 4 つが Environment `stg` に入るのとは逆なので、**このリポジトリで唯一の Repository secret**。理由と置き場の一覧 → **[GitHub に登録する Secrets(5 つ)](./github-secrets.md)**。
+
 命名は **`AWS_<用途>_ROLE_ARN`** の規則にする。Secrets 一覧はアルファベット順に並ぶので、`AWS_` 接頭辞で AWS 関連がひとかたまりになり、その中で用途順に読める。
 
 **リージョンと ECR リポジトリ名は Secrets に入れない。** ワークフローの `env:` に直書きしてある。隠す意味が無い値を隠すと、ワークフローを読んでも何をしているのか分からなくなるため。
