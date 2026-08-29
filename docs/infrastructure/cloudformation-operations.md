@@ -503,6 +503,8 @@ aws route53 list-hosted-zones-by-name --dns-name mylabinfra.com \
 
 この URI は `APP_BASE_URL` から組み立てられる(`application.yml` の `redirect-uri`)。テンプレートが `APP_BASE_URL` に `https://<EnvName>.<AppSubdomain>.<DomainName>` を入れるので、両者は必ず一致する。
 
+**触るのはこの 1 欄だけ。「承認済みの JavaScript 生成元」に本番ドメインを足す必要は無い。** このアプリはサーバーサイドの認可コードフロー(`<a href="/api/oauth2/authorization/google">` でフルページ遷移し、トークン交換は Spring Boot がサーバー間で行う)なので、ブラウザの JS が Google を呼ばない → [google-oauth.md](../setup/google-oauth.md)。
+
 ### SES
 
 アカウントは**サンドボックス**のまま使う。検証済みアドレスにしか送れないので、受信に使う自分のアドレスを検証しておく。

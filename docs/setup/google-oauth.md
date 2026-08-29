@@ -38,7 +38,19 @@ http://localhost:3000/api/login/oauth2/code/google
 | `/login/oauth2/code/google`(`/api` 無し) | このアプリは OAuth のエンドポイントを `/api` 配下に移してある(理由 → [設計 決定1](../superpowers/specs/2026-08-15-phase4-google-auth-design.md)) |
 | 末尾にスラッシュを足す | Google の照合は完全一致 |
 
-「承認済みの JavaScript 生成元」は空でよい(このアプリはブラウザから Google の API を直接呼ばない)。
+#### 「承認済みの JavaScript 生成元」は空でよい
+
+**このアプリでは登録不要。** ログインの入口は素の `<a href="/api/oauth2/authorization/google">` で(`frontend/app/components/auth/GoogleButton.vue`)、ブラウザは自分のオリジンを離れて Google へフルページ遷移するだけ。トークン交換も `client_secret` を持つ Spring Boot がサーバー間で行う。**ブラウザの JavaScript が Google のエンドポイントを叩く場面が一度も無い。**
+
+この欄が効くのは Google が `Origin` ヘッダーを検査するとき、つまり**ブラウザの JS から直接 Google を呼ぶ実装**にしたときだけ。
+
+| 実装 | JavaScript 生成元 |
+|---|---|
+| サーバーサイドの認可コードフロー(Spring Security OAuth2 Client。**このアプリ**) | **不要** |
+| Google Identity Services(One Tap、`google.accounts.id.initialize` が描画するボタン) | 必要 |
+| implicit / token client(`gapi` でブラウザから直接トークンを取る) | 必要 |
+
+エラーの出方も別なので切り分けに使える。リダイレクト URI の不一致は `redirect_uri_mismatch`、JavaScript 生成元の不一致は `origin_mismatch`(GIS なら `idpiframe_initialization_failed`)。**現状の構成では後者が起きる経路が無い。**
 
 ### 4. `.env` に書く
 
@@ -71,7 +83,7 @@ curl -s -i http://localhost:3000/api/oauth2/authorization/google | grep -i '^loc
 
 ## 本番(AWS)で使うとき
 
-- リダイレクト URI に本番ドメインのものを**追加**する(`https://<ドメイン>/api/login/oauth2/code/google`)。開発用と両方登録しておける
+- リダイレクト URI に本番ドメインのものを**追加**する(`https://<ドメイン>/api/login/oauth2/code/google`)。開発用と両方登録しておける。**触るのはこの欄だけで、JavaScript 生成元は本番でも空のままでよい**(理由 → 上記)
 - `APP_BASE_URL` を本番の URL にする。`redirect-uri` はこれを元に組み立てられるので、ここが合っていないと `redirect_uri_mismatch` になる
 - クライアントシークレットは ECS のタスク定義から Secrets Manager 経由で注入する(`.env` を本番に持ち込まない)
 
