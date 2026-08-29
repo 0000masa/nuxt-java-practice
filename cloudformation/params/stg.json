@@ -3,7 +3,7 @@
   { "ParameterKey": "ProjectName",                     "ParameterValue": "nuxt-java-practice" },
   { "ParameterKey": "DomainName",                      "ParameterValue": "mylabinfra.com" },
   { "ParameterKey": "AppSubdomain",                    "ParameterValue": "njp" },
-  { "ParameterKey": "HostedZoneId",                    "ParameterValue": "REPLACE_WITH_HOSTED_ZONE_ID" },
+  { "ParameterKey": "HostedZoneId",                    "ParameterValue": "Z093451329VJIUW5G77S2" },
   { "ParameterKey": "EcrRepositoryName",               "ParameterValue": "nuxt-java-practice-ecs" },
   { "ParameterKey": "SsmParameterPath",                "ParameterValue": "/nuxt-java-practice/stg/" },
 
@@ -40,9 +40,9 @@
   { "ParameterKey": "RdsFreeableMemoryThresholdBytes", "ParameterValue": "268435456" },
   { "ParameterKey": "RdsConnectionsThreshold",         "ParameterValue": "72" },
 
-  { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "REPLACE_WITH_SLACK_WORKSPACE_ID" },
-  { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "REPLACE_WITH_SLACK_CHANNEL_ID_ECS" },
-  { "ParameterKey": "SlackChannelIdRds",               "ParameterValue": "REPLACE_WITH_SLACK_CHANNEL_ID_RDS" },
+  { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "T0BT8V342DB" },
+  { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "C0BTLRRUHQ9" },
+  { "ParameterKey": "SlackChannelIdRds",               "ParameterValue": "C0BUD9W1Y3S" },
 
   { "ParameterKey": "LogRetentionDays",                "ParameterValue": "7" },
   { "ParameterKey": "EnableBasicAuth",                 "ParameterValue": "true" }
