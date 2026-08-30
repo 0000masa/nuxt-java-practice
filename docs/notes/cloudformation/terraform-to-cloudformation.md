@@ -94,7 +94,7 @@ Outputs:      # output 相当
 
 **順序に意味はない。** CloudFormation は依存関係を `!Ref` / `!GetAtt` から自動で組み立てるので、`Resources` の中でどのリソースを先に書いてもよい(→ §4-5)。読みやすさのために `app.yml` はネットワーク → SG → RDS → ALB → ECS の順に並べている。
 
-**`Mappings` は「環境差分の置き場」ではなく「定数表」として使うと便利。** `app.yml:182` の実例:
+**`Mappings` は「環境差分の置き場」ではなく「定数表」として使うと便利。** `app.yml:286-295` の実例:
 
 ```yaml
 Mappings:
@@ -168,7 +168,7 @@ Terraform は `aws_db_instance.main.address` のように属性を素直に辿�
 `!Sub` が `locals` の代わりになる。`app.yml` は FQDN やリソース名の組み立てを毎回 `!Sub` で書いている(`locals` が無いので使い回せない)。
 
 ```yaml
-# app.yml:1035 付近
+# app.yml:1171 付近
 Family: !Sub ${ProjectName}-${EnvName}-app
 Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}
 ```
@@ -188,7 +188,7 @@ resource "aws_foo" "bar" {
 CloudFormation は `Conditions` に名前を付けて、リソースに `Condition` を貼る。
 
 ```yaml
-# app.yml:204
+# app.yml:240
 Conditions:
   # DesiredCount が 0 の段(DB ユーザー作成待ち)ではオートスケーリングを作らない。
   ServiceEnabled: !Not [!Equals [!Ref WebDesiredCount, 0]]
@@ -258,7 +258,7 @@ DependsOn: TaskExecutionRolePolicy
 | `force_destroy = true`(S3) | **相当物なし** |
 | state から外す `terraform state rm` | `delete-stack --retain-resources` |
 
-**仕様: `DeletionPolicy` の既定は `Delete`。ただし RDS だけ例外で `Snapshot`。** 書き忘れるとスタックを消してもスナップショットが残り、課金が続く。`app.yml:607` はそのためにコメント付きで明示している。
+**仕様: `DeletionPolicy` の既定は `Delete`。ただし RDS だけ例外で `Snapshot`。** 書き忘れるとスタックを消してもスナップショットが残り、課金が続く。`app.yml:643` はそのためにコメント付きで明示している。
 
 ```yaml
     # 【重要】RDS だけは DeletionPolicy の既定が Delete ではなく Snapshot。
@@ -278,7 +278,7 @@ Terraform で当たり前に使う `data` ブロックに、CloudFormation は�
 
 | 引きたかったもの | Terraform | CloudFormation での回避 |
 |---|---|---|
-| CloudFront のマネージドポリシー ID | `data "aws_cloudfront_cache_policy"` | `Mappings` に ID を直書き(`app.yml:182`) |
+| CloudFront のマネージドポリシー ID | `data "aws_cloudfront_cache_policy"` | `Mappings` に ID を直書き(`app.yml:286-295`) |
 | Route53 のホストゾーン | `data "aws_route53_zone"` | `HostedZoneId` をパラメータで手渡し |
 
 数少ない例外が**疑似パラメータ**(`AWS::AccountId` / `AWS::Region` / `AWS::Partition` / `AWS::StackName`)と、**SSM から引くパラメータ型**(`Type: AWS::SSM::Parameter::Value<String>`)。後者は「事前に SSM に入れておけば引ける」ので、データソースの代用として使える。
@@ -515,11 +515,11 @@ Terraform から来ると「無い」ことに驚くもの。回避方法とセ�
 
 | 見たいもの | 場所 |
 |---|---|
-| `Parameters` の実例(40 個超) | `cloudformation/app.yml:29-181` |
-| `Mappings` を定数表に使う | `cloudformation/app.yml:182-190` |
-| `Conditions` の 3 例 | `cloudformation/app.yml:192-201` |
-| `DeletionPolicy` を明示する理由 | `cloudformation/app.yml:607` 付近のコメント |
-| `!Sub` でのリソース名組み立て | `cloudformation/app.yml:1035` 付近 |
+| `Parameters` の実例(40 個超) | `cloudformation/app.yml:32-281` |
+| `Mappings` を定数表に使う | `cloudformation/app.yml:286-295` |
+| `Conditions` の 3 例 | `cloudformation/app.yml:297-305` |
+| `DeletionPolicy` を明示する理由 | `cloudformation/app.yml:643` 付近のコメント |
+| `!Sub` でのリソース名組み立て | `cloudformation/app.yml:1171` 付近 |
 | 環境差分の渡し方 | `cloudformation/params/stg.json` |
 | Terraform 側の `ignore_changes` | `terraform/modules/app-infrastructure/ecs_web.tf:70-76` |
 | 論理 ID のリネーム問題(Terraform 版) | `terraform/stg/moved.tf` |

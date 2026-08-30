@@ -1058,7 +1058,7 @@ ImageTag 変更
     Properties:
       ResourceId: !Sub service/${Cluster}/${Service.Name}
 
-# 変更後(app.yml:1379 付近)
+# 変更後(app.yml:1458 付近)
   ScalableTarget:
     DependsOn: Service
     Properties:

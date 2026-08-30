@@ -69,10 +69,10 @@ E を落としたので、`EcsLogGroup` のサブスクリプションフィル�
 
 Terraform の `rds_config.alarm_thresholds` に対応。CloudFormation の `Parameters` は構造化した型を持てないので、[フェーズ13 の決定2](./2026-08-19-phase13-cloudformation-design.md) どおり平坦に開く。**CloudFormation には算術の組み込み関数が無い**ので、「RAM の 25%」のような計算はテンプレート側でできず、計算済みの値を `params` に書く。
 
-| パラメータ | stg (t4g.micro / 20GiB) | prod (t4g.medium / 50GiB) | 根拠 |
+| パラメータ | stg (t4g.micro / 20GiB) | prod (t4g.medium / 20GiB) | 根拠 |
 |---|---|---|---|
 | `RdsCpuThresholdPercent` | `90` | `90` | AWS 公式推奨 |
-| `RdsFreeStorageThresholdBytes` | `2147483648`(2 GiB) | `5368709120`(5 GiB) | 割当ストレージの 10% |
+| `RdsFreeStorageThresholdBytes` | `2147483648`(2 GiB) | `2147483648`(2 GiB) | 割当ストレージの 10%(両環境とも 20 GiB) |
 | `RdsFreeableMemoryThresholdBytes` | `268435456`(256 MiB) | `1073741824`(1 GiB) | RAM の 25% |
 | `RdsConnectionsThreshold` | `72` | `307` | `max_connections`(= `DBInstanceClassMemory/12582880`)の 90% |
 

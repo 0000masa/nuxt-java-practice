@@ -149,7 +149,7 @@ Terraform: サービスは作るが task_definition は見ない(ignore_changes)
 リリース: ImageTag パラメータを変えてスタック更新
 ```
 
-`app.yml:1032` 付近と `:1227` 付近。
+`app.yml:1168` 付近(`AppTaskDefinition`)と `:1375` 付近(`Service`)。
 
 ```yaml
   AppTaskDefinition:
@@ -339,7 +339,7 @@ TaskDefinition: myproj-stg-app  →  myproj-stg-app   (変更なし)
 
 **未検証:** オートスケーリングが `WebDesiredCount` を超えてタスクを増やしている最中にスタックを更新したとき、タスク数が `params` の値に戻るか。
 
-`app.yml:1233` は `DesiredCount: !Ref WebDesiredCount` と書いており、ワークフローは毎回この値を渡す。**CloudFormation が ECS の `UpdateService` に `desiredCount` を常に含めるのか、変更のないプロパティは送らないのかが公式ドキュメントに明記されていない。**
+`app.yml:1381` は `DesiredCount: !Ref WebDesiredCount` と書いており、ワークフローは毎回この値を渡す。**CloudFormation が ECS の `UpdateService` に `desiredCount` を常に含めるのか、変更のないプロパティは送らないのかが公式ドキュメントに明記されていない。**
 
 stg は `MinCapacity=1 / MaxCapacity=2` なので実害は小さい。必要になれば [drift-aware change set](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/drift-aware-change-sets.html)(`--deployment-mode REVERT_DRIFT`)に切り替える道がある。ECS の desired count は「AWS 管理プロパティ」として drift を保持すると明記されている。**切り替えに必要な設定・IAM 権限・副作用** → [CLI コマンドのノート §5-8](./cli-commands-and-change-sets.md#deploy-では実物を読ませられない)。
 
