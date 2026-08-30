@@ -16,7 +16,7 @@
 2. **`Status` は 4 つある。** `Status`(Change Set)/ `ExecutionStatus` / `StackStatus` / `ResourceStatus` は軸が違い、混ぜると読めない。とくに**「差分ゼロ」が `Status: FAILED` として返る**のが最大の罠で、`StatusReason` の文字列を読まないと本物の異常と区別できない
 3. **`aws cloudformation deploy` は 3 手をまとめる代わりに、4 つのことを暗黙にやっている。** テンプレートの S3 アップロード / 渡さなかったパラメータの `UsePreviousValue` 化 / CREATE と UPDATE の判定 / 差分ゼロを成功として黙認(AWS CLI v2 の既定)。手組みに移ると**この 4 つが全部自分の責任になる**。`cfn-apply.yml` の一見冗長なコードは、ほぼこれの肩代わり
 
-関連ノート: [コマンドと IAM 権限](./iam-roles-and-command-permissions.md) / [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) / [テンプレートの分割と置き場](./templates-and-prerequisites.md) / [ECS のタスク定義は誰が持つか](./ecs-deploy-ownership.md) / [RDS / ECS の環境差分と IaC 2 ツールでの表現力](./environment-differences.md)
+関連ノート: [コマンドと IAM 権限](./iam-roles-and-command-permissions.md) / [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) / [テンプレートの分割と置き場](./templates-and-prerequisites.md) / [ECS のタスク定義は誰が持つか](./ecs-deploy-ownership.md) / [RDS / ECS の環境差分と IaC 2 ツールでの表現力](./environment-differences.md) / [テンプレートの書き方(YAML の文法と組み込み関数)](./template-syntax-and-functions.md)
 
 ---
 

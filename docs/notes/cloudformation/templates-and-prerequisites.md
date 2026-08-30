@@ -10,7 +10,7 @@
 2. **S3 が必要になる理由は 2 つあり、混ぜてはいけない。** ①分割の仕組みが要求する(`AWS::Include` / ネストスタックは**サイズが小さくても**必須)、②テンプレートが 51,200 バイトを超える(**どの方式にも掛かる**。スタック分割も例外ではない)。このリポジトリは分割していないが、②の理由でバケットを持っている
 3. **そのバケットは tfstate の S3 とは別物。** 中身は「Git から再生できるビルド成果物」で、状態ではない。状態は CloudFormation が AWS 側で持っている
 
-関連: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) / [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) / [ADR-0008](../../adr/0008-template-bucket-as-resident-resource.md)
+関連: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) / [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) / [ADR-0008](../../adr/0008-template-bucket-as-resident-resource.md) / [テンプレートの書き方(YAML の文法と組み込み関数)](./template-syntax-and-functions.md)
 
 ---
 

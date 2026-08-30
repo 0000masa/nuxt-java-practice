@@ -10,7 +10,7 @@
 2. **「要らない」は「安全」ではない。** 外部の変更は保護されておらず、次にテンプレート側で差分が出たときにまとめて巻き戻る。**Terraform なら即バレする事故が、CloudFormation では遅れて出る**
 3. **CloudFormation にも `ignore_changes` 相当はある**(タスク定義を family だけで参照する)。そして**「直したのにロールアウトされない」問題は Terraform 側にもある** — `ignore_changes` は設定側の変更も反映しないので、同じ罠が起きる。CloudFormation 固有の悪さは別のところで、**テンプレートに残した古いイメージのタスク定義が「最新 ACTIVE」になり、テンプレートがそれを指し続けること**
 
-関連: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) §5 / [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) §5-8 / [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md)
+関連: [Terraform 経験者のための CloudFormation](./terraform-to-cloudformation.md) §5 / [CloudFormation の CLI コマンドを読み解く](./cli-commands-and-change-sets.md) §5-8 / [ADR-0007](../../adr/0007-app-deploy-inside-cloudformation.md) / [テンプレートの書き方(YAML の文法と組み込み関数)](./template-syntax-and-functions.md)
 
 ---
 
