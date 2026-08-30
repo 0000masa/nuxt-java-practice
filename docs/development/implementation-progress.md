@@ -36,6 +36,27 @@
 
 ## 完了メモ
 
+- **stg を実機で建てて、更新・撤収まで通した**(2026-08-29):
+  - **フェーズ13〜15 の「実機未検証」がここで解消された。** 3 つのワークフローがすべて通っている
+    - `cfn-deploy.yml` — 構築成功(5 段階のフローが最後まで通った)
+    - `cfn-apply.yml` — イメージタグを変えてのタスク更新が成功
+    - `cfn-destroy.yml` — 撤収成功(バケットを空にしてからの `delete-stack` が通った)
+  - **アプリに実際にアクセスできた**
+  - **Slack にアラートが届いた**(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md) の配線が実機で成立した)
+  - **未確認のまま残っているもの** — 確認していないことも記録として残す:
+    - **SES(メール送信)。** 会員登録の確認メール・パスワードリセットが実際に飛ぶか
+    - `FARGATE_SPOT` の中断が起きたかどうか
+    - Blue/Green の重み入れ替えがリスナールール側だけで成立するか
+    - Basic 認証を通した状態で Google ログインのコールバックが成立するか
+    - SES の DKIM トークンが作り直しで変わるか
+  - **申し送り**: capacity provider strategy を環境差にした(下記)。**`base` がサービス単位かサービスリビジョン単位かが未確定**で、次に stg を建てるときに確かめる。手順と判定基準 → [environment-differences.md §3-6](../notes/cloudformation/environment-differences.md)
+
+- **ECS の capacity provider strategy を環境差にした(実機未検証)**(2026-08-30):
+  - `WebCapacityProvider`(FARGATE か FARGATE_SPOT のどちらか 1 つ)を廃止し、**`WebOnDemandBase` / `WebOnDemandWeight` / `WebSpotWeight` の 3 本**に開いた。stg は Spot 100%、**prod は「平常時の 2 タスクはオンデマンド、超えた分は Spot」の混合**
+  - **`Fn::If` + `AWS::NoValue` でリストの要素ごと消す**書き方を実際に使った。Terraform の `dynamic` に相当するものが無いので、「0 個か 1 個か」の分岐として表現する(→ [environment-differences.md §8-3](../notes/cloudformation/environment-differences.md))
+  - **`WebSpotWeight` に `MinValue: 1` を付けた理由は空リスト防止。** 3 本とも 0 だと `CapacityProviderStrategy: []` になり、これは「戦略を消す」という別の意味を持つ(仕様)。クラスタに `DefaultCapacityProviderStrategy` が無いので ECS が `No launch type to fall back to...` で失敗する。**Change Set は通ってしまい、実行中に落ちてロールバックになる**経路だった
+  - **未確定を 1 つ抱えたまま入れている。** Blue/Green デプロイ中に `base` を誰が満たすのかが公式ドキュメントで確定できず、材料が両方向に見つかった。材料 1(サービス単位)が正しいと**デプロイのたびにオンデマンドと Spot が交互に入れ替わり、prod の設定が破綻する**。検証手順と、そうだった場合の代替案 → [environment-differences.md §3-6](../notes/cloudformation/environment-differences.md)
+
 - **フェーズ15: アラートの通知先を Slack に移した(実機未検証)**(2026-08-28):
   - **方針** → **[ADR-0011](../adr/0011-slack-notification-with-chatbot.md)**、**設計** → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)(決定 9 件)、**手順書を新設** → [docs/slack/README.md](../slack/README.md)
   - **動機は ADR-0010 の帰結 1 の解消。** メール購読は「建てるたびに購読確認を 2 通踏む / 踏むまで 1 通も届かないのにスタックは緑 / 片方だけ踏み忘れるとその系統だけ無音」で、**環境を建てるたびに必ず発生し、失敗しても何も起きない**種類の手作業だった。Slack のチャンネル転送には購読確認の概念が無い
@@ -113,7 +134,7 @@
     - `app.mail.transport=sess`(綴り間違い)で起動失敗 — `No enum constant ...Transport.sess`
     - actuator のメールのヘルス指標を `enabled: true` に戻すと `AuthFlowTest` の 3 本が `'beans' must not be empty` で落ちる(原因は `mailHealthContributor` が具象型 `JavaMailSenderImpl` で Bean を探すのに、テストのモックが `JavaMailSender` インターフェースであること)
     - テスト 46 本すべて成功
-  - **実機で確かめること**: SES の DKIM トークンが作り直しで変わるか / Blue/Green の重み入れ替えがリスナールール側だけで成立するか(公式の移行ガイドはリスナーの `DefaultActions` も両ターゲットグループの forward にしている) / Basic 認証を通した状態で Google ログインのコールバックが成立するか / `FARGATE_SPOT` の中断頻度 / RDS の `EngineVersion: "8.4"` がメジャーバージョン指定として通るか
+  - **実機で確かめること**(2026-08-29 の構築で `EngineVersion: "8.4"` は通った。残りは未確認 → 冒頭の完了メモ): SES の DKIM トークンが作り直しで変わるか / Blue/Green の重み入れ替えがリスナールール側だけで成立するか(公式の移行ガイドはリスナーの `DefaultActions` も両ターゲットグループの forward にしている) / Basic 認証を通した状態で Google ログインのコールバックが成立するか / `FARGATE_SPOT` の中断頻度
   - **手元の検証で踏んだ罠**: **パイプが終了コードを隠す。** `java -jar app.jar | tail` の終了コードは `tail` のものになるので、起動失敗を「終了コード 0」と読み違えた。`aws ecs run-task` の結果判定でも同じ形の罠があるため、ワークフローでは値を変数に入れてから判定している
 - **フェーズ11 完了**(2026-08-18): **フェーズ5〜10(いいね・画像・プロフィール・検索ラボ・シード・index 実験)を飛ばして着手した。** アプリの最低限の機能が揃ったので、機能を増やす前に「AWS にデプロイできる形」を先に通しておくため。飛ばしたフェーズは後で戻って実施する。
   - **作ったもの**:
