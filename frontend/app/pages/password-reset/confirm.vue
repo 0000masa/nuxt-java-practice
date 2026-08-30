@@ -6,9 +6,18 @@
  * 追い出される(→ 設計の決定11)。
  */
 const { confirmPasswordReset } = useAuth()
-const route = useRoute()
+const { $linkQuery } = useNuxtApp()
 
-const token = computed(() => (typeof route.query.token === 'string' ? route.query.token : ''))
+/**
+ * メールのリンクに付いてきたトークン。useRoute().query ではなく、開かれた URL のクエリを読む。
+ * プリレンダ済みのページでは、マウント時点の route.query が空になっているため
+ * → plugins/link-query.client.ts
+ */
+const token = ref('')
+onMounted(() => {
+  token.value = $linkQuery('token')
+})
+
 const newPassword = ref('')
 const submitting = ref(false)
 const errorMessage = ref('')

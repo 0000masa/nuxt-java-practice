@@ -8,7 +8,7 @@
  * メールソフトのリンク先読みで勝手に消費される事故を避けるため。
  */
 const { verifyEmail, resendVerification } = useAuth()
-const route = useRoute()
+const { $linkQuery } = useNuxtApp()
 
 type State = 'verifying' | 'done' | 'failed'
 const state = ref<State>('verifying')
@@ -19,8 +19,11 @@ const resendEmail = ref('')
 const resendNotice = ref('')
 
 onMounted(async () => {
-  const token = route.query.token
-  if (typeof token !== 'string' || token.length === 0) {
+  // useRoute().query ではなく、開かれた URL のクエリを読む。プリレンダ済みのページでは
+  // マウント時点の route.query も window.location も空になっているため
+  // → plugins/link-query.client.ts
+  const token = $linkQuery('token')
+  if (token.length === 0) {
     state.value = 'failed'
     errorMessage.value = 'リンクにトークンが含まれていません'
     return

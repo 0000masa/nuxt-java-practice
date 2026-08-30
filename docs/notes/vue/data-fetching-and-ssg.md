@@ -389,6 +389,114 @@ nitro: {
 
 ---
 
+## 7. プリレンダしたページをクエリ付きで開くと `route.query` が一拍遅れる
+
+メール確認のリンク `https://stg.njp.mylabinfra.com/verify-email?token=...` を開くと、STG では
+「リンクにトークンが含まれていません」と表示されて認証できなかった。**ローカルでは同じコードが動く。**
+
+### 何が起きているか
+
+`/verify-email` はプリレンダ済みのページで、出力された HTML には「プリレンダしたときの URL」が
+埋め込まれている(`__NUXT_DATA__` の `path`。クエリは付いていない)。
+
+```html
+<script type="application/json" data-nuxt-data="nuxt-app" data-ssr="true" id="__NUXT_DATA__">
+[{"...":"...","path":7,"prerenderedAt":15},...,"\u002Fverify-email",...]
+</script>
+```
+
+ブラウザ側の Nuxt は、この `path` と実際の URL が食い違っていることに気づくと、
+**ハイドレーションの食い違いを避けるために一度「プリレンダ時の URL」でルーティングしてから、
+ハイドレーションが終わったあとで本来の URL に差し替える**
+(`nuxt/dist/pages/runtime/plugins/router.js` の `hasDeferredRoute`)。
+
+```js
+// nuxt/dist/pages/runtime/plugins/router.js(抜粋)
+nuxtApp.hooks.hookOnce("app:created", async () => {
+  if (hasDeferredRoute) {
+    const payloadRoute = router.resolve(nuxtApp.payload.path);   // ← クエリ無しの /verify-email
+    await router.replace({ ...payloadRoute, force: true });
+    nuxtApp.hooks.hookOnce("app:suspense:resolve", async () => {
+      await router.replace({ ...resolvedInitialRoute, force: true }); // ← ここで ?token= が載る
+    });
+  }
+  ...
+});
+```
+
+`router.replace` は `history.replaceState` を呼ぶので、**アドレスバーごと書き換わる**。
+つまりクエリが消えるのは `route.query` だけではなく `window.location` も同じ。時系列はこうなる。
+
+| 時点 | `route.query.token` / `window.location.search` |
+| --- | --- |
+| プラグインの実行(`applyPlugins`) | **あり** |
+| `app:created`(ここで差し替え) | ここで消える |
+| マウント(`onMounted` が走る) | **無し** |
+| `app:suspense:resolve` の後(本来の URL に戻る) | あり |
+
+`onMounted` はクエリが消えている間に走るので、トークンを取りこぼす。しかも差し替えはパスが
+同じままなので**ページのコンポーネントは作り直されず、`onMounted` は二度と走らない**。
+
+### なぜローカルでは動くのか
+
+この回り道が起きる条件は `payload.prerenderedAt` と `payload.path` が両方あること、つまり
+**SSG でプリレンダされたページであること**。開発サーバー(SSR)ではリクエストのたびに
+クエリ付きの URL で描画されるので条件が成立せず、`route.query` のままで正しく動く。
+**SSG でビルドした STG / 本番でだけ壊れる**ので、`docker compose` の開発環境では再現しない。
+
+### 対処
+
+クライアントの起動順は `applyPlugins` → `callHook('app:created')` → `mount` なので
+(`nuxt/dist/app/entry.js`)、**プラグインの中ならまだ元の URL が残っている**。
+そこで開かれた URL のクエリをプラグインで控えておき、ページはそれを読む。
+
+```ts
+// app/plugins/link-query.client.ts
+export default defineNuxtPlugin(() => {
+  const initialQuery = new URL(window.location.href).searchParams
+  return { provide: { linkQuery: (name: string) => initialQuery.get(name) ?? '' } }
+})
+```
+
+```ts
+// app/pages/verify-email.vue
+const { $linkQuery } = useNuxtApp()
+onMounted(async () => {
+  const token = $linkQuery('token')
+  ...
+})
+```
+
+**`onMounted` の中で `window.location` を読むのでは直らない。** 上の表のとおり、その時点では
+アドレスバーからもクエリが消えている(実機で確認済み)。
+
+控えるのは「そのタブで最初に開いた URL」なので、アプリ内のページ遷移では変わらない。
+メールのリンクの着地点のように「どの URL で開かれたか」を見たい場面だけで使い、
+middleware が付ける `?redirect=` のような普通のクエリは `useRoute().query` のままでよい。
+
+`computed` で包んで**リアクティブに**読んでいる場合は、差し替え後に値が入り直すので最終的には
+動く。ただし差し替えまでの一瞬だけ「トークン無し」の表示が出る。
+
+ページをプリレンダの対象から外す(`nitro.prerender.ignore`)のも手で、そうすると SPA
+フォールバックの `200.html` が返るようになり `payload.path` が無くなるので差し替え自体が起きない。
+このリポジトリでは事前生成した HTML を活かしたいので採らなかった(§6・フェーズ11)。
+
+### 再現と確認
+
+開発サーバーでは再現しないので、SSG の出力を直接配信して確かめる。
+
+```bash
+cd frontend && npm run generate && npx serve .output/public
+# http://localhost:<表示されたポート>/verify-email?token=dummy を開く
+```
+
+`/api` は Spring Boot に届かない(`devProxy` は `nuxt dev` 専用)ので API 呼び出しは 404 になるが、
+判定はそれで足りる。**修正前は「リンクにトークンが含まれていません」で API を叩きにいかない。
+修正後は API を叩いて 404 で失敗する**(DevTools の Network に `POST /api/auth/verify-email` が出る)。
+
+
+---
+
 ## 落とし穴
 
 - **イベントハンドラの中で `useFetch` を呼ぶ。** 動かない。`$fetch` を使う([composables.md](./composables.md) §4)。
@@ -401,6 +509,7 @@ nitro: {
 - **`$fetch` のエラーを `e.message` で読む。** レスポンスボディは `e.data`。
 - **絶対 URL を書く。** `http://localhost:8080/api/posts` と書くと本番で壊れる。常に相対パス `/api/...`。
 - **動的ルートが静的生成されると思う。** されない。直接アクセスにはフォールバック設定が要る。
+- **プリレンダしたページで `onMounted` から `route.query` を読む。** マウント時点ではまだ空。`window.location` も同じく空なので、プラグインで開かれた URL を控えておく → §7。
 
 ## 用語集
 

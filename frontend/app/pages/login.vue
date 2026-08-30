@@ -2,6 +2,7 @@
 const { login, resendVerification } = useAuth()
 const auth = useAuthStore()
 const route = useRoute()
+const { $linkQuery } = useNuxtApp()
 
 /**
  * Google ログインが失敗したときに backend が付ける ?error= のコードと、画面に出す文言。
@@ -40,8 +41,10 @@ function destination() {
 // 自動 import は「onMounted という名前で使う」前提で効いているので、別名にしたい場合はその仕組みから外れることになり、
 // 自分で import { onMounted as afterMount } from 'vue' と書く必要があります。
 onMounted(() => {
-  const code = route.query.error
-  if (typeof code !== 'string') return
+  // useRoute().query ではなく、開かれた URL のクエリを読む
+  // → plugins/link-query.client.ts
+  const code = $linkQuery('error')
+  if (code.length === 0) return
   errorMessage.value = GOOGLE_ERROR_MESSAGES[code] ?? GOOGLE_ERROR_MESSAGES.login_failed!
 })
 
