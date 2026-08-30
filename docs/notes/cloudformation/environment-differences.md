@@ -256,7 +256,7 @@ Conditions:
 
 検証環境なので許容するが、**「stg が落ちている」の原因候補に Spot 中断が常にある**ことは覚えておく。
 
-**この設定にはまだ確かめていない前提がある → §3-6。**
+**この設定は `base` が Blue/Green デプロイ中にどう効くかに依存していた。stg の実機で確かめて、そのままでよいと分かっている → §3-6。**
 
 ### 3-4. `ContainerInsights` は stg と prod が同値のまま
 
@@ -286,11 +286,15 @@ Conditions:
 
 **パラメータは 4 本立てた。** 2 本(スケールイン / スケールアウト)にまとめると params は軽くなるが、この CPU 120 / メモリ 180 の使い分けが消える。
 
-### 3-6. 未検証 — `base` は「サービス」単位か「サービスリビジョン」単位か
+### 3-6. 検証済み — `base` は「サービスリビジョン」単位で効く
 
-**§3-3 の prod の設定には、公式ドキュメントで確定できなかった前提が 1 つある。** ここだけは実機で確かめるまで信用しないこと。
+**§3-3 の prod の設定には、公式ドキュメントで確定できなかった前提が 1 つあった。stg の実機で確かめて決着した(2026-08-30)。**
 
-#### 何が分からないのか
+> **結論: `base` はサービスリビジョン単位で評価される。** Blue/Green デプロイ中も、green は自分で base を満たしにいく。**§3-3 の案 A(`base 2` / OD weight `0` / Spot weight `1`)はそのままでよい。**
+
+以下は、何が問題だったのか・どう確かめたのかの記録。**公式ドキュメントには今も書かれていない**ので、根拠は下の実測だけ。
+
+#### 何が分からなかったのか
 
 このサービスは `Strategy: BLUE_GREEN`(`app.yml:1428`)なので、**デプロイ中は blue 2 + green 2 = 4 タスクが同時に走る**。このとき `base: 2` を誰が満たすのかで結果が変わる。
 
@@ -315,7 +319,7 @@ blue と green はそれぞれ別の service revision で、それぞれが戦�
 
 **`deployment-type-blue-green.html` の Considerations にも、`blue-green-deployment-how-it-works.html` の 6 フェーズの説明にも、capacity provider の話は出てこない。** どちらが正しいかを決める記述は見つからなかった。
 
-#### 材料 1 だと何が壊れるか
+#### 材料 1 だったら何が壊れていたか
 
 **「平常時の 2 タスクは必ずオンデマンド」という約束が、デプロイ 1 回で破綻する。** しかも自動では戻らない。
 
@@ -334,7 +338,7 @@ blue と green はそれぞれ別の service revision で、それぞれが戦�
 
 **weight は比なので、デプロイをまたいでも自己安定する。壊れるのは「N 台」という絶対数を持つ `base` だけ。**
 
-#### 確かめ方
+#### どう確かめたか
 
 判別には **`WebDesiredCount >= WebOnDemandBase`**、つまり **blue だけで base を満たしきっている状態**が要る。今の stg は `WebDesiredCount: 1` に対して base 0 なので、そのままでは判別できない。
 
@@ -360,20 +364,68 @@ blue と green はそれぞれ別の service revision で、それぞれが戦�
 
 **`BakeTimeInMinutes` は `0` のままでよい。** `cfn-apply` は `stack-update-complete` を待つので、ワークフローが終わった時点で bake も終わり blue は消えている。判定は「デプロイ後に残ったタスク(= green)」だけで付く。
 
-観測は ECS コンソールのタスク一覧の「キャパシティープロバイダー」列。
+#### 観測で踏んだ罠 — 「起動タイプ」では判別できない
 
-#### 材料 1 だったらどうするか
+**仕様: `Task` の `launchType` が取る値は `EC2` / `FARGATE` / `EXTERNAL` / `MANAGED_INSTANCES` の 4 つで、`FARGATE_SPOT` という値は存在しない。** Fargate Spot は起動タイプではなくキャパシティープロバイダーの区別で、インフラ種別としてはどちらも `FARGATE`。
 
-`base` が信用できないと分かった時点で、§3-3 の設定は選び直しになる。候補は 2 つ。
+| フィールド | 値 | 判別に使えるか |
+|---|---|---|
+| `launchType`(コンソールの「起動タイプ」) | 常に `FARGATE` | ❌ |
+| **`capacityProviderName`(「キャパシティープロバイダー」)** | `FARGATE` か `FARGATE_SPOT` | ✅ |
+
+**実際にここで一度読み違えた。**「起動タイプが両方 Fargate だった」は「両方オンデマンドだった」ではなく、**何も言っていない**。
+
+```bash
+cluster=nuxt-java-practice-stg-cluster
+service=nuxt-java-practice-stg-app
+
+# 走っているタスク
+aws ecs describe-tasks --cluster "$cluster" \
+  --tasks $(aws ecs list-tasks --cluster "$cluster" --service-name "$service" --query 'taskArns' --output text) \
+  --query 'tasks[].{cp:capacityProviderName,launch:launchType,started:startedAt}' --output table
+
+# 停止済み(1 時間程度は残る。前のデプロイの証拠を後から拾える)
+aws ecs describe-tasks --cluster "$cluster" \
+  --tasks $(aws ecs list-tasks --cluster "$cluster" --service-name "$service" \
+              --desired-status STOPPED --query 'taskArns' --output text) \
+  --query 'tasks[].{cp:capacityProviderName,stopped:stoppedAt,reason:stoppedReason}' --output table
+```
+
+コンソールで見るなら、タスクの詳細画面の「キャパシティープロバイダー」。一覧にも列として出せる。
+
+#### 実測結果(2026-08-30、stg)
+
+`describe-tasks` の `capacityProviderName` と `stoppedReason` の `deployment ecs-svc/...` で、リビジョンごとに束ねたもの。
+
+| 時刻 | リビジョン | CP | 出来事 |
+|---|---|---|---|
+| 22:02:37 | **R0**(旧戦略: base 0 / Spot 100%) | `FARGATE_SPOT` | 初回構築 |
+| **22:27:27** | **R0** | **`FARGATE_SPOT`** | **desired 1→2 で blue が 1 台増えた** |
+| 22:27:32 / 22:27:54 | **R1**(新戦略: base 2) | `FARGATE` × 2 | 検証値を当てたときの green |
+| 22:31 | R0 停止 | | |
+| **22:44:02 / 22:44:32** | **R2** | **`FARGATE` × 2** | **判定点** |
+| 22:47 | R1 停止 | | |
+| 22:59:47 / 23:00:10 | **R3** | `FARGATE` × 2 | もう一度 |
+| 23:03 | R2 停止 | | |
+
+**判定点は 22:44。** そのとき blue(R1)は `FARGATE` × 2 で走っていた。サービス全体で数えるなら base 2 は充足済みなので、**材料 1 なら green は weight 配分になり、`WebOnDemandWeight: 0` だから全部 Spot になるはず**だった。実測は `FARGATE` × 2。**22:59 の R2 → R3 でも同じ**で、独立した 2 回とも材料 1 の予測を外した。
+
+**決定打は 22:27 の 1 行。** 同じ瞬間に **blue が Spot に 1 台増え、green が FARGATE で立ち上がっている**。CloudFormation は既に新しい戦略(base 2)を当てているのに、**blue は旧戦略のまま Spot に増えた**。これは `ServiceRevision.capacityProviderStrategy` が「そのリビジョンが使う戦略」を各自で抱えている、という材料 2 の構造そのもの。
+
+**副産物として分かったこと。**
+
+- **`DesiredCount` の変更は blue にも効く。** 新旧の戦略が同時に走る瞬間がある
+- **`base` の定義にある "for each service" は、リビジョンをまたいで合算する意味ではない**(少なくとも Blue/Green ではそう振る舞わない)。API リファレンスの文面だけからは読み取れない
+
+#### もし材料 1 だったら
+
+棄却されたので採らなかったが、記録として残す。`base` は「N 台」という絶対数なのでリビジョンをまたぐと壊れうる一方、**`weight` は比なのでデプロイをまたいでも自己安定する**。だから逃げ道は「base への依存を減らす」方向にあった。
 
 | 案 | base / OD weight / Spot weight | 材料 1 の世界での挙動 |
 |---|---|---|
-| **A'** | `2` / `1` / `1` | オンデマンドが 1〜2 台で揺れる。**0 にはならない** |
-| **D** | `0` / `1` / `1` | 常に OD 1 + Spot 1。**base を使わないので解釈に依存しない**が、平常時から 1 台が Spot になる |
+| **A'** | `2` / `1` / `1` | オンデマンドが 1〜2 台で揺れる。0 にはならない |
+| **D** | `0` / `1` / `1` | 常に OD 1 + Spot 1。base を使わないので解釈に依存しないが、平常時から 1 台が Spot になる |
 
-**今は A(`2` / `0` / `1`)を採っている。** 材料 2 が正しければ約束どおり動き、材料 1 が正しければ A' か D に変える。ADR を書くのは検証が終わってから。
-
----
 
 ---
 
@@ -639,7 +691,7 @@ Resources:
 
 **ただし n 個には広がらない。** 要素を 3 つ 4 つと増やすには、そのぶん `Conditions` とパラメータを手で書き足す。Terraform の `for_each` のように「リストの長さぶん展開」はできない(→ [対訳ノート §4-4](./terraform-to-cloudformation.md))。**「0 個か 1 個か」の分岐までなら実用的、「n 個」は破綻する**、という線引き。
 
-**そして「書けた」ことと「意図どおり動く」ことは別。** `base` の効き方には未確定が残っている(→ §3-6)。
+**そして「書けた」ことと「意図どおり動く」ことは別。** `base` が Blue/Green デプロイ中にどう効くかは公式ドキュメントに書かれておらず、実機で確かめて決着させた(→ §3-6)。
 
 ---
 

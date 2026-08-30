@@ -49,13 +49,16 @@
     - Blue/Green の重み入れ替えがリスナールール側だけで成立するか
     - Basic 認証を通した状態で Google ログインのコールバックが成立するか
     - SES の DKIM トークンが作り直しで変わるか
-  - **申し送り**: capacity provider strategy を環境差にした(下記)。**`base` がサービス単位かサービスリビジョン単位かが未確定**で、次に stg を建てるときに確かめる。手順と判定基準 → [environment-differences.md §3-6](../notes/cloudformation/environment-differences.md)
+  - **申し送り**: capacity provider strategy を環境差にした(下記)。**`base` の効き方は 2026-08-30 に stg の実機で確認済み** → [environment-differences.md §3-6](../notes/cloudformation/environment-differences.md)
 
 - **ECS の capacity provider strategy を環境差にした(実機未検証)**(2026-08-30):
   - `WebCapacityProvider`(FARGATE か FARGATE_SPOT のどちらか 1 つ)を廃止し、**`WebOnDemandBase` / `WebOnDemandWeight` / `WebSpotWeight` の 3 本**に開いた。stg は Spot 100%、**prod は「平常時の 2 タスクはオンデマンド、超えた分は Spot」の混合**
   - **`Fn::If` + `AWS::NoValue` でリストの要素ごと消す**書き方を実際に使った。Terraform の `dynamic` に相当するものが無いので、「0 個か 1 個か」の分岐として表現する(→ [environment-differences.md §8-3](../notes/cloudformation/environment-differences.md))
   - **`WebSpotWeight` に `MinValue: 1` を付けた理由は空リスト防止。** 3 本とも 0 だと `CapacityProviderStrategy: []` になり、これは「戦略を消す」という別の意味を持つ(仕様)。クラスタに `DefaultCapacityProviderStrategy` が無いので ECS が `No launch type to fall back to...` で失敗する。**Change Set は通ってしまい、実行中に落ちてロールバックになる**経路だった
-  - **未確定を 1 つ抱えたまま入れている。** Blue/Green デプロイ中に `base` を誰が満たすのかが公式ドキュメントで確定できず、材料が両方向に見つかった。材料 1(サービス単位)が正しいと**デプロイのたびにオンデマンドと Spot が交互に入れ替わり、prod の設定が破綻する**。検証手順と、そうだった場合の代替案 → [environment-differences.md §3-6](../notes/cloudformation/environment-differences.md)
+  - **未確定を 1 つ抱えて入れたが、同日に stg の実機で決着した。** Blue/Green デプロイ中に `base` を誰が満たすのかが公式ドキュメントで確定できず、材料が両方向に見つかっていた。**結論は「サービスリビジョン単位」で、green は自分で base を満たしにいく。** prod の設定(`base 2` / OD weight `0` / Spot weight `1`)はそのままでよい
+    - **決定打**: `desired 1→2` と戦略変更を同時に当てた瞬間、**blue が旧戦略のまま Spot に 1 台増え、green が新戦略で FARGATE に立ち上がった**(22:27:27 と 22:27:32)。リビジョンごとに戦略を抱えている証拠
+    - **観測で一度読み違えた**: コンソールの「起動タイプ」は Spot でも `FARGATE` と出る(`Task.launchType` に `FARGATE_SPOT` という値が無い)。見るのは `capacityProviderName`
+    - 実測データと経緯 → [environment-differences.md §3-6](../notes/cloudformation/environment-differences.md)
 
 - **フェーズ15: アラートの通知先を Slack に移した(実機未検証)**(2026-08-28):
   - **方針** → **[ADR-0011](../adr/0011-slack-notification-with-chatbot.md)**、**設計** → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)(決定 9 件)、**手順書を新設** → [docs/slack/README.md](../slack/README.md)
