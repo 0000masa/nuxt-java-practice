@@ -177,10 +177,35 @@ Parameters:
     Description: >-
       ワークフローが 1 段目で 0 を渡す(ユーザー作成前にタスクを起動できないため)。
       0 のときはオートスケーリングも作らない
-  WebCapacityProvider:
-    Type: String
-    AllowedValues: [FARGATE, FARGATE_SPOT]
-    Description: stg は FARGATE_SPOT(約 70% 安い。中断は検証環境なら許容)
+  # capacity provider の混合戦略。stg は Spot 100%、prod は「最低 2 タスクはオンデマンドで
+  # 確保し、それを超えた分は全部 Spot」を表す。3 本に分かれているのは、ECS の戦略が
+  # 「オブジェクトのリスト」で、Parameters に平坦な型しか無いため(→ 対訳ノート §4-1)。
+  #
+  # base は戦略の中で 1 つの provider にしか付けられない(仕様)ので FARGATE 側に置く。
+  # weight は base を満たした後の配分比で、weight 0 の provider は base 以外に使われない。
+  WebOnDemandBase:
+    Type: Number
+    MinValue: 0
+    MaxValue: 10
+    Description: >-
+      FARGATE で必ず確保するタスク数。WebMaxCapacity を超える値は無意味だが、
+      パラメータをまたぐ検証は書けないので上限は緩い(→ 学習メモ §9-4)
+  WebOnDemandWeight:
+    Type: Number
+    MinValue: 0
+    MaxValue: 1000
+    Description: base を超えた分の FARGATE 取り分。base と両方 0 なら FARGATE の要素ごと消える
+  # 【MinValue が 1 である理由】0 を許すと WebOnDemandBase / WebOnDemandWeight と合わせて
+  # 3 つとも 0 にでき、CapacityProviderStrategy が空リストになる。このクラスタは
+  # DefaultCapacityProviderStrategy を持たないので、そのとき ECS は
+  # 「No launch type to fall back to for empty capacity provider strategy」で失敗する。
+  # Change Set は通ってしまうため、スタック更新の実行中に落ちてロールバックになる。
+  # 「Spot を使わない」構成が要るなら weight 0 ではなく base >= desired で表す。
+  WebSpotWeight:
+    Type: Number
+    MinValue: 1
+    MaxValue: 1000
+    Description: base を超えた分の FARGATE_SPOT 取り分。比なので絶対値ではなく WebOnDemandWeight との比率が効く
   WebMinCapacity:
     Type: Number
     MinValue: 1
@@ -303,6 +328,12 @@ Conditions:
   BasicAuthEnabled: !Equals [!Ref EnableBasicAuth, "true"]
 
   EnhancedMonitoringEnabled: !Not [!Equals [!Ref DbMonitoringInterval, 0]]
+
+  # base も weight も 0 なら FARGATE の要素を出さない(stg = Spot 100%)。
+  # Fn::If はリストの要素としても使えて、AWS::NoValue を返すと要素ごと消える(→ 学習メモ §8-3)
+  UseOnDemand: !Or
+    - !Not [!Equals [!Ref WebOnDemandBase, 0]]
+    - !Not [!Equals [!Ref WebOnDemandWeight, 0]]
 
 Resources:
   # ===========================================================================
@@ -1380,9 +1411,16 @@ Resources:
       TaskDefinition: !Ref AppTaskDefinition
       DesiredCount: !Ref WebDesiredCount
       EnableExecuteCommand: true
+      # stg: [FARGATE_SPOT(1)] / prod: [FARGATE(base 2, weight 0), FARGATE_SPOT(1)]
       CapacityProviderStrategy:
-        - CapacityProvider: !Ref WebCapacityProvider
-          Weight: 1
+        - !If
+          - UseOnDemand
+          - CapacityProvider: FARGATE
+            Base: !Ref WebOnDemandBase
+            Weight: !Ref WebOnDemandWeight
+          - !Ref AWS::NoValue
+        - CapacityProvider: FARGATE_SPOT
+          Weight: !Ref WebSpotWeight
       DeploymentConfiguration:
         MinimumHealthyPercent: 100
         MaximumPercent: 200
