@@ -15,8 +15,11 @@
 
   { "ParameterKey": "DbInstanceClass",                 "ParameterValue": "db.t4g.micro" },
   { "ParameterKey": "DbAllocatedStorage",              "ParameterValue": "20" },
+  { "ParameterKey": "DbMaxAllocatedStorage",           "ParameterValue": "100" },
   { "ParameterKey": "DbMultiAZ",                       "ParameterValue": "false" },
   { "ParameterKey": "DbBackupRetentionDays",           "ParameterValue": "0" },
+  { "ParameterKey": "DbDeleteAutomatedBackups",        "ParameterValue": "true" },
+  { "ParameterKey": "DbDeletionProtection",            "ParameterValue": "false" },
   { "ParameterKey": "DbPerformanceInsights",           "ParameterValue": "false" },
   { "ParameterKey": "DbMonitoringInterval",            "ParameterValue": "60" },
   { "ParameterKey": "DbName",                          "ParameterValue": "app" },
@@ -32,6 +35,10 @@
   { "ParameterKey": "WebMaxCapacity",                  "ParameterValue": "2" },
   { "ParameterKey": "WebCpuTarget",                    "ParameterValue": "60" },
   { "ParameterKey": "WebMemoryTarget",                 "ParameterValue": "70" },
+  { "ParameterKey": "WebCpuScaleInCooldown",           "ParameterValue": "120" },
+  { "ParameterKey": "WebCpuScaleOutCooldown",          "ParameterValue": "60" },
+  { "ParameterKey": "WebMemoryScaleInCooldown",        "ParameterValue": "180" },
+  { "ParameterKey": "WebMemoryScaleOutCooldown",       "ParameterValue": "60" },
   { "ParameterKey": "BakeTimeInMinutes",               "ParameterValue": "0" },
   { "ParameterKey": "ContainerInsights",               "ParameterValue": "enhanced" },
 

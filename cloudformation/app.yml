@@ -110,6 +110,16 @@ Parameters:
   DbAllocatedStorage:
     Type: Number
     MinValue: 20
+  # 設定しないとストレージ自動スケーリングは働かず、割当は DbAllocatedStorage で固定される。
+  # 空きが尽きると storage-full で DB が止まるので、逃げ道としてこちらを開けておく。
+  # DbAllocatedStorage より大きい必要があるが、パラメータをまたぐ制約は AllowedValues では
+  # 書けない(WebCpu と WebMemory の組み合わせと同じ)。値を変えるときは両方を見ること。
+  DbMaxAllocatedStorage:
+    Type: Number
+    MinValue: 20
+    Description: >-
+      ストレージ自動スケーリングの上限(GiB)。伸びた分は縮小できないので、
+      「事故で自動的に払ってよい上限額」として決める
   DbMultiAZ:
     Type: String
     AllowedValues: ["true", "false"]
@@ -118,6 +128,16 @@ Parameters:
     MinValue: 0
     MaxValue: 35
     Description: 0 で自動バックアップ無効。撤収前提の stg は 0
+  DbDeleteAutomatedBackups:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Description: DB を消したときに保持期間内の自動バックアップも消すか。prod は false(消した後の最後の復旧手段になる)
+  # 削除の API そのものを拒否する。DeletionPolicy は属性なので環境で切り替えられないが、
+  # こちらはただのプロパティなので !Ref が効く。→ docs/notes/cloudformation/environment-differences.md §5-4
+  DbDeletionProtection:
+    Type: String
+    AllowedValues: ["true", "false"]
+    Description: prod は true。true のままだと delete-stack が RDS を消せず撤収ごと失敗するので、消す前に false へ更新する 1 手が要る
   DbPerformanceInsights:
     Type: String
     AllowedValues: ["true", "false"]
@@ -172,6 +192,22 @@ Parameters:
     Description: CPU 使用率の目標値(%)。これを超えるとスケールアウト
   WebMemoryTarget:
     Type: Number
+  # クールダウンは「増やした/減らした直後、次の増減まで待つ秒数」。スケールアウトは詰まると
+  # 機会損失になるので短く、スケールインは prod ほど長く待つ(谷でタスクを削ると、次の山で
+  # Spring Boot の起動 30〜60 秒 + HealthCheckGracePeriodSeconds 120 秒を払い直すことになる)。
+  WebCpuScaleInCooldown:
+    Type: Number
+    MinValue: 0
+  WebCpuScaleOutCooldown:
+    Type: Number
+    MinValue: 0
+  WebMemoryScaleInCooldown:
+    Type: Number
+    MinValue: 0
+    Description: メモリは CPU ほど素直に下がらないので、CPU 側より長めに待たせる
+  WebMemoryScaleOutCooldown:
+    Type: Number
+    MinValue: 0
   BakeTimeInMinutes:
     Type: Number
     MinValue: 0
@@ -694,6 +730,7 @@ Resources:
       EngineVersion: "8.4"
       DBInstanceClass: !Ref DbInstanceClass
       AllocatedStorage: !Ref DbAllocatedStorage
+      MaxAllocatedStorage: !Ref DbMaxAllocatedStorage
       StorageType: gp3
       StorageEncrypted: true
       DBName: !Ref DbName
@@ -707,8 +744,9 @@ Resources:
       DBParameterGroupName: !Ref DbParameterGroup
       PubliclyAccessible: false
       MultiAZ: !Ref DbMultiAZ
+      DeletionProtection: !Ref DbDeletionProtection
       BackupRetentionPeriod: !Ref DbBackupRetentionDays
-      DeleteAutomatedBackups: true
+      DeleteAutomatedBackups: !Ref DbDeleteAutomatedBackups
       CopyTagsToSnapshot: true
       AutoMinorVersionUpgrade: true
       EnablePerformanceInsights: !Ref DbPerformanceInsights
@@ -1439,8 +1477,8 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageCPUUtilization
         TargetValue: !Ref WebCpuTarget
-        ScaleInCooldown: 120
-        ScaleOutCooldown: 60
+        ScaleInCooldown: !Ref WebCpuScaleInCooldown
+        ScaleOutCooldown: !Ref WebCpuScaleOutCooldown
 
   MemoryScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
@@ -1453,9 +1491,8 @@ Resources:
         PredefinedMetricSpecification:
           PredefinedMetricType: ECSServiceAverageMemoryUtilization
         TargetValue: !Ref WebMemoryTarget
-        # メモリは下がりにくいのでスケールインは長めに待つ
-        ScaleInCooldown: 180
-        ScaleOutCooldown: 60
+        ScaleInCooldown: !Ref WebMemoryScaleInCooldown
+        ScaleOutCooldown: !Ref WebMemoryScaleOutCooldown
 
   # ===========================================================================
   # 監視・検知(SNS + CloudWatch アラーム + RDS イベント購読)
