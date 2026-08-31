@@ -140,7 +140,7 @@ Terraform 側の `terraform.tfvars:49` を見ると `72` の根拠は「`max_con
 
 ## 3. ECS の項目カタログ
 
-`app.yml` の `Cluster` / `AppTaskDefinition` / `Service` / `ScalableTarget`(`app.yml:1187-1533`)と `ecs_web.tf` を突き合わせたもの。
+`app.yml` の `Cluster` / `AppTaskDefinition` / `Service` / `ScalableTarget`(`app.yml:1191-1537`)と `ecs_web.tf` を突き合わせたもの。
 
 ### 3-1. 一覧
 
@@ -158,7 +158,7 @@ Terraform 側の `terraform.tfvars:49` を見ると `72` の根拠は「`max_con
 | `BakeTimeInMinutes` | **5** | 0 | 30 | Blue/Green の切替後に blue を残す時間。prod は 30〜60 が妥当 |
 | `ContainerInsights` | 1 | `enhanced` | `enhanced` | **prod も stg も同値。** enhanced は追加課金が大きい(§3-4) |
 
-**テンプレートに直書きの項目。** `EnableExecuteCommand: true`(`app.yml:1413`) / `MinimumHealthyPercent: 100`・`MaximumPercent: 200`(`app.yml:1425-1426`) / `HealthCheckGracePeriodSeconds: 120`(`app.yml:1434`)。これらは §4 と §5。
+**テンプレートに直書きの項目。** `EnableExecuteCommand: true`(`app.yml:1417`) / `MinimumHealthyPercent: 100`・`MaximumPercent: 200`(`app.yml:1429-1430`) / `HealthCheckGracePeriodSeconds: 120`(`app.yml:1438`)。これらは §4 と §5。
 
 ### 3-2. CPU とメモリは「選ぶ」のではなく「組み合わせから選ぶ」
 
@@ -216,7 +216,7 @@ Conditions:
 ```
 
 ```yaml
-# app.yml:1415-1423
+# app.yml:1419-1427
       CapacityProviderStrategy:
         - !If
           - UseOnDemand
@@ -296,7 +296,7 @@ Conditions:
 
 #### 何が分からなかったのか
 
-このサービスは `Strategy: BLUE_GREEN`(`app.yml:1428`)なので、**デプロイ中は blue 2 + green 2 = 4 タスクが同時に走る**。このとき `base: 2` を誰が満たすのかで結果が変わる。
+このサービスは `Strategy: BLUE_GREEN`(`app.yml:1432`)なので、**デプロイ中は blue 2 + green 2 = 4 タスクが同時に走る**。このとき `base: 2` を誰が満たすのかで結果が変わる。
 
 | | `base` の数え方 | green の 2 タスクはどこに乗るか |
 |---|---|---|
@@ -485,7 +485,7 @@ aws ecs describe-tasks --cluster "$cluster" \
 | 項目 | 何を設定するか | 分けない理由 |
 |---|---|---|
 | `AutoMinorVersionUpgrade` | マイナーバージョンをメンテナンスウィンドウで自動的に上げるか | **両環境 `true`。** 「prod は `false` にして上げるタイミングを自分で握る」流儀もあるが、セキュリティ修正を自動で当てるほうを採った。参考の Terraform も `rds.tf:18` で `true` 直書き |
-| `MinimumHealthyPercent` / `MaximumPercent` | デプロイ中に最低何 % のタスクを健全に保つか / 最大何 % まで増やしてよいか | **両環境 `100` / `200`。** stg を `0` / `100` に落とせば 2 タスク分の瞬間課金を避けられる…はずだが、この Service は `Strategy: BLUE_GREEN`(`app.yml:1428`)で **green 側のタスク一式が別に立ち上がる**ので、どのみち避けられない(未検証)。分ける実益が無い |
+| `MinimumHealthyPercent` / `MaximumPercent` | デプロイ中に最低何 % のタスクを健全に保つか / 最大何 % まで増やしてよいか | **両環境 `100` / `200`。** stg を `0` / `100` に落とせば 2 タスク分の瞬間課金を避けられる…はずだが、この Service は `Strategy: BLUE_GREEN`(`app.yml:1432`)で **green 側のタスク一式が別に立ち上がる**ので、どのみち避けられない(未検証)。分ける実益が無い |
 | `EnableCloudwatchLogsExports` | どの RDS ログを CloudWatch Logs に流すか | **両環境 `[error, slowquery]`。** `CommaDelimitedList` にすれば分けられるが、実務でもこの 2 つで足りる(`general` は本番で入れない)。分ける口実が無い |
 
 ### 5-3. まだ残っているもの
@@ -661,7 +661,7 @@ CloudFormation 側は定数しか書けない。
 
 ### 8-3. `dynamic` ブロックが無い — capacity provider の混合
 
-§3-3 の続き。**FARGATE + FARGATE_SPOT の混合は素の CloudFormation でも書ける。実際に書いた**(`app.yml:1415-1423`)。
+§3-3 の続き。**FARGATE + FARGATE_SPOT の混合は素の CloudFormation でも書ける。実際に書いた**(`app.yml:1419-1427`)。
 
 **仕様: `Fn::If` はリストの要素としても使え、`AWS::NoValue` を返すとその要素がリストから取り除かれる。** だから「要素数が環境で変わるリスト」は表現できる。
 
@@ -826,7 +826,7 @@ Your service was not created with a launch type.
 | 環境ごとの値 | `cloudformation/params/stg.json` / `prod.json` |
 | 環境差の置き場のルール | `cloudformation/README.md:18` |
 | RDS 本体 | `cloudformation/app.yml:747-799` ↔ `terraform/modules/app-infrastructure/rds.tf:1-53` |
-| ECS サービスとオートスケーリング | `cloudformation/app.yml:1406-1533` ↔ `terraform/modules/app-infrastructure/ecs_web.tf` |
+| ECS サービスとオートスケーリング | `cloudformation/app.yml:1410-1537` ↔ `terraform/modules/app-infrastructure/ecs_web.tf` |
 | Terraform 側の環境差の型 | `terraform/modules/app-infrastructure/variables.tf:103-170` |
 | Terraform 側の環境差の値 | `terraform/stg/terraform.tfvars:20-67` |
 | 撤収前提と監視の衝突 | `docs/adr/0010-monitoring-in-ephemeral-stack.md` |

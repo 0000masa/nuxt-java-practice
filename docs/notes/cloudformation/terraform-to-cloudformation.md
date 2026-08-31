@@ -173,7 +173,7 @@ Terraform は `aws_db_instance.main.address` のように属性を素直に辿�
 `!Sub` が `locals` の代わりになる。`app.yml` は FQDN やリソース名の組み立てを毎回 `!Sub` で書いている(`locals` が無いので使い回せない)。
 
 ```yaml
-# app.yml:1202 付近
+# app.yml:1206 付近
 Family: !Sub ${ProjectName}-${EnvName}-app
 Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}
 ```
@@ -524,7 +524,7 @@ Terraform から来ると「無い」ことに驚くもの。回避方法とセ�
 | `Mappings` を定数表に使う | `cloudformation/app.yml:311-320` |
 | `Conditions` の 3 例 | `cloudformation/app.yml:322-336` |
 | `DeletionPolicy` を明示する理由 | `cloudformation/app.yml:674` 付近のコメント |
-| `!Sub` でのリソース名組み立て | `cloudformation/app.yml:1202` 付近 |
+| `!Sub` でのリソース名組み立て | `cloudformation/app.yml:1206` 付近 |
 | 環境差分の渡し方 | `cloudformation/params/stg.json` |
 | Terraform 側の `ignore_changes` | `terraform/modules/app-infrastructure/ecs_web.tf:70-76` |
 | 論理 ID のリネーム問題(Terraform 版) | `terraform/stg/moved.tf` |
