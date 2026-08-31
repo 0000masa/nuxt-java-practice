@@ -971,6 +971,10 @@ Resources:
     Properties:
       ListenerArn: !Ref HttpsListener
       Priority: 100
+      # 【注意】この Conditions は ELB の語彙で、テンプレート直下の Conditions
+      # (CloudFormation の条件定義)とは無関係。ここは「どのリクエストをこのルールに
+      # 一致させるか」のマッチ条件で、ALB がリクエストごとに評価する。
+      # CloudFormation の条件参照は Properties の外に単数形で書く(下の WebAcl がその例)。
       Conditions:
         - Field: host-header
           HostHeaderConfig:
