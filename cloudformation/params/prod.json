@@ -17,7 +17,7 @@
   { "ParameterKey": "DbAllocatedStorage",              "ParameterValue": "20" },
   { "ParameterKey": "DbMaxAllocatedStorage",           "ParameterValue": "100" },
   { "ParameterKey": "DbMultiAZ",                       "ParameterValue": "true" },
-  { "ParameterKey": "DbBackupRetentionDays",           "ParameterValue": "7" },
+  { "ParameterKey": "DbBackupRetentionDays",           "ParameterValue": "35" },
   { "ParameterKey": "DbDeleteAutomatedBackups",        "ParameterValue": "false" },
   { "ParameterKey": "DbDeletionProtection",            "ParameterValue": "true" },
   { "ParameterKey": "DbPerformanceInsights",           "ParameterValue": "true" },
