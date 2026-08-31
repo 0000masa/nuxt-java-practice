@@ -62,7 +62,7 @@ stg と本番で設定を変えるべきなのはどこか。そして「環境�
 | `DbAllocatedStorage` | 1 | 20 | 20 | **縮小はできない**(仕様)ので、多めに取らず 20 から始める。伸ばし方は §2-2 |
 | `DbMaxAllocatedStorage` | 1 | 100 | 100 | ストレージ自動スケーリングの上限。**設定しないと自動スケーリング自体が働かない**(→ §2-2) |
 | `DbMultiAZ` | 2 | `false` | `true` | prod は必須。stg で `false` は正しい(倍額になるため) |
-| `DbBackupRetentionDays` | 2 | 0 | 7 | **7 は最低ライン。** 実務では 14〜35 も普通(上限 35。0 で自動バックアップ無効) |
+| `DbBackupRetentionDays` | 2 | 0 | 35 | **上限の 35 にした。** 実務では 7 が最低ライン、14〜35 も普通。長さは「壊れたことに気づくまでの時間」で決める。0 で自動バックアップ無効 |
 | `DbDeleteAutomatedBackups` | 2 | `true` | `false` | prod は `false`。DB を消した後も保持期間ぶん自動バックアップが残り、最後の復旧手段になる |
 | `DbDeletionProtection` | 2 | `false` | `true` | prod は `true`。ただし撤収時に `false` へ更新する 1 手が要る(→ §5-4・§10) |
 | `DbPerformanceInsights` | **3** | `false`(制約) | `true` | 直近 7 日の保持は無料。medium 以上なら prod で `true` は当然 |
@@ -790,7 +790,7 @@ Your service was not created with a launch type.
 | `DeletionProtection: true` | **撤収できなくなる。** 消す前に `false` に更新する 1 手が要る。**`prod.json` で実際に `true` にした**ので、prod を建てるなら撤収手順のほうを直すことになる(→ §5-4) |
 | `DeletionPolicy: Snapshot` | 撤収のたびにスナップショットが残り、課金が続く |
 | `DeleteAutomatedBackups: false` | 同上。保持期間ぶん自動バックアップの課金が残る。**`prod.json` で実際に `false` にした** |
-| `BackupRetentionPeriod` を長く | 建てて消すだけの環境では使う機会が無い |
+| `BackupRetentionPeriod` を長く | 建てて消すだけの環境では使う機会が無い。**`prod.json` で実際に上限の 35 にした**ので、`DeleteAutomatedBackups: false` と組み合わさると撤収後 35 日ぶん課金が残る |
 | ログの長期保持 | **撤収のたびに全部消える。**(→ `docs/adr/0010` が受け入れている帰結の 2 つ目) |
 | `BakeTimeInMinutes` を長く | 検証のたびに 30 分待つことになる |
 
