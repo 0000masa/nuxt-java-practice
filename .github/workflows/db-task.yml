@@ -101,6 +101,11 @@ jobs:
             echo "subnets=$(get PrivateSubnetIds)"
             echo "sg=$(get EcsSecurityGroupId)"
             echo "db_ops_task=$(get DbOpsTaskDefinition)"
+            # 【この Output は family 名(リビジョン無し)】
+            # run-task はリビジョンを省略された family を「最新 ACTIVE」と解釈する。
+            # 2 代目以降のタスク定義は CodeBuild が taskdef-migrate.json から register するので、
+            # ここでリビジョンを固定すると構築時の古いイメージで Flyway が走ってしまう。
+            # → docs/adr/0013-app-deploy-with-code-services.md の「結果として生じること」2
             echo "migrate_task=$(get MigrateTaskDefinition)"
           } >> "$GITHUB_OUTPUT"
 
