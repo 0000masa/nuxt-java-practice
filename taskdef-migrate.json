@@ -1,0 +1,37 @@
+{
+  "family": "__FAMILY_MIGRATE__",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "executionRoleArn": "__EXECUTION_ROLE_ARN__",
+  "containerDefinitions": [
+    {
+      "name": "migrate",
+      "image": "__IMAGE__",
+      "essential": true,
+      "environment": [
+        { "name": "APP_TASK", "value": "migrate" },
+        { "name": "DB_HOST", "value": "__DB_HOST__" },
+        { "name": "DB_PORT", "value": "__DB_PORT__" },
+        { "name": "DB_NAME", "value": "__DB_NAME__" },
+        { "name": "DB_USER", "value": "__DB_APP_USER__" },
+        { "name": "FLYWAY_ENABLED", "value": "true" },
+        { "name": "FLYWAY_DB_USER", "value": "__DB_MIGRATE_USER__" },
+        { "name": "SERVER_PORT", "value": "8080" }
+      ],
+      "secrets": [
+        { "name": "DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__app_db_password" },
+        { "name": "FLYWAY_DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__migrate_db_password" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "__LOG_GROUP__",
+          "awslogs-region": "__AWS_REGION__",
+          "awslogs-stream-prefix": "db-migrate"
+        }
+      }
+    }
+  ]
+}

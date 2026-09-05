@@ -1,0 +1,47 @@
+{
+  "family": "__FAMILY__",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "__CPU__",
+  "memory": "__MEMORY__",
+  "executionRoleArn": "__EXECUTION_ROLE_ARN__",
+  "taskRoleArn": "__TASK_ROLE_ARN__",
+  "containerDefinitions": [
+    {
+      "name": "app",
+      "image": "__IMAGE__",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 8080,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        { "name": "DB_HOST", "value": "__DB_HOST__" },
+        { "name": "DB_PORT", "value": "__DB_PORT__" },
+        { "name": "DB_NAME", "value": "__DB_NAME__" },
+        { "name": "DB_USER", "value": "__DB_APP_USER__" },
+        { "name": "FLYWAY_ENABLED", "value": "false" },
+        { "name": "APP_BASE_URL", "value": "__APP_BASE_URL__" },
+        { "name": "MAIL_TRANSPORT", "value": "ses" },
+        { "name": "MAIL_FROM", "value": "__MAIL_FROM__" },
+        { "name": "S3_BUCKET", "value": "__S3_BUCKET__" },
+        { "name": "IMAGE_CDN_DOMAIN", "value": "__IMAGE_CDN_DOMAIN__" }
+      ],
+      "secrets": [
+        { "name": "DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__app_db_password" },
+        { "name": "GOOGLE_CLIENT_ID", "valueFrom": "__SSM_ARN_PREFIX__google_client_id" },
+        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "__SSM_ARN_PREFIX__google_client_secret" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "__LOG_GROUP__",
+          "awslogs-region": "__AWS_REGION__",
+          "awslogs-stream-prefix": "app"
+        }
+      }
+    }
+  ]
+}
