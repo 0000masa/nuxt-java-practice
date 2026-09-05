@@ -1,7 +1,18 @@
 # CloudFormation を叩くのは cfn-apply.yml だけにする
 
 日付: 2026-08-24
-ステータス: accepted
+ステータス: accepted(2026-09-05 に範囲を明確化)
+
+> **範囲の明確化(2026-09-05、`main` ブランチ)**
+> スタックが 2 つになったため、この ADR の「唯一」は **`cloudformation/app.yml` に対して**と読む。
+> 常駐のパイプラインスタック `cloudformation/pipeline.yml` は `pipeline-apply.yml` が
+> `aws cloudformation deploy` で適用する。
+>
+> 分けた理由は、この ADR が集約したかったもの(Change Set の差分表示・Replacement ガード・
+> スタック状態の前提チェック)が `pipeline.yml` に対して意味を持たないため。
+> あちらには RDS も ECS も無く、作り直しで失われるデータも無い。
+> → [ADR-0013](./0013-app-deploy-with-code-services.md)、
+> [フェーズ16 の設計書](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md) の決定11
 
 ## 決定
 

@@ -24,6 +24,7 @@
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
 | 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 作業中 |
 | 15 | 通知先の Slack 化 | アラートの宛先をメールから Slack へ。Amazon Q Developer in chat applications(旧 AWS Chatbot)で SNS トピック 2 本を 2 チャンネルに転送。**設計 → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)**、方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) | 作業中 |
+| 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 未着手 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -35,6 +36,41 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ16 を設計した(実装未着手)**(2026-09-05):
+  - **方針** → **[ADR-0012](../adr/0012-deploy-method-per-branch.md)**(デプロイ方式をブランチで分ける) /
+    **[ADR-0013](../adr/0013-app-deploy-with-code-services.md)**(アプリのデプロイを Code 系へ。**ADR-0007 を supersede**)、
+    **設計** → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)(決定 20 件)
+  - **`main` = Code 系 / `github-actions-deploy` = 凍結。** `app.yml` に `Fn::If` の分岐を持ち込まずに済ませるため、
+    切り替えをパラメータではなくブランチで表現した。CLAUDE.md にブランチの役割を追記済み
+  - **設計を左右した一次情報(すべて確認済み)**:
+    - **CODE_DEPLOY 制御のサービスはタスク定義を CloudFormation から更新できない。** `UpdateService` が受け付けるのは
+      desired count / deployment configuration / grace period / 配置制約 / タグだけ。
+      → `Service.TaskDefinition` を family 名の固定文字列にするしかなく、これは **ADR-0007 が退けた選択肢そのもの**
+    - **CodeDeploy はリスナーの既定アクションしか切り替えられない**(リスナールール ARN は取れない)。
+      AWS 自身が「ECS blue/green operates at the listener rule level」と両者の差を明記している。
+      → 現行の「既定 403 + ホスト名ルール」構成は、残したまま繋ぐと**デプロイは成功するのにトラフィックが切り替わらない**
+    - **`CodeDeployToECS` の `TaskDefinitionTemplateArtifact` は Required: Yes。** register するのは CodeBuild ではなく Deploy アクション
+    - **パイプライン作成時の初回実行は無効化できない。** → 手動承認ステージがそのまま安全弁になり、ブートストラップの門も兼ねる
+    - **`Triggers` を書くと既定の変更検知が無効になる。** → フィルタ付き自動起動と手動起動が両立する(`PipelineType: V2`)
+    - **CodeBuild のローカルキャッシュは「ビルドが稀なら向かない」と AWS 自身が書いている。** VPC に入れると使えない
+    - **ECS の appspec Hooks は Lambda でしか実装できず、CodeDeploy には「途中で人を待つ」仕組みが無い**
+  - **設計中に見つけて塞いだ穴**:
+    - **migrate 用タスク定義の連動が切れる。** 現行はアプリと migrate が同じ `!Ref ImageTag` から作られるので
+      必ず一緒に新しくなるが、アプリ側だけ外に出すと `db-task.yml` が**古いイメージで Flyway を流す**。
+      `run-task` の `containerOverrides` に `image` は無いので回避できない。→ `taskdef-migrate.json` も Git に置き、
+      Outputs を family 名に変える
+    - **鶏と卵。** パイプラインを `app.yml` に置くと、スタックを作るのに要る最初のイメージを作る手段が無くなる。
+      → **実務どおり常駐の別スタック(`pipeline.yml`)に分けた。** CodeDeploy の Application/DeploymentGroup だけ
+      `app.yml` に残す(リスナー ARN が命名規則で組み立てられないため)。`Export`/`ImportValue` は使わない
+    - **既存の Chatbot 設定 2 本は `GuardrailPolicies: AWSDenyAll` なので承認できない。**
+      → 承認専用チャンネル `#njp-deploy` と 3 本目の設定を `pipeline.yml` 側に建てる。アラート用 2 本は触らない
+  - **受け入れた代償**: `app.yml` の初代タスク定義と `taskdef.json` の**二重管理**(片方だけ直すと構築直後の初回起動だけ落ちる)、
+    「想定ホスト名以外は 403」の**喪失**(ALB のルール条件に否定形が無く、完全にやるなら WAF しかないが実務でもその目的では入れない)、
+    **ビルド時間 5〜8 分**(`type=gha` キャッシュが使えない)
+  - **常駐の手動リソースが 1 つ増える**: CodeStar Connections(作成後にコンソールで握手が要る。ADR-0011 の Slack 認可と同じ形)
+  - **Lambda はゼロのまま**(ADR-0011 の判断を維持)
+  - **着手前に必要な手動作業**: ① CodeStar Connection を作って握手 ② Slack に `#njp-deploy` を作り `/invite @Amazon Q`
 
 - **stg を実機で建てて、更新・撤収まで通した**(2026-08-29):
   - **フェーズ13〜15 の「実機未検証」がここで解消された。** 3 つのワークフローがすべて通っている

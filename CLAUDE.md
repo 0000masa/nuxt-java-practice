@@ -6,6 +6,28 @@
 
 - **gitの操作(commit / push など)はユーザー自身が行う。Claudeは勝手にコミット・プッシュしないこと。** 変更を加えたら内容を報告し、コミットはユーザーに任せる。
 
+## ブランチとデプロイ方式
+
+**このリポジトリはブランチごとにデプロイ方式が違う。** 作業を始める前に今どちらにいるかを確認すること。
+
+| ブランチ | デプロイ方式 | 状態 |
+| --- | --- | --- |
+| `main` | **CodePipeline + CodeBuild + CodeDeploy**(ECS Blue/Green) | 現役。すべての変更はここに積む |
+| `github-actions-deploy` | GitHub Actions + CloudFormation スタック更新(ECS ネイティブ Blue/Green) | **凍結。** 変更しない |
+
+- **`github-actions-deploy` は「GitHub Actions でデプロイする構成の、動く記録」として凍結してある。**
+  アプリ実装もドキュメントも `main` にだけ積む。`main` からマージしない
+- **ドキュメントの正は `main`。** 凍結ブランチの `docs/` は当時のまま古びていく。
+  とくに `docs/adr/0007-app-deploy-inside-cloudformation.md` は `main` では superseded だが向こうでは有効
+- **両方の環境を同時に建てない**(スタック名も ECR リポジトリも共用のため)
+- 方針 → `docs/adr/0012-deploy-method-per-branch.md`、
+  `main` 側の設計 → `docs/adr/0013-app-deploy-with-code-services.md` と
+  `docs/superpowers/specs/2026-09-05-phase16-codepipeline-design.md`
+
+**`main` の Code 系デプロイはフェーズ16 として設計済み・実装未着手。**
+実装が終わるまで `main` の実体は `github-actions-deploy` と同じなので、
+`docs/development/implementation-progress.md` で現在地を確認すること。
+
 ## プロジェクト概要
 
 Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し、検証したいときだけ CloudFormation(GitHub Actions 経由)で AWS に環境を構築・撤収する。**常時公開はしない。**

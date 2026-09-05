@@ -1,7 +1,19 @@
 # アプリのデプロイは CloudFormation の内側で行う
 
 日付: 2026-08-21
-ステータス: accepted
+ステータス: superseded by [ADR-0013](./0013-app-deploy-with-code-services.md)(2026-09-05)
+
+> **この ADR は `main` ブランチでは無効になった。** アプリのデプロイは CodePipeline + CodeBuild +
+> CodeDeploy が担い、タスク定義の 2 代目以降は CloudFormation の外(`taskdef.json`)が持つ
+> → [ADR-0013](./0013-app-deploy-with-code-services.md)。
+>
+> **`github-actions-deploy` ブランチではこの ADR が引き続き有効である**
+> → [ADR-0012](./0012-deploy-method-per-branch.md)(デプロイ方式をブランチで分ける)。
+>
+> なお、下の「検討したが採らなかった選択肢」の 1 番目(ECS サービスから family だけを参照する)は、
+> CODE_DEPLOY 制御では ECS の API がタスク定義の更新を拒否するため、**選択ではなく強制**になった。
+> ここに書かれた「タスク定義の所有者が 2 つになる」という懸念はそのまま現実になっており、
+> ADR-0013 はそれを規律として引き受けている。
 
 ## 決定
 
