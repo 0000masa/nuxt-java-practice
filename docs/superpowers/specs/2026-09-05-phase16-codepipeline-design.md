@@ -1,7 +1,7 @@
 # フェーズ16: CodePipeline / CodeBuild / CodeDeploy によるデプロイ
 
 日付: 2026-09-05
-ステータス: 設計完了(未着手)
+ステータス: 実装済み(実機未検証)
 
 方針 → [ADR-0012](../../adr/0012-deploy-method-per-branch.md)(ブランチ分割)、
 [ADR-0013](../../adr/0013-app-deploy-with-code-services.md)(Code 系への移行)
@@ -385,10 +385,47 @@ CREATE では省略できない(`UsePreviousValue` にできる前の値が無�
 | `taskdef.json` | アプリのタスク定義(プレースホルダ入り) |
 | `taskdef-migrate.json` | migrate のタスク定義(プレースホルダ入り) |
 
+## 5-2. 実装で確定したこと(設計から動いた点)
+
+| 項目 | 設計時 | 実装 | 理由 |
+| --- | --- | --- | --- |
+| パイプラインのスタック名 | 未定 | `nuxt-java-practice-<env>-pipeline` | アプリのスタックと並べたときに見分けが付く |
+| `taskdef` / `appspec` の置き場 | 未定 | **リポジトリ直下** | `CodeDeployToECS` の既定パス(`taskdef.json` / `appspec.yaml`)に合わせた |
+| 承認通知の経路 | NotificationRule → SNS → Chatbot | **NotificationRule → Chatbot(SNS なし)** | CodeStar Notifications は `TargetType: AWSChatbotSlack` で Chatbot を直接ターゲットにできる。SNS を挟んでいるアラート系は、CloudWatch アラームが SNS にしか送れないからで、こちらにその制約は無い |
+| イメージのビルド方法 | buildx | **素の `docker build`** | `LOCAL_DOCKER_LAYER_CACHE` は Docker デーモンのレイヤーキャッシュで、buildx の `docker-container` ドライバは独自のキャッシュを持つため当たらない。`--provenance=false` も不要になった(素の `docker build` はアテステーションを付けない) |
+| `taskdef.json` の値 | Git に固定値 | **構造だけ Git、値はスタックから差し込む** | プレースホルダ(`__DB_HOST__` など)を CodeBuild が `describe-stacks` の Outputs / Parameters で埋める。二重管理を「どの環境変数があるか」という構造だけに限定し、値のずれは起こさない |
+| 埋め忘れの検出 | 設計になし | **残った `__...__` があれば Build を落とす** | 埋まらないまま register すると「`__DB_HOST__` に接続できない」という遠回りなクラッシュになる |
+| `DbPort` | Output を足すか 3306 固定か | **Output を足した** | 他の値と同じく `describe-stacks` 一発で取れるほうが buildspec が単純になる |
+| 初回構築時の Build | 設計になし | **スタックが無ければレンダリングと register を飛ばして成功で抜ける** | 決定20 のブートストラップを Build が明示的に扱う。飛ばしたことはログに出す |
+
+### 引っかかりやすい罠を 1 つ、テンプレートに書き残した
+
+`AWS::CodeDeploy::DeploymentGroup` のリファレンス冒頭には次の注意書きがある。
+
+> Amazon ECS blue/green deployments through CodeDeploy do not use the `AWS::CodeDeploy::DeploymentGroup` resource.
+> To perform Amazon ECS blue/green deployments, use the `AWS::CodeDeploy::BlueGreen` hook.
+
+**これは「CloudFormation のスタック更新として ECS の Blue/Green デプロイを *実行* する」話であって、
+デプロイグループを *作る* 話ではない。** ECS 用の `ECSServices` と
+`LoadBalancerInfo.TargetGroupPairInfoList` というプロパティが存在すること自体がその証拠で、
+CDK の `EcsDeploymentGroup` もこのリソースをそのまま合成する。
+そして `AWS::CodeDeploy::BlueGreen` フックは、ADR-0007 が
+「タスク定義の更新と他リソースの更新を同一スタック更新に混ぜられない」として退けたもの。
+
+将来この注意書きを読んで不安になる読み手のために、`app.yml` の該当箇所にコメントとして残した。
+
 ## 6. 実測で覆りうる項目
 
-実装前に確定できていないもの。実機で確かめて、この節を更新する。
+実機で確かめて、この節を更新する。**0 番が一番危ない。**
 
+0. **`cfn-deploy.yml` の 4 段目(`WebDesiredCount` を 0 → 1 に上げる更新)が通るか。**
+   CODE_DEPLOY 制御のサービスに対して、CloudFormation の ECS ハンドラが `UpdateService` に
+   `taskDefinition` を含めてしまうと、変更していなくても
+   `Unable to update task definition on services with a CODE_DEPLOY deployment controller` で落ちる。
+   `Service.TaskDefinition` は静的な文字列なので差分は出ないはずだが、ハンドラの実装は公開されていない。
+   **落ちた場合の逃げ道**: 4 段目を CloudFormation ではなく `aws ecs update-service --desired-count` に
+   置き換える(CODE_DEPLOY でも desired count の更新は許されている)。ただし ADR-0009 の
+   「CloudFormation を叩くのは 1 か所」とは別に、ECS を直接叩く経路が 1 つ増えることになる。
 1. **Chatbot が承認ボタンを自動で出すのか、カスタムアクションとして自分で作るのか。**
    コマンド(`@aws codepipeline put-approval-result ...`)で承認できることは確実だが、
    ボタンの出方は AWS ドキュメントの本文が取得できず未確定
@@ -402,3 +439,8 @@ CREATE では省略できない(`UsePreviousValue` にできる前の値が無�
 5. **`LOCAL_DOCKER_LAYER_CACHE` が実際に当たるかどうか**(当たらない前提で設計しているが、実測は残す)
 6. **CodeBuild の compute type**(`BUILD_GENERAL1_SMALL` で `npm ci` + Gradle が現実的な時間で終わるか)
 7. **`DisableInboundStageTransitions` を使わずに初回実行が承認待ちで綺麗に止まるか**
+8. **`AWS::CodeDeploy::DeploymentGroup` で ECS のデプロイグループが実際に作れるか。**
+   上の注意書きの読み方が正しいことは状況証拠で固めてあるが、実機では確かめていない
+9. **`docker build`(buildx なし)で `LOCAL_DOCKER_LAYER_CACHE` が実際に効くか**
+10. **`exported-variables`(`IMAGE_TAG` など)が CodeBuild のフェーズ跨ぎで期待どおり拾われるか。**
+   フェーズごとにシェルが分かれるため、`/tmp/build.env` を経由して各フェーズで export し直している

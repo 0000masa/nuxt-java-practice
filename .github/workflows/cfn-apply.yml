@@ -15,6 +15,13 @@
 # (web_desired_count / allow_missing_stack / allow_zero_desired_count)は
 # workflow_call にしか宣言していない。人間が UI から解除する手段が無いことが安全弁になる。
 #
+# image_tag も同じ扱いにしてある(→ ADR-0013)。ECS サービスが CODE_DEPLOY 制御になり、
+# Service.TaskDefinition が family 名の固定文字列になったので、ここでタグを変えても
+# 新しいリビジョンが register されるだけでデプロイはされない。UI から渡せると
+# 「タグを変えたのに反映されない」という混乱を生むので、workflow_call にだけ残す。
+# 構築(CREATE)では省略できないため、cfn-deploy.yml からは必ず渡ってくる。
+# 通常のリリースは CodePipeline の仕事。
+#
 # 開ける必要があるのは構築フロー(cfn-deploy.yml)だけで、理由は次の 2 つ。
 #   1 段目: スタックがまだ無い。かつ WebDesiredCount=0 で作る
 #   4 段目: スタックの現在の WebDesiredCount が 0(1 段目が入れた値)
@@ -45,10 +52,6 @@ on:
         type: choice
         options: [stg]
         default: stg
-      image_tag:
-        description: ECR のイメージタグ。空にすると今デプロイされているタグを維持する
-        type: string
-        default: ""
       dry_run:
         description: Change Set を作って差分を見るだけで実行しない
         type: boolean

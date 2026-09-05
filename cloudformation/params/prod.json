@@ -41,7 +41,6 @@
   { "ParameterKey": "WebCpuScaleOutCooldown",          "ParameterValue": "60" },
   { "ParameterKey": "WebMemoryScaleInCooldown",        "ParameterValue": "300" },
   { "ParameterKey": "WebMemoryScaleOutCooldown",       "ParameterValue": "60" },
-  { "ParameterKey": "BakeTimeInMinutes",               "ParameterValue": "30" },
   { "ParameterKey": "ContainerInsights",               "ParameterValue": "enhanced" },
 
   { "ParameterKey": "RdsCpuThresholdPercent",          "ParameterValue": "90" },

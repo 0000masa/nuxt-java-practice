@@ -1,5 +1,14 @@
 # ECS のタスク定義は誰が持つか — `ignore_changes` と CloudFormation
 
+> **このノートは ADR-0007 の時点(ネイティブ Blue/Green・リリース = スタック更新)を前提に書かれている。**
+> `main` ブランチではフェーズ16 で結論が変わり、**要点 3 の「CloudFormation にも `ignore_changes` 相当はある」
+> (タスク定義を family だけで参照する)を実際に採用した。** 選んだのではなく、CODE_DEPLOY 制御のサービスに
+> 対して ECS の `UpdateService` がタスク定義の更新を拒否するため、**他に選択肢が無かった。**
+> ここに書かれている「タスク定義の所有者が 2 つになる」という懸念はそのまま現実になっており、
+> 規律として引き受けている → [ADR-0013](../../adr/0013-app-deploy-with-code-services.md)。
+> `github-actions-deploy` ブランチでは、このノートの前提がそのまま生きている
+> → [ADR-0012](../../adr/0012-deploy-method-per-branch.md)。
+
 「AWS 環境の構築は IaC、日々のアプリのデプロイは CI/CD」という分担は、Terraform では `lifecycle.ignore_changes` が支えている。CloudFormation に同じ指定は無い。ではどうなるのか、という話。
 
 このノートは記述の確からしさを 3 段階で書き分ける(**仕様** / **傾向** / **未検証**)。
@@ -351,4 +360,4 @@ stg は `MinCapacity=1 / MaxCapacity=2` なので実害は小さい。必要に�
 
 - **CloudFormation の外から `aws ecs update-service` / `register-task-definition` を叩かない。** 叩いても即座には戻らないが、次にテンプレート側でタスク定義に差分が出た瞬間に巻き戻る
 - 緊急時に手で叩いたら、**同じイメージタグで `cfn-apply.yml` を流してテンプレート側の記憶を合わせる**
-- イメージタグは `ecr-push.yml` のサマリに出る短縮 SHA を使う(→ [運用手順](../../infrastructure/cloudformation-operations.md))
+- イメージタグは短縮 SHA を使う(`main` では CodePipeline の Build ログに出る)(→ [運用手順](../../infrastructure/cloudformation-operations.md))

@@ -38,7 +38,7 @@ on:
         options: [stg]
         default: stg
       image_tag:
-        description: ECR のイメージタグ(ecr-push.yml のジョブサマリに出る短縮 SHA)
+        description: ECR のイメージタグ(CodePipeline の Build ステージのログに出る短縮 SHA)
         type: string
         required: true
       dry_run:
