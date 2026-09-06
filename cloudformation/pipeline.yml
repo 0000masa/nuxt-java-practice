@@ -591,6 +591,13 @@ Resources:
   # CloudWatch アラームが SNS にしか送れないからで、こちらにはその制約が無い。
   PipelineNotificationRule:
     Type: AWS::CodeStarNotifications::NotificationRule
+    # 【Resource を静的な文字列にしたので、依存を自分で書く】
+    # CreateNotificationRule は Resource のパイプラインが実在するか検証する。
+    # 下のとおり ARN を !Sub の固定文字列にしたため参照が無く、暗黙の依存も無い。
+    # 書かないと NotificationRule が Pipeline より先に作られ、
+    # 「Invalid request provided」で落ちる(実際に踏んだ)。
+    # app.yml の ScalableTarget が静的な ResourceId だった頃と同じ形。
+    DependsOn: Pipeline
     Properties:
       Name: !Sub ${ProjectName}-${EnvName}-pipeline
       DetailType: FULL
