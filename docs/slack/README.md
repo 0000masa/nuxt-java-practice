@@ -1,48 +1,62 @@
-# Slack にアラートを流し、デプロイを承認する(Amazon Q Developer in chat applications)
+# Slack にアラートを流し、デプロイを承認する
 
-> 方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)(アラート)/ [ADR-0013](../adr/0013-app-deploy-with-code-services.md)(デプロイ承認)
+> 方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)(アラート)/ [ADR-0014](../adr/0014-slack-approval-with-lambda.md)(デプロイ承認)
 > 検知層そのものの設計 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)
 
-CloudFormation スタックが作る CloudWatch アラームと RDS イベント、そしてデプロイパイプラインの通知を Slack に流すための手順書。**AWS 側はスタックが作るので、ここに書くのは Slack 側の手動作業と、そこで得た ID を `params` に書き写すところまで。**
+CloudFormation スタックが作る CloudWatch アラームと RDS イベント、そしてデプロイパイプラインの通知を Slack に流すための手順書。**AWS 側はスタックが作るので、ここに書くのは Slack 側の手動作業と、そこで得た値を渡すところまで。**
 
-チャンネルは 3 つある。**うち 1 つ(`#njp-deploy`)だけは、Slack から AWS を操作できる。**
+**仕組みが 2 つある。** アラートは AWS 製のアプリ(Amazon Q Developer、旧 AWS Chatbot)に任せ、デプロイ承認は**自作の Slack App と Lambda** でやる。フェーズ17 で後者だけ切り替えた(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))。Chatbot でやってみた記録 → [chatbot-approval-attempt.md](../notes/aws-code-service/chatbot-approval-attempt.md)。
 
 ## 0. 全体像
 
 ```
+[アラート]  app.yml(作り捨て)
 CloudWatch アラーム 7 本 ─┐
 RDS イベント購読 ─────────┤
                           ↓
-              SNS トピック 2 本(スタック内)
+              SNS トピック 2 本
                           ↓
-   Amazon Q Developer in chat applications(旧 AWS Chatbot)
+   Amazon Q Developer(旧 AWS Chatbot)      ← AWS 製アプリ。コードを書かない
                           ↓
-              Slack チャンネル 2 つ
+              #njp-alerts-ecs / #njp-alerts-rds
+
+[デプロイ承認]  pipeline.yml(常駐)
+CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook ─→ #njp-deploy
+                                                                          │ ボタンを押す
+                                                    Lambda(interaction) ←─┘ Function URL
+                                                          ↓
+                                                   PutApprovalResult
 ```
 
 | 経路 | Slack チャンネル | 流れてくるもの | Slack からの操作 |
 |---|---|---|---|
 | SNS `...-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足(D) | できない(`AWSDenyAll`) |
 | SNS `...-rds-alerts` | `#njp-alerts-rds` | RDS のメトリクス(A)・ログ由来(B)・イベント購読(C) | できない(`AWSDenyAll`) |
-| CodeStar Notifications | `#njp-deploy` | デプロイの承認待ち・成否 | **承認できる** |
+| CodeStarNotifications → SNS → Lambda | `#njp-deploy` | デプロイの承認待ち・成否 | **承認・却下できる** |
 
-**`#njp-deploy` だけ SNS を挟まない。** CodeStar Notifications は Chatbot のチャンネル設定を直接ターゲットにできる(`TargetType: AWSChatbotSlack`)。アラート系が SNS を挟んでいるのは、CloudWatch アラームが SNS にしか送れないからで、こちらにはその制約が無い。
+**Slack に入れるアプリが 2 つになる。** AWS 製の Amazon Q Developer(アラート用)と、自分で作る App(承認用)。無料プランのアプリ枠 10 個のうち 2 つを使う。
 
-**`#njp-deploy` の設定だけ別スタックにある。** アラート用 2 本は `app.yml`(作り捨て)、承認用は `pipeline.yml`(常駐)。パイプラインと同じライフサイクルだから。
+**`#njp-deploy` の仕組みだけ別スタックにある。** アラート用 2 本は `app.yml`(作り捨て)、承認用は `pipeline.yml`(常駐)。**アラート側を Lambda に寄せなかったのは、作り捨てスタックに Lambda を置くと環境を建て直すたびに作り直しになるから**(→ ADR-0014)。
 
 **チャンネルの分割単位は SNS トピックの分割単位。** Chatbot 側にフィルタ機能は無く、「どのアラームがどのチャンネルに出るか」はテンプレートで各アラームの `AlarmActions` にどちらのトピックを指定しているかで決まる。チャンネルを増やしたければ、まずトピックを増やすことになる。
 
 **stg と prod は同じチャンネルを使う。** 通知にはアラーム名(`nuxt-java-practice-stg-rds-cpu-high` の形)が入るので環境は判別できる。分けたくなったら `params/prod.json` のチャンネル ID を差し替えるだけでよい。
 
-## 1. なぜ Incoming Webhook を使わないのか
+## 1. アラートは Chatbot、承認は自作 App
 
-Slack の通知というと「カスタムアプリを作って Incoming Webhook の URL を発行する」形が一般的だが、**この構成では使わない。**
+**SNS の HTTPS 購読で Slack の webhook URL を直接叩くことはできない。** SNS は購読を作るとき `SubscriptionConfirmation` を POST して `SubscribeURL` を踏ませるが、Slack の webhook は確認応答を返さないので購読が永久に `PendingConfirmation` のままになる。仮に確認できたとしても、SNS が送る JSON のエンベロープは Slack が期待するペイロード形式ではないので `invalid_payload` で弾かれる。
 
-**SNS の HTTPS 購読で webhook URL を直接叩くことはできない。** SNS は購読を作るとき `SubscriptionConfirmation` を POST して `SubscribeURL` を踏ませるが、Slack の webhook は確認応答を返さないので購読が永久に `PendingConfirmation` のままになる。仮に確認できたとしても、SNS が送る JSON のエンベロープは Slack が期待するペイロード形式ではないので `invalid_payload` で弾かれる。
+したがって webhook を使う構成では、**SNS と Slack の間に整形役(Lambda)を挟むことが必須**になる。**この一点が、2 つの仕組みが分かれた理由。**
 
-したがって webhook を使う構成では、**SNS と Slack の間に整形役(Lambda など)を挟むことが必須**になる。Chatbot はその整形役を AWS 側が持っているので、**コードを 1 行も書かずに済む。**これが webhook ではなく Chatbot を選んだ理由(詳細と落とした案 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
+| | アラート | デプロイ承認 |
+|---|---|---|
+| 整形役 | **AWS 製の Chatbot**(コードを書かない) | **自作の Lambda** |
+| Slack のアプリ | Amazon Q Developer(App Directory) | **自分で作る App** |
+| 判断 | [ADR-0011](../adr/0011-slack-notification-with-chatbot.md) | [ADR-0014](../adr/0014-slack-approval-with-lambda.md) |
 
-その結果、**Slack に入れるのは自分で作るカスタムアプリではなく、App Directory にある公式の「Amazon Q Developer」アプリ 1 つ**になる。無料プランのアプリ枠 10 個のうち 1 つを使う。
+**アラートは通知が一方向で、整形も定型で足りる**ので、コードを持たずに済む Chatbot がそのまま最良のまま。ADR-0011 の判断は変えていない。
+
+**承認は Slack から AWS を操作する双方向の経路**で、そこが Chatbot では成立しなかった。承認トークンが通知変数に無く 1 クリックで完結せず、押しても `AccessDenied` になる既製ボタンが消せず、カスタムアクションは全通知に付いてしまう。**承認者はインフラ担当ではなくアプリ開発担当**なので、「押していいものが一目で分かる」ことを優先して自作に切り替えた。踏んだ内容の記録 → [chatbot-approval-attempt.md](../notes/aws-code-service/chatbot-approval-attempt.md)。
 
 ## 2. Slack にチャンネルを 3 つ作る
 
@@ -73,11 +87,13 @@ Slack の通知というと「カスタムアプリを作って Incoming Webhook
 
 ## 4. 各チャンネルにアプリを招待する
 
-**3 つのチャンネルそれぞれで**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
+**アラート用の 2 つ(`#njp-alerts-ecs` / `#njp-alerts-rds`)で**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
 
 `/invite @Amazon Q` とテキストで打ち切る形は勧めない。アプリ名に空白が入るうえ、メンションが候補から確定されていないと**ただの人の招待コマンドとして解釈されて弾かれる**。上の UI から選ぶほうが確実。
 
 **これを忘れるとスタックは成功するのに通知だけ届かない。** チャンネル ID は実在するのでリソースの作成は通り、投稿の段になって初めて失敗する。
+
+**`#njp-deploy` には Amazon Q Developer は要らない。** 承認は自作 App が担う(→ §6-2)。フェーズ16 で招待していたなら退出させてよい(残っていても害はない)。
 
 ## 5. チャンネル ID を 3 つ控える
 
@@ -100,219 +116,81 @@ https://自分用.slack.com/archives/C0123ABCDEF
 { "ParameterKey": "SlackChannelIdRds", "ParameterValue": "C0456GHIJKL" },
 ```
 
-`cloudformation/params/pipeline-stg.json` と `pipeline-prod.json`(承認用)。
-
-```json
-{ "ParameterKey": "SlackWorkspaceId",     "ParameterValue": "T0123ABCDEF" },
-{ "ParameterKey": "SlackChannelIdDeploy", "ParameterValue": "C0789MNOPQR" },
-```
+**`pipeline-stg.json` に Slack の ID は書かない。** 承認用の Lambda は webhook URL に投稿するだけで、ワークスペースもチャンネルも知らない。控えた `#njp-deploy` のチャンネル ID は §6-2 の Slack App 側で使う。
 
 **これらは秘密ではないので `params` に平文で置く。** ID を知っていても、ワークスペースを認可済みの AWS アカウントからでなければ使えない。「知っていれば誰でも投稿できる」webhook URL とはここが違う。`HostedZoneId` と同じ扱いで、GitHub の Environment secret にはしない(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
 置き換え忘れると **Change Set の作成が `Parameter 'SlackWorkspaceId' must match pattern` で落ちる**(テンプレート側に `AllowedPattern` を付けてあるため)。プレースホルダのまま構築が成功して無音になるより、止まるほうがマシという判断。
 
-## 6-2. デプロイ承認だけは権限を持つ
+## 6-2. 承認用の Slack App を作る(1 回きり・常駐)
 
-アラート用 2 本の `GuardrailPolicies` は **`AWSDenyAll`** のままにしてある。通知の一方向だけなら権限はゼロでよい、という [ADR-0011](../adr/0011-slack-notification-with-chatbot.md) の判断は変えない。
+**アラート用の Amazon Q Developer とは別に、自分で App を 1 つ作る。** ここで得るのは 2 つの値で、どちらも SSM の SecureString に入れる(→ [運用手順 §4](../infrastructure/cloudformation-operations.md))。
 
-一方 `#njp-deploy` は承認のために **`codepipeline:PutApprovalResult`** が要る。そこであちらを緩めるのではなく、**承認専用の 3 本目**を `pipeline.yml` に建てて、権限をそこだけに閉じ込めている。
-
-- チャンネルロールと `GuardrailPolicies` は **AND** で効く。どちらにも同じ権限が要る
-- **`GuardrailPolicies` を省略すると `AdministratorAccess` が既定で適用される。** 必ず明示する
-- 許可しているのは `PutApprovalResult` / `GetPipelineState` / `GetPipelineExecution` の 3 つで、対象もこのパイプラインに限定してある
-
-### 承認ボタンは自動では出ない。カスタムアクションで補う(実機で確認済み)
-
-**通知カードに Approve / Reject のボタンは付かない。** Chatbot は通知の種類に応じた既製のボタンを出すので「何も出ない」わけではなく、**承認だけが用意されていない。** CodePipeline の通知に最初から付くのは次の 2 つ。
-
-| 既製のボタン | 実行されるコマンド | このチャンネルでは |
+| 得る値 | 何に使うか | 置き場 |
 |---|---|---|
-| `Get info` | `codepipeline get-pipeline --name <パイプライン>` | **`AccessDenied` で失敗する**(下記) |
-| `Start Pipeline` | `codepipeline start-pipeline-execution` 相当 | 同じく許可していない |
+| **Incoming Webhook URL** | Lambda が `#njp-deploy` に投稿する宛先 | `/nuxt-java-practice/<env>/slack_webhook_url` |
+| **Signing Secret** | Slack から来たリクエストが本物か確かめる | `/nuxt-java-practice/<env>/slack_signing_secret` |
 
-**`GuardrailPolicies` は AWS 製のボタンにも効く。** `Get info` を押すと実際にこうなる。
+**どちらも資格情報。** webhook URL は知っている人なら誰でもそのチャンネルに投稿でき、signing secret は**漏れると公開エンドポイントへのリクエストを偽装できる**。`params` には絶対に置かない。
 
-```
-User: ...assumed-role/nuxt-java-practice-stg-chatbot-approve-role/chatbot-session-slack-U... is not
-authorized to perform: codepipeline:GetPipeline ... because no identity-based policy allows ...
-```
+### 手順
 
-許しているのは `GetPipelineState` であって `GetPipeline` ではない。**1 文字違いで弾かれているのは、ガードレールが設計どおり効いている証拠**なので直さない(パイプラインの定義を読みたいならコンソールのほうが速い)。エラーには**ロール名と Slack のセッション ID** も出るので、誰が叩いたかを追える。
+1. <https://api.slack.com/apps> → **Create New App** → **Blank app**
+   - 選択肢は **AI Agent** / **Starter app** / **From a manifest** / **Blank app** の 4 つ。
+     **一番下の `Blank app`** を選ぶ
+   - **以前は `From scratch` という名前だった。** 古い記事はその名前で書かれているので読み替える
+2. 名前(例 `njp-deploy-approver`)とワークスペースを選ぶ
+3. 左メニュー **Incoming Webhooks** → トグルを **On** → **Add New Webhook to Workspace**
+   → 投稿先に **`#njp-deploy`** を選ぶ → 発行された URL を控える
+4. 左メニュー **Basic Information** → **App Credentials** の **Signing Secret** を控える
+5. 控えた 2 つを SSM に入れる(→ [運用手順 §4](../infrastructure/cloudformation-operations.md))
 
-**承認だけ既製ボタンが無いのは、おそらくトークンのせい。** `Get info` も `Start Pipeline` もパイプライン名だけで実行できるが、承認は通知に無い値を要求する。
+**Interactivity の設定はまだできない。** 登録する URL は Lambda を作らないと決まらないので、§6-3 で戻ってくる。
 
-**自分でボタンを作ることはできるが、1 クリックで承認は完結しない。** Chatbot の「Custom action」で CLI コマンドのボタンは作れる。ただし押したときに使える通知変数は次の 5 つしかない。
+**Bot Token(`xoxb-`)は発行しない。** 投稿は webhook、押された後の返信は Slack が渡してくる `response_url` で足りる。**bot トークンは漏れると任意のチャンネルに投稿できてしまう**ので、要らないなら作らないほうがよい(→ ADR-0014)。
 
-| 変数 | 中身の例 |
-|---|---|
-| `$Pipeline` | `nuxt-java-practice-stg-app` |
-| `$Stage` / `$Action` | `Approve` / `Approve` |
-| `$CustomData` | `pipeline.yml` の `CustomData`(イメージタグが入っている) |
-| `$ExternalEntityLink` | 空 |
+## 6-3. デプロイ後に Interactivity を設定する
 
-**承認トークンが無い。** `put-approval-result` は `--token` が必須で、値は承認 1 件ごとに変わるため、固定のコマンドとして書けない。
-
-**トークンは「どの承認ゲートか」ではなく「そのゲートの、どの回か」を指している。** パイプライン名・ステージ名・アクション名は構成を変えない限り不変なので直書きできるが、トークンだけは実行のたびに変わる。おかげで**古い実行を誤って承認する事故**と**二重承認**が防がれている。IAM が「承認してよい人か」を見るのに対し、トークンは「どの承認について言っているのか」を見ている。
-
-**ただし「2 手」にはできる。トークンを自分で渡せばよい。** カスタムアクションで変数を追加すると、ボタンを押したときに **Chatbot が値を確認する画面を出す**ので、そこにトークンを貼れる。手順 → **§6-3**。
-
-結果として、承認の手段は 3 つある。
-
-| 手段 | 手数 | 準備 |
-|---|---|---|
-| **カスタムアクションボタン** | 2 クリック + 貼り付け | §6-3 で 3 つ作る |
-| **Slack でコマンドを打つ** | 2 コマンド | 不要 |
-| **コンソール** | 画面を開いて 1 クリック | 不要 |
-
-コマンドで打つ場合はこの 2 本。
+**Function URL はスタックを作るまで決まらない。** そのため手順が 3 段になる。
 
 ```
-@Amazon Q aws codepipeline get-pipeline-state --name nuxt-java-practice-stg-app --region ap-northeast-1
-@Amazon Q aws codepipeline put-approval-result --pipeline-name nuxt-java-practice-stg-app --stage-name Approve --action-name Approve --token <上で見えたトークン> --result summary="",status=Approved --region ap-northeast-1
+① Slack App を作る(§6-2)      → webhook URL と signing secret
+② SSM に入れて pipeline-apply を実行 → Outputs に Function URL が出る
+③ その URL を Slack App に登録   ← ここ
 ```
 
-`status` は `Approved` / `Rejected`。`GuardrailPolicies` が `GetPipelineState` も許しているのは、この 1 コマンド目のため。
+1. `pipeline-apply.yml` のジョブサマリ、または次のコマンドで URL を取る
 
-**トークン入りの通知が欲しければ別経路になる。** 承認アクションの `NotificationArn` に SNS トピックを指定すると、届くメッセージに `approval.token` が入る。世の中の「Slack で CodePipeline を承認する」記事はこれを Lambda で受けて対話メッセージを組み立てているが、**アプリ以外のコードを持たない方針**(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))なので採らない。appspec の Hooks を捨てたのと同じ判断。
-
-## 6-3. 承認ボタンを作る(カスタムアクション)
-
-> **実機で確認済み(2026-09-06)。** ①②は実際に作って動かした。③は②の `status` を変えるだけ。
-> 前提 → §6-2。**カスタムアクションは CloudFormation ではなくコンソールで作る手動作業**なので、
-> ワークスペースを作り直したら再作成が要る(→ §8)。
-
-### 承認は 2 手になる
-
-```
-① Show token を押す   → 出力の Token: をコピー
-② Approve / Reject を押す → 確認画面の Token に貼って実行
+```bash
+aws cloudformation describe-stacks --stack-name nuxt-java-practice-stg-pipeline \
+  --query "Stacks[0].Outputs[?OutputKey=='SlackInteractionUrl'].OutputValue" --output text
 ```
 
-| ボタン | 何をするか |
-|---|---|
-| ① `ShowApprovalToken` | `get-pipeline-state` を実行してトークンを表示する |
-| ② `RejectDeploy` | トークンを貼って却下する |
-| ③ `ApproveDeploy` | トークンを貼って承認する(②の `status` 違い) |
+2. Slack App の左メニュー **Interactivity & Shortcuts** → トグルを **On**
+3. **Request URL** に ① の URL を貼って **Save Changes**
 
-**先に②を作って試すとよい。** 却下は何も壊さない。③は押すと本当にデプロイが走る。
+**②と③の間はボタンを押しても何も起きない。** Slack が送り先を知らないため。1 回きりの作業なので実害はないが、順序として意識しておく。
 
-### 入力する値
+**URL はスタックを作り直すと変わる。** `pipeline-destroy.yml` で消して建て直したら、③をやり直すこと。
 
-Chatbot コンソール → 対象のチャンネル設定 → **Custom actions** → 作成。
+### 承認・却下のしかた
 
-#### ① トークンを表示する
-
-| 画面 | 項目 | 入れる値 |
-|---|---|---|
-| Step 1 | Custom action name | `ShowApprovalToken` |
-| Step 1 | Custom action button text | `Show token` |
-| Step 1 | Custom action type | **CLI action** |
-| Step 2 | Define CLI command | 下記 |
+`#njp-deploy` に届く承認待ちのメッセージにボタンが付く。
 
 ```
-codepipeline get-pipeline-state --name $Pipeline --region ap-northeast-1
+nuxt-java-practice-stg-app のデプロイ承認をお願いします。
+コミット: `1a2b3c4`
+> fix: buildspec のシェルを bash に固定する
+
+[ 承認 ]  [ 却下 ]        コンソールで開く
 ```
 
-- **name は識別子。** 画面の例が `CustomActionName` なので、空白なしの英数字にしておく
-- **button text は Slack のボタンに出る文字列。** 日本語が通るかは未確認。**このリポジトリは IAM の `--description` で「日本語は使えない」を踏んでいる**(→ [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) §2-2)ので、まず ASCII で作り、通ってから日本語を試すほうが切り分けやすい
-- **`$Pipeline` は直書きでもよい**(このリポジトリはパイプラインが 1 本)。変数にしておくのは prod を足したときに同じボタンを使い回すため
-- **`--query` は使わない。** Chatbot が JMESPath を受けるか未確認なので、まず素の出力で試す。出力が長くて Slack 側で切られるようなら、そこで初めて `--query "stageStates[?stageName=='Approve'].actionStates[0].latestExecution.token" --output text` を試す
+- **承認には確認ダイアログが挟まる。** 押し間違いが本番のリスナー切り替えに直結するため
+- **押すとボタンが消え、結果に置き換わる。** 古いボタンが残らない
+- **誰が押したかは CodePipeline 側に残る。** `PutApprovalResult` の `summary` に Slack のユーザー名を入れているので、その後の通知の `Additional Information` に出る
+- **`#njp-deploy` にいる人は誰でも押せる。** 境界は「チャンネルに誰を入れるか」で引く(→ ADR-0014)
 
-#### ② 却下する
-
-| 画面 | 項目 | 入れる値 |
-|---|---|---|
-| Step 1 | Custom action name | `RejectDeploy` |
-| Step 1 | Custom action button text | `Reject` |
-| Step 1 | Custom action type | **CLI action** |
-| Step 2 | Define CLI command | 下記 |
-| Step 2 | Add new variable | `Token` |
-
-```
-codepipeline put-approval-result --pipeline-name $Pipeline --stage-name $Stage --action-name $Action --token $Token --result summary="rejected from Slack",status=Rejected --region ap-northeast-1
-```
-
-- **`$Token` が肝。** 通知変数に無いので「Add new variable」で足す。**押すと Chatbot が確認画面を出し、そこで値を入れられる**(下記)
-- `$Pipeline` / `$Stage` / `$Action` は通知から来る。値はそれぞれ `nuxt-java-practice-stg-app` / `Approve` / `Approve`
-- `status` は `Approved` / `Rejected` の 2 択。**③を作るときはここだけ `Approved` に変える**
-- `summary` は空でもよいが、あとで実行履歴を見たときに経路が分かるので入れておく
-
-### 押したときの見え方
-
-**②③を押すと、実行前に確認画面が出る。**
-
-```
-Command Action
-  Action:   Approve
-  Pipeline: nuxt-java-practice-stg-app
-  Stage:    Approve
-  Token:    98a49d36-...        ← ここに①でコピーした値を入れる
-  I can run the command:
-    codepipeline put-approval-result --pipeline-name ... --token ... --status=Rejected ...
-  Run in account: 123456789012
-  [Select different variables]
-```
-
-通知から来る `$Action` / `$Pipeline` / `$Stage` は埋まった状態で、**実行するコマンド全文が見えてから確定できる**。「Select different variables」で入れ直せる。
-
-実行後は Slack に「I ran the command ...(role / account / region 付き)」が出る。**①のような読み取り専用コマンドでは "I ran the **read-only** command" と表示され、書き込み系と区別されている。**
-
-**却下すると通知が 2 通来る。**
-
-- `CodePipeline Manual Approval action FAILED`
-- `1 action failed in stage: Approve. Additional Information: rejected from Slack`
-
-2 通目の `Additional Information` は `--result summary=` に書いた文字列。**`summary` を空にすると「なぜ落ちたか」が通知から読めなくなる**ので、経路が分かる文言を入れておく。
-
-> **API の応答は `ApprovedAt` と返る。** 却下でもこのフィールド名になる(「承認処理を行った時刻」という意味)。
-> 却下したのに承認されたように見えるが、パイプラインの実行は `Failed` で終わっているので問題ない。
-
-### 結果
-
-**① は成立した(2026-09-06 実機)。**
-
-- **トークンは見えた。** `Approve` ステージ → `ActionName: Approve` → `LatestExecution` の
-  **`Token:`** の行。`Status: InProgress` の間だけ出る
-- **出力は切られなかった。** 4 ステージ分そのまま届いたので **`--query` は不要**
-- **`$Pipeline` は展開された。** 実行されたコマンドが Slack にそのまま表示される
-- **Chatbot は読み取り専用コマンドを区別している。** 実行結果に
-  「I ran the **read-only** command ...」と出る。どのロール・どのアカウント・どのリージョンで
-  実行したかも併記されるので、監査の手掛かりになる
-
-**トークンの値は `ActionExecutionId` と一致する。** 手動承認のトークンがそのアクション実行の ID
-そのものだから。ただし仕様として保証されているわけではないので、**コピーするのは `Token:` の行**。
-
-**② も成立した(同日)。**
-
-- **`$Token` は確認画面で入れられた。** 空文字で実行されることはなかった
-- **却下は通り、パイプラインの実行は `Failed` で終わった**
-- ③(`ApproveDeploy`)は②の `status` を `Approved` に変えるだけで作れる
-
-### なぜ 2 手なのか(1 手にできない理由)
-
-**CLI action が実行するのは AWS CLI コマンド 1 本で、シェルを通していない。** そのため
-`--token $(aws codepipeline get-pipeline-state ...)` のようなコマンド置換も、`&&` での連結も、
-パイプも使えない。`$Token` は Chatbot が**実行前に文字列を差し替えているだけ**で、
-値を計算する仕組みではないから、前のコマンドの出力を次に渡すことはできない。
-
-1 手にするなら残る道は 2 つ。
-
-| 方法 | 可否 |
-|---|---|
-| **Lambda action** | **採らない。** アプリ以外のコードを持たない方針(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)) |
-| **Automation runbook action** | **理屈上は可能。未検討。** SSM Automation は複数ステップを持ち、`aws:executeAwsApi` の出力を次のステップに渡せる。宣言的なドキュメントなのでアプリコードにはあたらず、`AWS::SSM::Document` として `pipeline.yml` に書けば IaC 化も進む |
-
-**Automation を採らないでいる理由は費用対効果。** SSM ドキュメントと Automation 用ロールでテンプレートが
-40〜60 行伸び、ガードレールに `ssm:StartAutomationExecution` と `iam:PassRole` を足すことになる。
-**1 人で使う環境で「2 手が 1 手になる」ための投資としては重い。** 必要になったら検討する。
-
-**残っている未確認**
-
-- button text に日本語が通るか(ASCII で作ったため未検証)
-- `AWS::Chatbot::CustomAction` で IaC 化できるか(できるなら `pipeline.yml` に移して手動作業を減らせる)
-- `aws:executeAwsApi` が `PutApprovalResult` を扱えるか(上の Automation 案を試すなら最初に確かめる点)
-
-**成立しなかった場合の代替**は §6-2 のとおり、コンソールか `@Amazon Q` への 2 コマンド。どちらも今のままで動く。
+**コンソールで承認した場合と 7 日でタイムアウトした場合だけ、Slack のボタンが残る。** Slack 側は何が起きたか知らないため。押しても「この承認はすでに終わっています」と返るだけで、誤って承認されることはない。
 
 ## 7. 反映して確かめる
 
@@ -332,9 +210,12 @@ Command Action
 |---|---|---|
 | ワークスペースの認可(§3) | **残る** | 何もしなくてよい |
 | Slack のチャンネルとアプリの追加(§2・§4) | **残る** | 何もしなくてよい |
-| SNS トピック 2 本 | 消える | スタックが同じ名前で作り直す |
-| Chatbot のチャンネル設定 | 消える | スタックが作り直す |
+| 承認用の Slack App(§6-2) | **残る** | **Interactivity の URL だけ登録し直す** → §6-3 |
+| SNS トピック 2 本(アラート) | 消える | スタックが同じ名前で作り直す |
+| Chatbot のチャンネル設定 2 つ | 消える | スタックが作り直す |
 | CloudWatch Logs の `/aws/chatbot/...`(us-east-1) | **残る**(スタックの外にあるため) | 何もしなくてよい → §8-2 |
+
+**承認まわりは `pipeline.yml`(常駐)にあるので、アプリのスタックを撤収しても消えない。** 消えるのは `pipeline-destroy.yml` を実行したときだけで、そのときは Function URL が変わるので §6-3 をやり直す。
 
 **毎回踏む手作業は無い。**これがメール通知から移った一番の実利で、以前は建てるたびに SNS の購読確認メールを 2 通踏む必要があり、踏み忘れた系統は無音のままだった(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
@@ -348,7 +229,8 @@ Command Action
 |---|---|
 | `nuxt-java-practice-<env>-ecs-task-shortage`(`app.yml`) | `/aws/chatbot/nuxt-java-practice-<env>-ecs-task-shortage` |
 | `nuxt-java-practice-<env>-rds-alerts`(`app.yml`) | `/aws/chatbot/nuxt-java-practice-<env>-rds-alerts` |
-| `nuxt-java-practice-<env>-deploy`(`pipeline.yml`) | `/aws/chatbot/nuxt-java-practice-<env>-deploy` |
+
+**フェーズ17 で 3 つ目(`...-deploy`)は無くなった。** 承認用の Chatbot 設定を消したため。**ただし過去のログは us-east-1 に残り続ける**(下記のとおりスタックの外にあるので、消したければ手で消す)。承認まわりの新しいログは `/aws/lambda/nuxt-java-practice-<env>-slack-notify` と `...-slack-interaction` に、**ap-northeast-1 で、スタック管理下で**出る。
 
 **リージョンは us-east-1 で固定。** このリポジトリのスタックは ap-northeast-1 に建てるが、Chatbot のログはそこには出ない。公式ドキュメントが「ログを見るときは US East (N. Virginia) を指定すること」と明記している(→ [Accessing Amazon CloudWatch Logs](https://docs.aws.amazon.com/chatbot/latest/adminguide/cloudwatch-logs.html))。**コンソールで探して見つからないときは、たいていリージョンを間違えている。**
 
@@ -358,15 +240,15 @@ Command Action
 - **保持期間は既定の無期限。** テンプレートの `LogRetentionDays` はここには効かない(あれが効くのは `pipeline.yml` が自分で作る CodeBuild のロググループだけ)
 - **同じリージョンのスタックに `AWS::Logs::LogGroup` を書いても代わりにはならない。** 作られるのは ap-northeast-1 で、Chatbot が使う us-east-1 のものとは別物になる
 
-**`LoggingLevel: NONE` にしてもロググループは消えない。** コマンド実行の監査ログは常時有効で無効化できないと明記されている。**Slack からの承認は「コマンドの実行」**なので、承認するたびに監査イベントが出る。`NONE` で減るのはエラーログのほうだけ。
+**`LoggingLevel: NONE` にしてもロググループは消えない。** コマンド実行の監査ログは常時有効で無効化できないと明記されている。`NONE` で減るのはエラーログのほうだけ。
 
-書き込まれる量はエラーと承認の監査だけなので、放っておいても課金上の実害はほぼ無い。それでも保持期間を付けるなら、**us-east-1 に対する、スタックの外の操作**になる。
+書き込まれる量はエラーだけなので、放っておいても課金上の実害はほぼ無い。それでも保持期間を付けるなら、**us-east-1 に対する、スタックの外の操作**になる。
 
 ## 9. 無料プランで効いてくる制限
 
 | 制限 | 影響 |
 |---|---|
-| アプリ・インテグレーションは 10 個まで | Amazon Q Developer が 1 つ使う。残り 9 |
+| アプリ・インテグレーションは 10 個まで | Amazon Q Developer と自作 App で **2 つ**使う。残り 8 |
 | メッセージ履歴は **90 日** | それより古いアラート履歴は Slack から見えなくなる。**CloudWatch 側にアラーム履歴は残る**ので実害は小さい |
 | ストレージ 5 GB | アラート通知はテキストなので当面問題にならない |
 
@@ -382,5 +264,17 @@ Command Action
 | スタックは成功したのに Slack に何も来ない | **チャンネルに Amazon Q Developer を追加し忘れていないか**(→ §4)。次に、コンソールの **テストメッセージを送信** で切り分ける |
 | テストメッセージは届くがアラートが来ない | アラーム側の問題。まだ一度も `ALARM` になっていないだけの可能性が高い。`aws cloudwatch describe-alarms` で状態を見る |
 | 転送が失敗している理由を知りたい | CloudWatch Logs の `/aws/chatbot/<ConfigurationName>`。テンプレートは `LoggingLevel: ERROR` にしてある。**リージョンは us-east-1**(→ §8-2) |
-| Slack から承認を押したのに進まない | 同じく `/aws/chatbot/nuxt-java-practice-<env>-deploy`(us-east-1)。`codepipeline:PutApprovalResult` が `GuardrailPolicies` とチャンネルロールの AND で通っているかを見る(→ §6-2) |
-| Slack から AWS のコマンドを打ちたい | 意図的に塞いである。`GuardrailPolicies` に `AWSDenyAll` を入れているので、緩めるならそこを変える(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)) |
+| Slack から AWS のコマンドを打ちたい | アラート用 2 チャンネルでは意図的に塞いである。`GuardrailPolicies` に `AWSDenyAll` を入れているので、緩めるならそこを変える(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)) |
+
+### 承認まわり(フェーズ17)
+
+**見るログが 2 つに分かれる。** どちらも **ap-northeast-1**(Chatbot と違って us-east-1 ではない)。
+
+| 症状 | 見るところ |
+|---|---|
+| 承認待ちの通知が Slack に来ない | `/aws/lambda/nuxt-java-practice-<env>-slack-notify`。`slack_webhook_url` が SSM にあるか、値が正しいか。**そもそも SNS まで来ているか**は CodeStarNotifications のルールと SNS トピックのメトリクスで切り分ける |
+| 通知は来るがボタンが無い / 内容が汎用的 | 承認待ちだと判定できていない。**`notify` は生の `Sns.Message` をログに出す**ので、`detail` の形を見て判定条件を直す(→ [フェーズ17 の設計書](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)の未確認事項) |
+| ボタンを押しても何も起きない | **Interactivity の Request URL を登録したか**(→ §6-3)。スタックを建て直した後は URL が変わっている |
+| ボタンを押すと Slack にエラーが出る | `/aws/lambda/nuxt-java-practice-<env>-slack-interaction`。`401` なら署名検証で落ちている(`slack_signing_secret` の値違い)。3 秒を超えた場合は Slack 側にタイムアウトが出る |
+| 「この承認はすでに終わっています」と返る | 正常。コンソールで承認済みか、タイムアウト済みか、`SUPERSEDED` で実行が入れ替わっている |
+| `pipeline-apply` が SecureString で落ちる | §4 の 2 つを作ったか。`gha-cfn-stg` に `CheckSlackSecrets` を足したか(→ [運用手順 §2-2](../infrastructure/cloudformation-operations.md)) |

@@ -24,7 +24,7 @@
 | 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
 | 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 作業中 |
 | 15 | 通知先の Slack 化 | アラートの宛先をメールから Slack へ。Amazon Q Developer in chat applications(旧 AWS Chatbot)で SNS トピック 2 本を 2 チャンネルに転送。**設計 → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)**、方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) | 作業中 |
-| 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 未着手 |
+| 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -36,6 +36,97 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ17 を実装した(実機未検証)**(2026-09-06):
+  - **やったこと**: デプロイ承認を **Chatbot から自作 Slack App + Lambda に移した**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))
+  - **作ったもの**:
+    - `lambda/slack-approval/notify/`(SNS → Slack 投稿)と `interaction/`(ボタン押下 → 承認)
+    - `lambda/slack-approval/test/verify.test.mjs`(署名検証のテスト 10 件)
+    - `pipeline.yml` に SNS トピック / Lambda 2 つ / IAM ロール 2 つ / ロググループ 2 つ /
+      Function URL / 権限まわり
+  - **消したもの**: `pipeline.yml` の `ChatbotGuardrailPolicy` / `ChatbotApproveRole` /
+    `DeployApprovalChannel`、パラメータ `SlackWorkspaceId` / `SlackChannelIdDeploy`
+  - **変えたもの**: `PipelineNotificationRule` の宛先を `AWSChatbotSlack` → **`SNS`**、
+    `pipeline-apply.yml` に「テスト → `cloudformation package` → deploy」の 3 段
+  - **やめた理由**(3 つとも実機で踏んだ):
+    - 承認トークンが Chatbot の通知変数に無く、**1 クリックで完結しない**(2 手なら成立した)
+    - `Get info` / `Start Pipeline` という既製ボタンが付き、`GuardrailPolicies` で許して
+      いないので押すと `AccessDenied`。**既製ボタンは消せない**
+    - カスタムアクションは**全通知に付く**。「承認 FAILED」の通知にまで承認ボタンが並ぶ
+    - **承認者はインフラ担当ではなくアプリ開発担当**。「押していいものが一目で分かる」を優先した
+    - Chatbot 方式でやってみた記録 → [chatbot-approval-attempt.md](../notes/aws-code-service/chatbot-approval-attempt.md)
+  - **設計から動いた点**:
+    - **トークンは通知時ではなく押下時に取る。** 埋め込むと `SUPERSEDED` で実行が
+      入れ替わったとき古いトークンを持ち続ける。副産物として notify 側の権限が減った
+    - **`notify` に `codepipeline:GetPipelineExecution` を 1 つ持たせた**(設計時は権限ゼロの想定)。
+      「どのコミットを承認するのか」をメッセージに出すため。`additionalAttributes` の形に
+      依存するより、実行を読むほうが確実
+    - **SAM ではなく `aws cloudformation package`。** 同じファイル・同じスタックに書ける点は
+      SAM も同じだが、`AWS::Serverless::Function` は IAM ロールを暗黙に生成するため、
+      1 文ごとに理由を残す `pipeline.yml` の書き方と合わない
+  - **S3 バケットを分けた**(設計を途中で変更): Lambda の zip はテンプレート置き場に間借りせず、
+    **`nuxt-java-practice-lambda-artifacts-<アカウントID>` を新設**して置く。
+    テンプレートは CloudFormation が中身を写し取るので消えても困らないが、**zip はスタックが
+    `S3Key` という在り処しか持たないため、消えるとロールバックが失敗する。**
+    保存要件が正反対のものを同居させると、ライフサイクルを 1 つ触るだけで静かに壊れる。
+    あわせて `pipeline.yml` も `deploy --s3-bucket` で S3 経由にし、`app.yml` と渡し方を揃えた
+  - **着手前に必要な手動作業が 5 つ**(すべて 1 回きり):
+    ① Slack App を作り、Incoming Webhook と Signing Secret を控える(→ [docs/slack/README.md](../slack/README.md))
+    ② SSM に SecureString を 2 つ追加(→ [運用手順 §4](../infrastructure/cloudformation-operations.md))
+    ③ **S3 バケット `...-lambda-artifacts-<アカウントID>` を作る**(→ 同 §3-2)
+    ④ `gha-cfn-stg` の `DeployStack` に `CheckSlackSecrets` と `PutLambdaCode` を追加(→ 同 §2-2)
+    ⑤ **デプロイ後**、Outputs の `SlackInteractionUrl` を Slack App の Interactivity に登録
+  - **後片付け**: Chatbot のカスタムアクション 2 つ(`ShowApprovalToken` / `RejectDeploy`)は
+    コンソールで作った手動リソースなので**手で消す**。`#njp-deploy` から Amazon Q Developer を
+    退出させてもよい(アラート 2 チャンネルでは引き続き使う)
+  - **未確認**: CodeStarNotifications が SNS に流すメッセージの `detail` の形。
+    `notify` は生の内容をログに出したうえで汎用メッセージに落ちるようにしてあるので、
+    **初回の通知で `/aws/lambda/nuxt-java-practice-stg-slack-notify` を見て確かめること**
+
+- **フェーズ16 を実装した(実機未検証)**(2026-09-05):
+  - **作ったもの**:
+    - `cloudformation/pipeline.yml`(常駐スタック。リソース 10 / パラメータ 13)+ `params/pipeline-{stg,prod}.json`
+    - `deploy/` に `buildspec.yml` / `appspec.yaml` / `taskdef.json` / `taskdef-migrate.json`
+    - `.github/workflows/pipeline-apply.yml` / `pipeline-destroy.yml`
+    - `app.yml` に `CodeDeployApplication` / `CodeDeployDeploymentGroup` / `CodeDeployServiceRole`
+  - **消したもの**: `.github/workflows/ecr-push.yml`、`ProductionListenerRule`、
+    `EcsInfrastructureRoleForLoadBalancers`、`BakeTimeInMinutes` パラメータ、
+    `cfn-apply.yml` の `workflow_dispatch` の `image_tag`、Repository secret `AWS_ECR_PUSH_ROLE_ARN`
+    (**`main` から Repository secret を使うワークフローが無くなった**)
+  - **ただし `ecr-push` 側は AWS / GitHub に残す。** 凍結ブランチ `github-actions-deploy` を
+    動かせる状態に保つため、IAM ロール `nuxt-java-practice-gha-ecr-push` と Repository secret
+    `AWS_ECR_PUSH_ROLE_ARN` は消さない。**フェーズ16 で secret を削除済みなら登録し直すこと**
+    (→ [ADR-0012](../adr/0012-deploy-method-per-branch.md)・[github-secrets.md](../infrastructure/github-secrets.md) §1)
+  - **変えたもの**: `HttpsListener` の既定アクションを 403 → `forward TargetGroupBlue`、
+    `Service` を `CODE_DEPLOY` 制御に(`TaskDefinition` は family 名の固定文字列 + `DependsOn`)、
+    Outputs の `MigrateTaskDefinition` をリビジョン固定 ARN → family 名、`DbPort` を追加。
+    `app.yml` は 86,936 → **109,803 バイト**(リソース 85 / パラメータ 51 / 出力 19)
+  - **設計から動いた点(→ 設計書 §5-2)**:
+    - **`taskdef.json` は構造だけを持ち、値はすべてスタックから差し込む。** `__DB_HOST__` のような
+      プレースホルダを CodeBuild が `describe-stacks` の Outputs / Parameters で埋める。
+      二重管理を「どの環境変数があるか」だけに限定し、値のずれは起こさない。埋め忘れは Build で落とす
+    - **buildx をやめて素の `docker build` にした。** `LOCAL_DOCKER_LAYER_CACHE` は Docker デーモンの
+      レイヤーキャッシュで、buildx の `docker-container` ドライバは独自のキャッシュを持つため当たらない
+    - **承認通知は SNS を挟まない。** CodeStar Notifications は `TargetType: AWSChatbotSlack` で
+      Chatbot を直接ターゲットにできる。アラート系が SNS を挟むのは CloudWatch アラームの制約
+    - **初回構築ではスタックがまだ無いので、Build はレンダリングと register を飛ばして成功で抜ける**
+  - **書き残した罠**: `AWS::CodeDeploy::DeploymentGroup` のリファレンス冒頭にある
+    「ECS の Blue/Green にこのリソースは使わない。`AWS::CodeDeploy::BlueGreen` フックを使え」は、
+    **デプロイを *実行* する話であってデプロイグループを *作る* 話ではない。**
+    ECS 用の `ECSServices` と `TargetGroupPairInfoList` が存在すること自体が証拠で、CDK も同じものを合成する。
+    将来の読み手が不安にならないよう `app.yml` にコメントで残した
+  - **着手前に必要な手動作業は 3 つ**(どれも 1 回きり):
+    ① CodeStar Connections をコンソールで作って GitHub と握手(→ [運用手順 §12-1](../infrastructure/cloudformation-operations.md))
+    ② Slack に `#njp-deploy` を作り `/invite @Amazon Q`(→ [docs/slack/README.md](../slack/README.md))
+    ③ `gha-cfn-stg` ロールの `DeployStack` に `ReadConnection`(`codeconnections:GetConnection`)を追加。
+    **やらないと `pipeline-apply.yml` の「前提を確かめる」で `AccessDeniedException` になる**(→ [運用手順 §2-2](../infrastructure/cloudformation-operations.md))
+    **① の ARN は Environment secret `AWS_CODESTAR_CONNECTION_ARN` に、② のチャンネル ID は
+    `params/pipeline-stg.json` に入れる。** ARN を params に置かないのは、アカウント ID を含むから
+    (このリポジトリは public → [github-secrets.md §2-3](../infrastructure/github-secrets.md))。
+    どちらも欠けていると `pipeline-apply.yml` が流す前に落ちる
+  - **実機未検証。** 実測で覆りうる項目は設計書 §6 に 10 件挙げてある。とくに
+    Chatbot の承認がボタンで出るのかコマンドなのか、`GuardrailPolicies` をどこまで絞ると通るか、
+    `docker build` でローカルキャッシュが効くか
 
 - **フェーズ16 を設計した(実装未着手)**(2026-09-05):
   - **方針** → **[ADR-0012](../adr/0012-deploy-method-per-branch.md)**(デプロイ方式をブランチで分ける) /
@@ -70,7 +161,7 @@
     **ビルド時間 5〜8 分**(`type=gha` キャッシュが使えない)
   - **常駐の手動リソースが 1 つ増える**: CodeStar Connections(作成後にコンソールで握手が要る。ADR-0011 の Slack 認可と同じ形)
   - **Lambda はゼロのまま**(ADR-0011 の判断を維持)
-  - **着手前に必要な手動作業**: ① CodeStar Connection を作って握手 ② Slack に `#njp-deploy` を作り `/invite @Amazon Q`
+  - **着手前に必要な手動作業**: ① CodeStar Connection を作って握手し、ARN を Environment secret に登録 ② Slack に `#njp-deploy` を作り `/invite @Amazon Q`
 
 - **stg を実機で建てて、更新・撤収まで通した**(2026-08-29):
   - **フェーズ13〜15 の「実機未検証」がここで解消された。** 3 つのワークフローがすべて通っている
