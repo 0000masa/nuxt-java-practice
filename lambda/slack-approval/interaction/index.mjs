@@ -61,7 +61,7 @@ export async function handler(event) {
     return { statusCode: 200, body: "" };
   }
 
-  return await respond(await approve(payload));
+  return await respond(payload.response_url, await approve(payload));
 }
 
 function parsePayload(rawBody) {
@@ -119,18 +119,52 @@ async function findToken(pipelineName, stageName, actionName) {
     ?.latestExecution?.token;
 }
 
-// 【元のメッセージを置き換える】
-// block_actions への応答本文に replace_original を付けると、押されたメッセージが
-// そのまま差し替わる。ボタンが消えるので、古いボタンが残り続ける問題が起きない。
-// response_url に POST する方法もあるが、HTTP 応答で済むならその 1 往復が要らない。
-function respond(text) {
-  return {
-    statusCode: 200,
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      replace_original: true,
-      text,
-      blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
-    }),
-  };
+// 【元のメッセージの差し替えは response_url への POST でしかできない】
+// Block Kit(blocks)では HTTP 応答の本文は読まれず、「200 が返ってきた」という
+// 合図だけが意味を持つ。Slack の公式ドキュメントにこう書かれている:
+//   "With blocks, it is not possible to publish a new message by responding directly
+//    to the HTTP request. You will always need to use the response_url for this purpose.
+//    The HTTP response may now only be used to send an HTTP 200 acknowledgement response."
+//
+// 応答本文に replace_original を入れれば差し替わる、というのは attachments 時代
+// (legacy interactive messages)の挙動で、blocks では**エラーも出さずに捨てられる**。
+// 「却下は CodePipeline に通っているのに Slack のメッセージだけ変わらない」という形で
+// 実際に踏んだ。→ docs/notes/aws-code-service/slack-block-kit-response.md
+//
+// 【1 往復増えるぶん、Slack の 3 秒に近づく】
+// Slack は 200 を 3 秒以内に求める。ここに至るまでに get-pipeline-state →
+// put-approval-result が挟まり、さらにこの POST が乗るので、コールドスタートでは
+// 超えることがある(超えても差し替えは成立し、Slack に警告が出るだけ)。
+// 厳密にやるなら「先に 200 を返して続きを別 Lambda で」だが、そこまではしていない。
+async function respond(responseUrl, text) {
+  // ボタン押下(block_actions)なら必ず付いてくる。無いのは想定外なので記録だけ残す
+  if (!responseUrl) {
+    console.error("response_url が無いので差し替えられない:", text);
+    return { statusCode: 200, body: "" };
+  }
+
+  try {
+    const res = await fetch(responseUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        // 押されたメッセージをそのまま置き換える。ボタンが消えるので、
+        // 古いボタンが残り続ける問題が起きない
+        replace_original: true,
+        text,
+        blocks: [{ type: "section", text: { type: "mrkdwn", text } }],
+      }),
+    });
+    if (!res.ok) {
+      console.error(`差し替えに失敗した: ${res.status} ${await res.text()}`);
+    }
+  } catch (e) {
+    console.error("差し替えに失敗した:", e);
+  }
+
+  // 【差し替えが失敗しても 200 を返す】
+  // 承認そのものはすでに CodePipeline に通っている。ここで 500 を返すと Slack が
+  // 再送し、同じボタンの処理がもう一度走る(2 回目はトークンが無いので
+  // 「すでに終わっています」になり実害は無いが、ログが紛らわしくなる)
+  return { statusCode: 200, body: "" };
 }

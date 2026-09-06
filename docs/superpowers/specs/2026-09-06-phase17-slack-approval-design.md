@@ -200,9 +200,8 @@ WAF もレート制限もカスタムドメインも使わないのに、API + �
 **投稿先は `#njp-deploy` 1 つだけ**なので「webhook URL は 1 チャンネル固定」は制約にならない。
 **漏れたときの被害も小さい**(bot トークンは任意のチャンネルに投稿できる)。
 
-**押した後のメッセージ差し替えは `replace_original` で行う。**
-`block_actions` への HTTP 応答本文に `replace_original: true` を付けると、
-押されたメッセージがそのまま差し替わる。**ボタンが消える。**
+**押した後のメッセージ差し替えは `response_url` への POST で行う。**
+押されたメッセージが `replace_original: true` でそのまま差し替わる。**ボタンが消える。**
 
 ```
 [承認前]  <パイプライン名> のデプロイ承認をお願いします  [ 承認 ] [ 却下 ]
@@ -210,7 +209,11 @@ WAF もレート制限もカスタムドメインも使わないのに、API + �
 [承認後]  :white_check_mark: 承認しました — <パイプライン名> / @<ユーザー>
 ```
 
-`response_url` に POST する方法もあるが、**HTTP 応答で済むならその 1 往復が要らない。**
+**HTTP 応答の本文で差し替える方法は Block Kit では使えない。**
+`blocks` を使う場合、応答本文は読まれず「200 が返ってきた」という合図にしかならない。
+応答本文の `replace_original` で差し替わるのは attachments 時代(legacy interactive
+messages)の挙動で、**blocks ではエラーも出さずに捨てられる**。
+一度この方式で実装して踏んだ → `docs/notes/aws-code-service/slack-block-kit-response.md`
 
 **承認ボタンにだけ `confirm` を付けている。** 押し間違いが本番デプロイに直結するため。
 却下には付けない(やり直せる)。
@@ -374,7 +377,7 @@ done
 | 項目 | 設計時 | 実装 | 理由 |
 | --- | --- | --- | --- |
 | `notify` の AWS 権限 | **ゼロ**(投稿するだけ) | **`codepipeline:GetPipelineExecution` を 1 つ持たせた** | 「どのコミットを承認しようとしているのか」をメッセージに出すため。`CustomData` を `additionalAttributes` から拾う案もあったが、**フィールド名が実機未確認**なうえ、実行を読めば**コミット SHA とコミットメッセージ**が取れて情報量も多い |
-| メッセージ差し替えの手段 | `response_url` に POST | **HTTP 応答本文に `replace_original`** | `block_actions` はその場の応答でも元メッセージを置き換えられる。**1 往復減る**。`response_url` は押下時に発行されるので、時間が経ってからでも使える(30 分 / 5 回)という利点はあるが、今回は不要 |
+| メッセージ差し替えの手段 | `response_url` に POST | **一度 HTTP 応答本文に `replace_original` を書いて失敗し、設計どおり `response_url` に戻した** | 「その場の応答でも置き換えられて 1 往復減る」と考えたが、それは attachments 時代の挙動だった。`blocks` では応答本文は読まれず、**承認は通るのに Slack のメッセージだけ変わらない**という形で踏んだ。1 往復増えるのは Block Kit では避けられない → `docs/notes/aws-code-service/slack-block-kit-response.md` |
 | 承認ボタンの確認ダイアログ | 設計になし | **承認にだけ `confirm` を付けた** | 押し間違いが本番デプロイに直結する。却下はやり直せるので付けない |
 | 押下時に承認が終わっていた場合 | 設計になし | **`findToken` が空なら「すでに終わっています」を返す** | コンソールで承認した場合とタイムアウトした場合、Slack のメッセージにボタンが残る(ADR-0014 の「結果 3」)。押されても壊れないようにした |
 | テストファイルの置き場 | `interaction/` 配下 | **`test/` に分けた** | `Code:` が指すディレクトリに入れると **zip に混ざる** |
