@@ -10,9 +10,24 @@
 # 前提チェックで、pipeline.yml にはどれも意味が無い。RDS も ECS も無く、
 # 作り直しで失われるデータも無いので aws cloudformation deploy で足りる。
 #
-# 【テンプレートを S3 に置かない】
-# app.yml は 51,200 バイト(リクエストに直接載せられる上限)を超えているので S3 経由が
-# 必須だったが(→ ADR-0008)、pipeline.yml は 25KB 程度なので直接渡せる。
+# 【S3 を 2 回使う。バケットは別々】
+# テンプレートも Lambda のコードも S3 を経由するが、置き場を分けている(→ ADR-0014)。
+#
+#   package → nuxt-java-practice-lambda-artifacts-<アカウントID>/slack-approval/<ハッシュ>
+#   deploy  → nuxt-java-practice-cfn-templates-<アカウントID>/templates/<ハッシュ>
+#
+# 【なぜ分けるのか】保存要件が正反対だから。
+#   テンプレート … CloudFormation が中身を自分のスタックに写し取る(get-template で読める)。
+#                  S3 の実体は運び屋で、消えても何も起きない。だから 30 日で捨てる
+#   Lambda の zip … スタックが持つのは S3Bucket/S3Key という「在り処」だけ。
+#                  ロールバックは古いキーをもう一度取りに行くので、**消えると失敗する**
+# 同じバケットに置くとライフサイクルを 1 つ触るだけで静かに壊れるため、置き場ごと分けた。
+#
+# 【テンプレートを S3 経由にしたのは統一性のため】
+# pipeline.yml は 40,131 バイトで 51,200 の上限に収まるので、技術的には直接渡せる。
+# それでも app.yml(54,178 バイトで S3 経由が必須 → ADR-0008)と揃えてある。
+# 上限まで残り 11 KB。日本語コメントは 1 文字 3 バイトなので減りが速く、
+# 超えた日に DeployBucketRequiredError で足を止めないための先回りでもある。
 name: パイプラインのスタックを反映
 
 on:
@@ -31,6 +46,11 @@ on:
 env:
   AWS_REGION: ap-northeast-1
   TEMPLATE: cloudformation/pipeline.yml
+  # どちらも手動管理の常駐バケット(→ 手順書 §3)。名前はアカウント ID から組み立てるので
+  # params にも Secret にも持たせない。cfn-apply.yml が同じ規則でテンプレートを置いている
+  LAMBDA_BUCKET_PREFIX: nuxt-java-practice-lambda-artifacts
+  TEMPLATE_BUCKET_PREFIX: nuxt-java-practice-cfn-templates
+  PACKAGED: /tmp/pipeline.packaged.yml
 
 permissions:
   id-token: write
@@ -48,6 +68,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # 【デプロイの前にテストを通す】
+      # 署名検証は壊れても正常に見える(常に true を返しても Slack からの通信は通る)ので、
+      # ここで固定する。落ちたら反映しない。→ docs/test/README.md
+      - name: Lambda のテストを走らせる
+        run: node --test lambda/slack-approval/test/*.test.mjs
 
       - name: AWS に AssumeRole する(OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -69,6 +95,9 @@ jobs:
         run: |
           set -euo pipefail
           echo "stack=nuxt-java-practice-${{ inputs.env }}-pipeline" >> "$GITHUB_OUTPUT"
+
+          # バケット名の組み立てに 2 か所で使うので、ここで 1 回だけ引く
+          echo "account=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
 
           # プレースホルダのまま流すと、スタックは成功するのにパイプラインが
           # ソースを取れない(緑なのに機能していない、という一番厄介な壊れ方)。
@@ -98,12 +127,70 @@ jobs:
           fi
           echo "接続: AVAILABLE"
 
+          # 【SecureString が無いままでもスタックは成功してしまう】
+          # 足りないことに気づくのは Slack のボタンを押したときで、
+          # しかも Slack には何も出ず CloudWatch Logs を見に行く羽目になる。
+          # 接続の AVAILABLE チェックと同じ理由でここで止める(→ ADR-0014)。
+          # 値は要らないので WithDecryption は付けない(kms:Decrypt も要らない)
+          path=$(jq -r '.[] | select(.ParameterKey == "SsmParameterPath") | .ParameterValue' "$PARAMS")
+          for name in slack_webhook_url slack_signing_secret; do
+            if ! aws ssm get-parameter --name "${path}${name}" >/dev/null 2>&1; then
+              echo "::error::SSM に ${path}${name} がありません"
+              echo "::error::作り方 → docs/infrastructure/cloudformation-operations.md §4"
+              exit 1
+            fi
+          done
+          echo "SecureString: 2 つとも存在する"
+
           # params ファイル(CreateChangeSet 形式)を deploy が受ける Key=Value 形式に直す。
           # 値に空白が入らない前提。入るようになったらここを見直すこと。
           # ConnectionArn はここに混ぜない(GITHUB_OUTPUT に書くとマスクの効かない
           # 経路が増えるため)。deploy のステップで Secret から直接足す
           overrides=$(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "$PARAMS" | tr '\n' ' ')
           echo "overrides=$overrides" >> "$GITHUB_OUTPUT"
+
+      # 【aws cloudformation package が実際にやること】
+      # 名前に反して CloudFormation の API は 1 つも呼ばない。叩くのは S3 だけで、
+      # 「テンプレートを入力してテンプレートを出力する」デプロイ前の前処理コマンド。
+      #   1. --template-file のテンプレートを読む
+      #   2. 決められたプロパティにローカルパスが書かれていたら、そのディレクトリ /
+      #      ファイルを zip 化する(AWS::Lambda::Function の Code、
+      #      AWS::CloudFormation::Stack の TemplateURL など、対象は公式に列挙されている)
+      #   3. --s3-bucket / --s3-prefix の場所に S3 アップロードする
+      #   4. そのプロパティを S3 参照(S3Bucket / S3Key)に置き換えた新しいテンプレートを
+      #      --output-template-file に書き出す
+      # スタックを作る/更新するのは次のステップの deploy で、渡すのは 4 の出力のほう。
+      # cloudformation/pipeline.yml そのものは AWS に送られない。
+      #
+      # 【なぜこの工程が要るのか】
+      # CloudFormation はテンプレートの文字列しか受け取れず、ランナーのファイルシステムを
+      # 見られない。AWS::Lambda::Function の Code が取れるのは S3Bucket/S3Key・
+      # ZipFile(単一ファイル・4096 文字まで)・ImageUri の 3 つだけで、ローカルパスは無い。
+      # interaction は index.mjs と verify.mjs の 2 ファイルなので ZipFile も使えない。
+      # sam CLI は要らない(素の AWS::Lambda::Function も package の対象 → ADR-0014)。
+      #
+      # 【手でやらない理由は「キーを変え忘れる」こと】
+      # S3Key が同じままだと CloudFormation は差分なしと判断し、中身が変わっていても
+      # Lambda を更新しない。package は中身を MD5 で比較して、同じなら上げ直さず、
+      # 変わっていれば別のオブジェクトとして上げる。ここが自動なので取り違えが起きない。
+      #
+      # 【パスと Handler の関係】
+      # 相対パスはテンプレートの位置(cloudformation/)から解決されるので、
+      # Code: ../lambda/slack-approval/notify は リポジトリ直下の lambda/... を指す。
+      # **そのディレクトリの中身が zip のルートになる**(ディレクトリごとは入らない)。
+      # だから pipeline.yml の Handler: index.handler が index.mjs の handler に届く。
+      - name: Lambda を固めて S3 に上げる
+        run: |
+          set -euo pipefail
+          # 【テンプレート置き場とは別のバケット】
+          # ここに上がる zip はスタックが S3Key で参照し続ける実体で、消すと
+          # ロールバックが失敗する。だから削除ルールを一切持たないバケットに置く。
+          # プレフィックスを付けるのは、オブジェクト名が中身のハッシュで読めないから
+          aws cloudformation package \
+            --template-file "$TEMPLATE" \
+            --s3-bucket "${LAMBDA_BUCKET_PREFIX}-${{ steps.pre.outputs.account }}" \
+            --s3-prefix slack-approval \
+            --output-template-file "$PACKAGED"
 
       - name: スタックを反映する
         env:
@@ -112,10 +199,18 @@ jobs:
           set -euo pipefail
           # CAPABILITY_NAMED_IAM は RoleName と ManagedPolicyName を明示しているため要る。
           # --no-fail-on-empty-changeset で「差分なし」を成功として扱う(deploy の既定は失敗)。
-          # --tags は app.yml と同じ 3 つ。ManagedBy は cloudformation のまま
+          # --tags は app.yml と同じ 3 つ。ManagedBy は cloudformation のまま。
+          # 渡すのは package が書き換えた後のテンプレート。
+          # 【--s3-bucket を付けるとテンプレートも S3 経由になる】
+          # deploy は --template-file(ローカルパス)しか受け取らないので、S3 に置きたければ
+          # アップロードごと任せる。cfn-apply.yml が aws s3 cp + --template-url で
+          # 手書きしているのと同じことを、deploy が代わりにやる。
+          # 置き場はテンプレート置き場のほう。30 日で消えるが、消えても困らない
           aws cloudformation deploy \
             --stack-name "${{ steps.pre.outputs.stack }}" \
-            --template-file "$TEMPLATE" \
+            --template-file "$PACKAGED" \
+            --s3-bucket "${TEMPLATE_BUCKET_PREFIX}-${{ steps.pre.outputs.account }}" \
+            --s3-prefix templates \
             --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" \
             --capabilities CAPABILITY_NAMED_IAM \
             --no-fail-on-empty-changeset \
@@ -139,6 +234,15 @@ jobs:
             echo '```'
             echo ""
             echo "[コンソールで開く]($(out PipelineConsoleUrl))"
+            echo ""
+            echo "#### Slack App に登録する URL"
+            echo ""
+            echo "Slack App の **Interactivity & Shortcuts → Request URL** に次を設定する"
+            echo "(初回のみ。→ [手順](../blob/main/docs/slack/README.md))。"
+            echo ""
+            echo '```'
+            echo "$(out SlackInteractionUrl)"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: dry run の差分を出す
