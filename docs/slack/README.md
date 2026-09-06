@@ -121,7 +121,198 @@ https://自分用.slack.com/archives/C0123ABCDEF
 - **`GuardrailPolicies` を省略すると `AdministratorAccess` が既定で適用される。** 必ず明示する
 - 許可しているのは `PutApprovalResult` / `GetPipelineState` / `GetPipelineExecution` の 3 つで、対象もこのパイプラインに限定してある
 
-承認の操作は、通知に付くボタンか `@Amazon Q` へのコマンドで行う。**どちらの見え方になるかは実機で確認する**(→ [フェーズ16 の設計書 §6](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md))。
+### 承認ボタンは自動では出ない。カスタムアクションで補う(実機で確認済み)
+
+**通知カードに Approve / Reject のボタンは付かない。** Chatbot は通知の種類に応じた既製のボタンを出すので「何も出ない」わけではなく、**承認だけが用意されていない。** CodePipeline の通知に最初から付くのは次の 2 つ。
+
+| 既製のボタン | 実行されるコマンド | このチャンネルでは |
+|---|---|---|
+| `Get info` | `codepipeline get-pipeline --name <パイプライン>` | **`AccessDenied` で失敗する**(下記) |
+| `Start Pipeline` | `codepipeline start-pipeline-execution` 相当 | 同じく許可していない |
+
+**`GuardrailPolicies` は AWS 製のボタンにも効く。** `Get info` を押すと実際にこうなる。
+
+```
+User: ...assumed-role/nuxt-java-practice-stg-chatbot-approve-role/chatbot-session-slack-U... is not
+authorized to perform: codepipeline:GetPipeline ... because no identity-based policy allows ...
+```
+
+許しているのは `GetPipelineState` であって `GetPipeline` ではない。**1 文字違いで弾かれているのは、ガードレールが設計どおり効いている証拠**なので直さない(パイプラインの定義を読みたいならコンソールのほうが速い)。エラーには**ロール名と Slack のセッション ID** も出るので、誰が叩いたかを追える。
+
+**承認だけ既製ボタンが無いのは、おそらくトークンのせい。** `Get info` も `Start Pipeline` もパイプライン名だけで実行できるが、承認は通知に無い値を要求する。
+
+**自分でボタンを作ることはできるが、1 クリックで承認は完結しない。** Chatbot の「Custom action」で CLI コマンドのボタンは作れる。ただし押したときに使える通知変数は次の 5 つしかない。
+
+| 変数 | 中身の例 |
+|---|---|
+| `$Pipeline` | `nuxt-java-practice-stg-app` |
+| `$Stage` / `$Action` | `Approve` / `Approve` |
+| `$CustomData` | `pipeline.yml` の `CustomData`(イメージタグが入っている) |
+| `$ExternalEntityLink` | 空 |
+
+**承認トークンが無い。** `put-approval-result` は `--token` が必須で、値は承認 1 件ごとに変わるため、固定のコマンドとして書けない。
+
+**トークンは「どの承認ゲートか」ではなく「そのゲートの、どの回か」を指している。** パイプライン名・ステージ名・アクション名は構成を変えない限り不変なので直書きできるが、トークンだけは実行のたびに変わる。おかげで**古い実行を誤って承認する事故**と**二重承認**が防がれている。IAM が「承認してよい人か」を見るのに対し、トークンは「どの承認について言っているのか」を見ている。
+
+**ただし「2 手」にはできる。トークンを自分で渡せばよい。** カスタムアクションで変数を追加すると、ボタンを押したときに **Chatbot が値を確認する画面を出す**ので、そこにトークンを貼れる。手順 → **§6-3**。
+
+結果として、承認の手段は 3 つある。
+
+| 手段 | 手数 | 準備 |
+|---|---|---|
+| **カスタムアクションボタン** | 2 クリック + 貼り付け | §6-3 で 3 つ作る |
+| **Slack でコマンドを打つ** | 2 コマンド | 不要 |
+| **コンソール** | 画面を開いて 1 クリック | 不要 |
+
+コマンドで打つ場合はこの 2 本。
+
+```
+@Amazon Q aws codepipeline get-pipeline-state --name nuxt-java-practice-stg-app --region ap-northeast-1
+@Amazon Q aws codepipeline put-approval-result --pipeline-name nuxt-java-practice-stg-app --stage-name Approve --action-name Approve --token <上で見えたトークン> --result summary="",status=Approved --region ap-northeast-1
+```
+
+`status` は `Approved` / `Rejected`。`GuardrailPolicies` が `GetPipelineState` も許しているのは、この 1 コマンド目のため。
+
+**トークン入りの通知が欲しければ別経路になる。** 承認アクションの `NotificationArn` に SNS トピックを指定すると、届くメッセージに `approval.token` が入る。世の中の「Slack で CodePipeline を承認する」記事はこれを Lambda で受けて対話メッセージを組み立てているが、**アプリ以外のコードを持たない方針**(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))なので採らない。appspec の Hooks を捨てたのと同じ判断。
+
+## 6-3. 承認ボタンを作る(カスタムアクション)
+
+> **実機で確認済み(2026-09-06)。** ①②は実際に作って動かした。③は②の `status` を変えるだけ。
+> 前提 → §6-2。**カスタムアクションは CloudFormation ではなくコンソールで作る手動作業**なので、
+> ワークスペースを作り直したら再作成が要る(→ §8)。
+
+### 承認は 2 手になる
+
+```
+① Show token を押す   → 出力の Token: をコピー
+② Approve / Reject を押す → 確認画面の Token に貼って実行
+```
+
+| ボタン | 何をするか |
+|---|---|
+| ① `ShowApprovalToken` | `get-pipeline-state` を実行してトークンを表示する |
+| ② `RejectDeploy` | トークンを貼って却下する |
+| ③ `ApproveDeploy` | トークンを貼って承認する(②の `status` 違い) |
+
+**先に②を作って試すとよい。** 却下は何も壊さない。③は押すと本当にデプロイが走る。
+
+### 入力する値
+
+Chatbot コンソール → 対象のチャンネル設定 → **Custom actions** → 作成。
+
+#### ① トークンを表示する
+
+| 画面 | 項目 | 入れる値 |
+|---|---|---|
+| Step 1 | Custom action name | `ShowApprovalToken` |
+| Step 1 | Custom action button text | `Show token` |
+| Step 1 | Custom action type | **CLI action** |
+| Step 2 | Define CLI command | 下記 |
+
+```
+codepipeline get-pipeline-state --name $Pipeline --region ap-northeast-1
+```
+
+- **name は識別子。** 画面の例が `CustomActionName` なので、空白なしの英数字にしておく
+- **button text は Slack のボタンに出る文字列。** 日本語が通るかは未確認。**このリポジトリは IAM の `--description` で「日本語は使えない」を踏んでいる**(→ [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) §2-2)ので、まず ASCII で作り、通ってから日本語を試すほうが切り分けやすい
+- **`$Pipeline` は直書きでもよい**(このリポジトリはパイプラインが 1 本)。変数にしておくのは prod を足したときに同じボタンを使い回すため
+- **`--query` は使わない。** Chatbot が JMESPath を受けるか未確認なので、まず素の出力で試す。出力が長くて Slack 側で切られるようなら、そこで初めて `--query "stageStates[?stageName=='Approve'].actionStates[0].latestExecution.token" --output text` を試す
+
+#### ② 却下する
+
+| 画面 | 項目 | 入れる値 |
+|---|---|---|
+| Step 1 | Custom action name | `RejectDeploy` |
+| Step 1 | Custom action button text | `Reject` |
+| Step 1 | Custom action type | **CLI action** |
+| Step 2 | Define CLI command | 下記 |
+| Step 2 | Add new variable | `Token` |
+
+```
+codepipeline put-approval-result --pipeline-name $Pipeline --stage-name $Stage --action-name $Action --token $Token --result summary="rejected from Slack",status=Rejected --region ap-northeast-1
+```
+
+- **`$Token` が肝。** 通知変数に無いので「Add new variable」で足す。**押すと Chatbot が確認画面を出し、そこで値を入れられる**(下記)
+- `$Pipeline` / `$Stage` / `$Action` は通知から来る。値はそれぞれ `nuxt-java-practice-stg-app` / `Approve` / `Approve`
+- `status` は `Approved` / `Rejected` の 2 択。**③を作るときはここだけ `Approved` に変える**
+- `summary` は空でもよいが、あとで実行履歴を見たときに経路が分かるので入れておく
+
+### 押したときの見え方
+
+**②③を押すと、実行前に確認画面が出る。**
+
+```
+Command Action
+  Action:   Approve
+  Pipeline: nuxt-java-practice-stg-app
+  Stage:    Approve
+  Token:    98a49d36-...        ← ここに①でコピーした値を入れる
+  I can run the command:
+    codepipeline put-approval-result --pipeline-name ... --token ... --status=Rejected ...
+  Run in account: 123456789012
+  [Select different variables]
+```
+
+通知から来る `$Action` / `$Pipeline` / `$Stage` は埋まった状態で、**実行するコマンド全文が見えてから確定できる**。「Select different variables」で入れ直せる。
+
+実行後は Slack に「I ran the command ...(role / account / region 付き)」が出る。**①のような読み取り専用コマンドでは "I ran the **read-only** command" と表示され、書き込み系と区別されている。**
+
+**却下すると通知が 2 通来る。**
+
+- `CodePipeline Manual Approval action FAILED`
+- `1 action failed in stage: Approve. Additional Information: rejected from Slack`
+
+2 通目の `Additional Information` は `--result summary=` に書いた文字列。**`summary` を空にすると「なぜ落ちたか」が通知から読めなくなる**ので、経路が分かる文言を入れておく。
+
+> **API の応答は `ApprovedAt` と返る。** 却下でもこのフィールド名になる(「承認処理を行った時刻」という意味)。
+> 却下したのに承認されたように見えるが、パイプラインの実行は `Failed` で終わっているので問題ない。
+
+### 結果
+
+**① は成立した(2026-09-06 実機)。**
+
+- **トークンは見えた。** `Approve` ステージ → `ActionName: Approve` → `LatestExecution` の
+  **`Token:`** の行。`Status: InProgress` の間だけ出る
+- **出力は切られなかった。** 4 ステージ分そのまま届いたので **`--query` は不要**
+- **`$Pipeline` は展開された。** 実行されたコマンドが Slack にそのまま表示される
+- **Chatbot は読み取り専用コマンドを区別している。** 実行結果に
+  「I ran the **read-only** command ...」と出る。どのロール・どのアカウント・どのリージョンで
+  実行したかも併記されるので、監査の手掛かりになる
+
+**トークンの値は `ActionExecutionId` と一致する。** 手動承認のトークンがそのアクション実行の ID
+そのものだから。ただし仕様として保証されているわけではないので、**コピーするのは `Token:` の行**。
+
+**② も成立した(同日)。**
+
+- **`$Token` は確認画面で入れられた。** 空文字で実行されることはなかった
+- **却下は通り、パイプラインの実行は `Failed` で終わった**
+- ③(`ApproveDeploy`)は②の `status` を `Approved` に変えるだけで作れる
+
+### なぜ 2 手なのか(1 手にできない理由)
+
+**CLI action が実行するのは AWS CLI コマンド 1 本で、シェルを通していない。** そのため
+`--token $(aws codepipeline get-pipeline-state ...)` のようなコマンド置換も、`&&` での連結も、
+パイプも使えない。`$Token` は Chatbot が**実行前に文字列を差し替えているだけ**で、
+値を計算する仕組みではないから、前のコマンドの出力を次に渡すことはできない。
+
+1 手にするなら残る道は 2 つ。
+
+| 方法 | 可否 |
+|---|---|
+| **Lambda action** | **採らない。** アプリ以外のコードを持たない方針(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)) |
+| **Automation runbook action** | **理屈上は可能。未検討。** SSM Automation は複数ステップを持ち、`aws:executeAwsApi` の出力を次のステップに渡せる。宣言的なドキュメントなのでアプリコードにはあたらず、`AWS::SSM::Document` として `pipeline.yml` に書けば IaC 化も進む |
+
+**Automation を採らないでいる理由は費用対効果。** SSM ドキュメントと Automation 用ロールでテンプレートが
+40〜60 行伸び、ガードレールに `ssm:StartAutomationExecution` と `iam:PassRole` を足すことになる。
+**1 人で使う環境で「2 手が 1 手になる」ための投資としては重い。** 必要になったら検討する。
+
+**残っている未確認**
+
+- button text に日本語が通るか(ASCII で作ったため未検証)
+- `AWS::Chatbot::CustomAction` で IaC 化できるか(できるなら `pipeline.yml` に移して手動作業を減らせる)
+- `aws:executeAwsApi` が `PutApprovalResult` を扱えるか(上の Automation 案を試すなら最初に確かめる点)
+
+**成立しなかった場合の代替**は §6-2 のとおり、コンソールか `@Amazon Q` への 2 コマンド。どちらも今のままで動く。
 
 ## 7. 反映して確かめる
 
