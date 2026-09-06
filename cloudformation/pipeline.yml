@@ -745,17 +745,33 @@ Resources:
   # 署名は独自の X-Slack-Signature ヘッダなので AWS から見ると匿名になる。
   # NotifyInvokePermission のように sns.amazonaws.com と書く相手がいない。
   #
-  # 【"*" でも無制限ではない】
+  # 【アクションは 2 つ要る。片方だけだと 403 になる(実際に踏んだ)】
+  # lambda:InvokeFunctionUrl だけでは足りず、lambda:InvokeFunction も要る。
+  # 足りないと URL は出来るのにすべて 403 Forbidden になり、しかも関数が
+  # 1 度も起動しないので CloudWatch Logs にも何も残らない。原因が見えにくい。
+  # **コンソールの関数ページが「2 つ付与せよ」と警告してくれる**ので、迷ったらそこを見る。
+  # AWS::Lambda::Permission は Action を 1 つしか取れないのでリソースを 2 つに分ける。
+  #
+  # 【"*" でも無制限ではない。効いているのは条件のほう】
   # FunctionUrlAuthType: NONE は条件キー lambda:FunctionUrlAuthType として効き、
   # 「認証なしの Function URL 経由の呼び出し」だけにこの許可を縛る。
-  # 許すのは lambda:InvokeFunctionUrl 1 アクション・この関数 1 つで、
-  # SDK からの lambda:InvokeFunction は含まれない。誰でも POST を投げられる
+  # **アクションが 2 つに増えても、範囲は広がらない。** SDK から
+  # lambda:InvokeFunction を叩くリクエストはこの条件キーを持たないので一致せず、
+  # 下の文では許可されない(許可の出所が別に要る)。誰でも POST を投げられる
   # ところまでが許可の範囲で、中身の正当性は署名検証(verify.mjs)が守る。
   InteractionUrlPermission:
     Type: AWS::Lambda::Permission
     Properties:
       FunctionName: !GetAtt InteractionFunction.Arn
       Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  InteractionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InteractionFunction.Arn
+      Action: lambda:InvokeFunction
       Principal: "*"
       FunctionUrlAuthType: NONE
 

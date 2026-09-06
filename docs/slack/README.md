@@ -270,10 +270,28 @@ nuxt-java-practice-stg-app のデプロイ承認をお願いします。
 
 **見るログが 2 つに分かれる。** どちらも **ap-northeast-1**(Chatbot と違って us-east-1 ではない)。
 
+**ただし「ログが空」自体が手掛かりになる。** Function URL の認可で弾かれた場合、関数は起動しないのでログは 1 行も出ない。切り分けはこの順で行う。
+
+```bash
+# ① 関数そのものは健全か(URL を経由しない)。401 が返れば署名検証まで正しく動いている
+aws lambda invoke --function-name nuxt-java-practice-stg-slack-interaction \
+  --payload '{}' /tmp/out.json --cli-binary-format raw-in-base64-out && cat /tmp/out.json
+
+# ② URL 経由はどうか。403 なら認可層、401 ならコードまで届いている
+curl -s -w '\nstatus=%{http_code}\n' \
+  "$(aws lambda get-function-url-config \
+      --function-name nuxt-java-practice-stg-slack-interaction \
+      --query FunctionUrl --output text)"
+```
+
+**①が 401 で②が 403 なら、原因は呼び出し許可で確定。** Slack を疑う必要はない。
+
 | 症状 | 見るところ |
 |---|---|
 | 承認待ちの通知が Slack に来ない | `/aws/lambda/nuxt-java-practice-<env>-slack-notify`。`slack_webhook_url` が SSM にあるか、値が正しいか。**そもそも SNS まで来ているか**は CodeStarNotifications のルールと SNS トピックのメトリクスで切り分ける |
 | 通知は来るがボタンが無い / 内容が汎用的 | 承認待ちだと判定できていない。**`notify` は生の `Sns.Message` をログに出す**ので、`detail` の形を見て判定条件を直す(→ [フェーズ17 の設計書](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)の未確認事項) |
+| ボタンを押すと「このアプリから403が返されました」 | **Function URL の呼び出し許可が足りない。** `curl <Function URL>` を直接叩いて再現するか確かめる(Slack は無関係)。**`lambda:InvokeFunctionUrl` だけでは足りず `lambda:InvokeFunction` も要る** —— コンソールの関数ページが警告を出してくれる。関数は 1 度も起動しないので**ログには何も残らない**(→ 下記) |
+| Interactivity のトグルが On にならない | **上と同じ原因。** Slack は保存時に Request URL の疎通を見るので、403 が返ると受理しない。**Slack 側をいくら触っても直らない** |
 | ボタンを押しても何も起きない | **Interactivity の Request URL を登録したか**(→ §6-3)。スタックを建て直した後は URL が変わっている |
 | ボタンを押すと Slack にエラーが出る | `/aws/lambda/nuxt-java-practice-<env>-slack-interaction`。`401` なら署名検証で落ちている(`slack_signing_secret` の値違い)。3 秒を超えた場合は Slack 側にタイムアウトが出る |
 | 「この承認はすでに終わっています」と返る | 正常。コンソールで承認済みか、タイムアウト済みか、`SUPERSEDED` で実行が入れ替わっている |
