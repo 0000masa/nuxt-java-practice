@@ -53,7 +53,7 @@ Terraform だと [1] と [2] が同じ資格情報になる(`terraform apply` �
 
 | ロール | 誰が引き受けるか | 権限の中身 | 使うワークフロー |
 |---|---|---|---|
-| `nuxt-java-practice-gha-cfn-stg` | GitHub Actions(OIDC) | インライン `DeployStack`(4 文) | `cfn-apply` / `cfn-destroy` |
+| `nuxt-java-practice-gha-cfn-stg` | GitHub Actions(OIDC) | インライン `DeployStack`(5 文) | `cfn-apply` / `cfn-destroy` / `pipeline-apply` / `pipeline-destroy` |
 | `nuxt-java-practice-cfn-service-stg` | **CloudFormation**(`--role-arn` で渡す) | 管理ポリシー `AdministratorAccess` | 上の 2 本から間接的に |
 | `nuxt-java-practice-gha-dbtask-stg` | GitHub Actions(OIDC) | インライン `RunDbTask`(5 文) | `db-task` |
 

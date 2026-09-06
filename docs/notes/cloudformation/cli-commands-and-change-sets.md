@@ -1058,7 +1058,7 @@ ImageTag 変更
     Properties:
       ResourceId: !Sub service/${Cluster}/${Service.Name}
 
-# 変更後(app.yml:1500 付近)
+# 変更後(当時。main では下の追記のとおり撤回した)
   ScalableTarget:
     DependsOn: Service
     Properties:
@@ -1105,6 +1105,33 @@ Modify | AWS::ECS::Service        | False | Service                 ← 本当�
 **判定の材料を出せていなかったのが、この調査を遠回りにした。** `describe-change-set` には `--include-property-values` があり、付けると `Details[].Target` に `BeforeValue` / `AfterValue` が入る(付けないと `null`)。付けていれば「前後で同じ文字列なのに変更扱い」がその場で読めた。→ §12 の課題。
 
 依存と参照の話 → [Terraform 経験者のための CloudFormation §4-2 / §4-5](./terraform-to-cloudformation.md)。
+
+**追記(2026-09-05):`main` ではこの静的化を撤回し、参照に戻した。**
+
+フェーズ16 で CodeDeploy に移り、`Service` の `TaskDefinition` が family 名の固定文字列になった(→ [ADR-0013](../../adr/0013-app-deploy-with-code-services.md))。上の鎖の 2 段目「`Service` が `Modify`(`TaskDefinition: !Ref AppTaskDefinition` が新 ARN になる)」が切れたので、3 以降が起きない。そもそも通常のリリースは CodePipeline の仕事で、CloudFormation を通らない。
+
+**この回避が要るのは `cfn-apply.yml` でイメージを更新している `github-actions-deploy` ブランチ側だけになった**(ブランチごとの方針 → [ADR-0012](../../adr/0012-deploy-method-per-branch.md))。上の記録はその凍結ブランチの説明としては今も正しい。
+
+戻したのは 4 か所。
+
+| 場所 | 変更後 | プロパティの性質 |
+|---|---|---|
+| `ScalableTarget.ResourceId` | `!Sub service/${Cluster}/${Service.Name}` | **createOnly** |
+| `CodeDeployDeploymentGroup.ECSServices` | `!Ref Cluster` / `!GetAtt Service.Name` | 更新可能 |
+| `CodeDeployDeploymentGroup.LoadBalancerInfo` の `TargetGroups` | `!GetAtt TargetGroupBlue.TargetGroupName` / green | 更新可能 |
+| `EcsRunningLessThanDesiredAlarm` の `ServiceName` 次元 2 か所 | `!GetAtt Service.Name` | 更新可能 |
+
+**下 3 つはそもそもガードに止まらない。** `Dynamic` になっても `RequiresRecreation` が `Always` でなければ `Replacement: False` どまりで、`Conditional` にはならない。あれらを静的にしていた動機は差分表のノイズ対策だけで、ノイズ自体が出なくなった以上、残す理由が無い。`ScalableTarget.ResourceId` だけは createOnly なので性質が違う。
+
+**残る代償。** `WebDesiredCount` を変えるなど `Service` 自身に手を入れる更新では、今でも `Service` が `Modify` に入るので `ScalableTarget` に `Conditional` が出てガードに止まる。ただし「イメージ更新のたび」ではなく「意図してサービスを触ったとき」だけなので、§7-2 の冒頭で懸念した形骸化(反射で `allow_replacement=true` を付ける手順化)は起きない。なお構築フローの 4 段目で `WebDesiredCount` が 0 → 1 になるときは `Condition` が偽から真に変わるため `ScalableTarget` は `Add` で入り、`Replacement` は出ない。
+
+**`DependsOn` は 2 つ消えた。** `ScalableTarget` と `CodeDeployDeploymentGroup` のもの。参照が戻れば依存の辺も戻る(上の「`DependsOn` が必要になったのは副作用のほう」の裏返し)。`Service` の `DependsOn: AppTaskDefinition` だけは残る。`TaskDefinition` を `!Ref` に戻すと CODE_DEPLOY 制御のサービスではスタック更新が落ちるため、こちらは参照を断ったままにするしかない。
+
+**ついでに直った不具合。** `TargetGroups` を `!Sub` の文字列で書いていた間、`TargetGroupGreen` はテンプレート内のどこからも参照されておらず、`DeploymentGroup` との間に依存の辺が無かった(`DependsOn` に書いてあったのは `Service` だけ)。`blue` は `Service` の `LoadBalancers` 経由で間接的に順序が保証されていたが、`green` は運任せだった。`!GetAtt` にしたことで辺ができた。
+
+**ここが `!Ref` ではなく `!GetAtt` なのは型の問題。** `TargetGroupInfo` の `Name` が要求するのはターゲットグループ**名**で、`!Ref TargetGroupBlue` が返すのは ARN。名前を返す属性は `TargetGroupName` のほう。同じブロックの `ListenerArns` が `!Ref HttpsListener` で書けているのは、あちらが ARN を要求しているから。
+
+**未検証:** この書き換え自体の差分。上の「外した予測」の裏返しで一度は差分に出るはずだが、今度は `Evaluation: Dynamic` になるので `True` ではなく `Conditional` になると読んでいる。実測していない。撤収中に建て直せば全リソースが `Add` なので、そもそもこのコストは発生しない。
 
 ### 7-3. ページング
 

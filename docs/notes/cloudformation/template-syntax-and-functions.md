@@ -1553,16 +1553,15 @@ Conditions:
 `app.yml` は 6 箇所で使っている。
 
 ```yaml
-# app.yml:732-734  拡張モニタリングが無効ならロールごと作らない
+# app.yml:733-735  拡張モニタリングが無効ならロールごと作らない
   RdsMonitoringRole:
     Type: AWS::IAM::Role
     Condition: EnhancedMonitoringEnabled
 
-# app.yml:1500-1503  タスク数 0 の段ではオートスケーリングを作らない
+# app.yml:1528-1530  タスク数 0 の段ではオートスケーリングを作らない
   ScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Condition: ServiceEnabled
-    DependsOn: Service
 ```
 
 **Terraform の `count = x ? 1 : 0` に相当するが、違いが 2 つある。**
@@ -1570,7 +1569,7 @@ Conditions:
 - **`count` は N 個作れるが、`Condition` は作る / 作らないの二値だけ**
 - **`count` はアドレスが `aws_foo.bar[0]` に変わるが、`Condition` は論理 ID を変えない**(0 個 ↔ 1 個の切り替えでハマる問題が無い)
 
-**注意: `Condition` が偽になったリソースを参照しているものがあると、スタック操作が失敗する。** 参照側にも同じ `Condition` を貼るか、`!If` で `AWS::NoValue` に落とす必要がある。`app.yml` の `ServiceEnabled` はオートスケーリング 3 リソースすべてに貼ってある(1460 / 1471 / 1485)のがその形。
+**注意: `Condition` が偽になったリソースを参照しているものがあると、スタック操作が失敗する。** 参照側にも同じ `Condition` を貼るか、`!If` で `AWS::NoValue` に落とす必要がある。`app.yml` の `ServiceEnabled` はオートスケーリング 3 リソースすべてに貼ってある(1530 / 1540 / 1554)のがその形。
 
 ### 6-4. `!If` — 値の出し分け
 
@@ -1722,20 +1721,21 @@ DependsOn:                        # 複数(ブロック形式)
 **(c) 参照をわざと断ったので、依存も一緒に消えたもの** — これが一番示唆的な実例。
 
 ```yaml
-# app.yml:1495-1503
-  # 【DependsOn: Service が要る理由】
-  # CloudFormation の作成順は Ref / GetAtt / Sub の参照から自動で組まれる。上の変更で
-  # Service への参照が消えた = 暗黙の依存も消えた。明示しないと Service と並列に作られ、
-  # まだ存在しないサービスを登録しようとして失敗する(タイミング次第で成否が変わる)。
-  ScalableTarget:
-    Type: AWS::ApplicationAutoScaling::ScalableTarget
-    Condition: ServiceEnabled
-    DependsOn: Service
+# app.yml:1429-1435
+  Service:
+    Type: AWS::ECS::Service
+    # TaskDefinition を !Ref から family 名の固定文字列に変えた結果、CloudFormation が
+    # 依存関係を推論できなくなった(参照が無いので暗黙の依存も無い)。明示しないと
+    # タスク定義と並列に作られ、まだ存在しない family を参照して失敗する。
+    # タイミング次第で成否が変わるので、通ってしまう回もある。
+    DependsOn: AppTaskDefinition
     Properties:
-      ResourceId: !Sub service/${Cluster}/${ProjectName}-${EnvName}-app
+      TaskDefinition: !Sub ${ProjectName}-${EnvName}-app
 ```
 
-`!GetAtt Service.Name` をやめて同じ文字列を静的に書いた結果、**依存の辺も消えた**。参照が依存を生むという仕組みが裏返しに見える例(なぜ参照を断ったかは → [CLI コマンドを読み解く §7-2](./cli-commands-and-change-sets.md))。
+`!Ref AppTaskDefinition` をやめて family 名を静的に書いた結果、**依存の辺も消えた**。参照が依存を生むという仕組みが裏返しに見える例。ここで参照を断っているのは CODE_DEPLOY 制御のサービスがリビジョン ARN を受け取れないためで、選択の余地が無い(→ [ADR-0013](../../adr/0013-app-deploy-with-code-services.md))。
+
+**同じ形が `ScalableTarget` にもあったが、`main` では撤回した。** あちらは `!GetAtt Service.Name` を静的文字列に置き換えて `DependsOn: Service` を足していたもので、動機は Change Set のガード対策だった。CodeDeploy に移って前提が消えたので参照に戻し、`DependsOn` も消している(経緯 → [CLI コマンドを読み解く §7-2 の追記](./cli-commands-and-change-sets.md))。
 
 ### 7-3. `DeletionPolicy` と `UpdateReplacePolicy`
 
@@ -1941,15 +1941,15 @@ Outputs:
 これは弱点であると同時に**使える性質**でもあり、`app.yml` はそれを利用している箇所がある。
 
 ```yaml
-# app.yml:2096-2100
-  # ここだけ !GetAtt のまま。Outputs は Change Set の Changes に現れないので、
-  # ScalableTarget やアラームで避けた「毎回 Dynamic になる」問題が起きない。
+# app.yml:2221-2225
+  # Outputs は Change Set の Changes に現れないので、リソース側で一度問題になった
+  # 「毎回 Dynamic になる」現象(→ ScalableTarget の長いコメント)がそもそも起きない場所。
   # 実物から読むぶん、名前の式を写し間違える余地も無い。
   ServiceName:
     Value: !GetAtt Service.Name
 ```
 
-リソース側では「毎回差分が出る」のを避けるために `!GetAtt` を静的文字列に置き換えた(→ §7-2)が、**`Outputs` は差分に出ないのでその心配が無く、`!GetAtt` のほうが安全**という判断。詳細は → [CLI コマンドを読み解く §7-2](./cli-commands-and-change-sets.md)。
+リソース側では一時期、「毎回差分が出る」のを避けるために `!GetAtt` を静的文字列に置き換えていた(→ §7-2)。**`Outputs` は差分に出ないのでその心配が無く、`!GetAtt` のほうが安全**という判断で、ここだけは最後まで参照のままだった。リソース側は `main` では参照に戻したので、今は書き方が揃っている。詳細は → [CLI コマンドを読み解く §7-2 の追記](./cli-commands-and-change-sets.md)。
 
 ---
 
