@@ -83,6 +83,11 @@ jobs:
             exit 1
           fi
 
+      # 【空にするのはスタック内のバケットだけ】
+      # nuxt-java-practice-lambda-artifacts-<アカウントID> には触らない。
+      # あちらはスタックの外にある常駐リソースで、しかも stg / prod で共用しているので、
+      # 片方の撤収で zip を消すともう片方のロールバックが失敗する(→ 手順書 §3-2)。
+      #
       # 素の CloudFormation には force_destroy 相当が無く、オブジェクトが残っている
       # バケットは削除に失敗する。cfn-destroy.yml と同じ形で空にしてから消す。
       # あちらと違って書き手(Firehose)が常駐していないので、本来リトライは要らない。
