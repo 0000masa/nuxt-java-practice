@@ -731,8 +731,26 @@ Resources:
       TargetFunctionArn: !GetAtt InteractionFunction.Arn
       AuthType: NONE
 
-  # Function URL は関数呼び出しの権限を別に要求する。
-  # FunctionUrlAuthType を揃えないと URL は出来るのに 403 になる
+  # 【Lambda は「URL があること」と「呼んでいいこと」を別に審査する】
+  # 上の AWS::Lambda::Url が決めるのは URL を生やすことだけ。呼び出しの可否は
+  # 関数のリソースベースポリシーで別に決まるので、この許可が無いと
+  # URL は出来ているのに 403 が返る。しかも FunctionUrlAuthType を Url 側と
+  # 揃えないと、この文があっても対象外になって同じく 403 になる。
+  # (コンソールで Function URL を作ると裏でこの文が自動で足される。
+  #  CloudFormation では自分で書く)
+  #
+  # 【Principal が "*" なのは、呼び出し元に名前が付かないから】
+  # Principal に書けるのは AWS の主体だけで、AWS が主体を識別できるのは
+  # SigV4 署名が付いたリクエストだけ。Slack が投げるのは素の HTTPS POST で、
+  # 署名は独自の X-Slack-Signature ヘッダなので AWS から見ると匿名になる。
+  # NotifyInvokePermission のように sns.amazonaws.com と書く相手がいない。
+  #
+  # 【"*" でも無制限ではない】
+  # FunctionUrlAuthType: NONE は条件キー lambda:FunctionUrlAuthType として効き、
+  # 「認証なしの Function URL 経由の呼び出し」だけにこの許可を縛る。
+  # 許すのは lambda:InvokeFunctionUrl 1 アクション・この関数 1 つで、
+  # SDK からの lambda:InvokeFunction は含まれない。誰でも POST を投げられる
+  # ところまでが許可の範囲で、中身の正当性は署名検証(verify.mjs)が守る。
   InteractionUrlPermission:
     Type: AWS::Lambda::Permission
     Properties:

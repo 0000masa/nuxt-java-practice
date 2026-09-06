@@ -10,8 +10,7 @@
   { "ParameterKey": "BuildImage",             "ParameterValue": "aws/codebuild/standard:7.0" },
   { "ParameterKey": "BuildTimeoutMinutes",    "ParameterValue": "30" },
 
-  { "ParameterKey": "SlackWorkspaceId",       "ParameterValue": "T0BT8V342DB" },
-  { "ParameterKey": "SlackChannelIdDeploy",   "ParameterValue": "C0C0MCTJ8G0" },
+  { "ParameterKey": "SsmParameterPath",       "ParameterValue": "/nuxt-java-practice/prod/" },
 
   { "ParameterKey": "LogRetentionDays",       "ParameterValue": "30" },
   { "ParameterKey": "ArtifactExpirationDays", "ParameterValue": "30" }
