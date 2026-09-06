@@ -1204,7 +1204,7 @@ Resources:
   # アプリのタスク定義。Flyway は走らせない(FLYWAY_ENABLED=false)。
   #
   # 【この定義は初回構築でだけ使われる】
-  # 2 代目以降は taskdef.json(リポジトリ直下)が正で、CodePipeline の Deploy アクションが
+  # 2 代目以降は deploy/taskdef.json が正で、CodePipeline の Deploy アクションが
   # そこから新しいリビジョンを register する。ここを消せないのは AWS::ECS::Service が
   # タスク定義の指定を必須にしているからで、WebDesiredCount=0 で作る 1 段目でも要る。
   #

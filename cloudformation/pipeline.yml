@@ -1,0 +1,601 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  アプリのデプロイパイプライン(CodePipeline / CodeBuild)。常駐スタック。
+
+# ============================================================================
+# 常駐スタック。app.yml(作り捨て)とは別に建てて、別に消す。
+# ============================================================================
+# 方針 → docs/adr/0013-app-deploy-with-code-services.md
+# 設計 → docs/superpowers/specs/2026-09-05-phase16-codepipeline-design.md
+# 適用 → .github/workflows/pipeline-apply.yml / pipeline-destroy.yml
+#
+# 【なぜ app.yml と分けるのか】
+# パイプラインを app.yml の中に置くと鶏と卵になる。スタックを作るには ImageTag が要り、
+# そのイメージを作るのはパイプラインで、そのパイプラインはスタックの中にある。
+# 実務でもパイプラインは IaC 管理するが、アプリのスタックとは別に置くのが定番で、
+# 理由は 3 つとも当てはまる。
+#   1. ライフサイクルが違う(環境を作り直してもパイプラインは残るべき)
+#   2. 自己参照になる(パイプラインが自分の入っているスタックを更新する形は避けたい)
+#   3. CI/CD 基盤と実行環境をアカウントで分ける構成が多い
+#
+# 【app.yml 側に残るもの】
+# CodeDeploy の Application と DeploymentGroup。DeploymentGroup は ALB のリスナー ARN と
+# ECS サービスを参照する必要があり、リスナー ARN は生成 ID を含むので予測できないため。
+# 逆にここが必要とするのは ApplicationName と DeploymentGroupName という文字列だけなので、
+# Export / ImportValue は使わず命名規則で繋ぐ。
+#
+# 【スタックが無い間もこのパイプラインは存在する】
+# その状態で回すと Source と Build は通り、承認待ちで止まる。承認しなければ Deploy に
+# 進まないので失敗もしない。これが初回構築のイメージを作る手段になる(→ 設計書の決定20)。
+
+Parameters:
+  ProjectName:
+    Type: String
+  EnvName:
+    Type: String
+    AllowedValues: [stg, prod]
+
+  # --- ソース ---
+  # 【CodeStar Connections は手動で作る常駐リソース】
+  # CloudFormation でも作れるが、作った直後は PENDING で、AWS コンソールで GitHub との
+  # 握手を人がやるまで AVAILABLE にならない。ADR-0011 の Slack ワークスペース認可と
+  # まったく同じ形で、しかも PENDING のままでもスタック作成は成功してしまう。
+  # このスタックは pipeline-destroy.yml で消す前提なので、中に入れると建て直すたびに
+  # 握手をやり直すことになる。手順 → docs/infrastructure/cloudformation-operations.md
+  #
+  # 【この値だけ params/pipeline-<env>.json に無い】
+  # ARN は arn:aws:codeconnections:<リージョン>:<アカウント ID>:connection/<uuid> の形で、
+  # アカウント ID を含む。このリポジトリは public なので、IAM ロールの ARN と同じく
+  # GitHub の Environment secret AWS_CODESTAR_CONNECTION_ARN に置き、pipeline-apply.yml が
+  # --parameter-overrides で足す(→ docs/infrastructure/github-secrets.md §2-3)。
+  ConnectionArn:
+    Type: String
+    Description: コンソールで作成して握手済みの CodeStar Connections の ARN(Environment secret から渡る)
+  FullRepositoryId:
+    Type: String
+    Description: オーナー/リポジトリ名(例 0000masa/nuxt-java-practice)
+  BranchName:
+    Type: String
+    Default: main
+
+  # --- ビルド ---
+  EcrRepositoryName:
+    Type: String
+  BuildComputeType:
+    Type: String
+    Default: BUILD_GENERAL1_MEDIUM
+    # npm ci と Gradle の依存解決を含むマルチステージビルドなので SMALL では厳しい。
+    # ローカルキャッシュはほぼ当たらない前提(→ 設計書 3-6)。
+    AllowedValues: [BUILD_GENERAL1_SMALL, BUILD_GENERAL1_MEDIUM, BUILD_GENERAL1_LARGE]
+  BuildImage:
+    Type: String
+    Default: aws/codebuild/standard:7.0
+  BuildTimeoutMinutes:
+    Type: Number
+    Default: 30
+    MinValue: 5
+    MaxValue: 480
+
+  # --- 通知と承認 ---
+  # ワークスペース ID もチャンネル ID も秘密ではない(認可済みの AWS アカウントからしか
+  # 使えない)。HostedZoneId と同じ扱いで params に平文で置く → ADR-0011 の帰結 4
+  SlackWorkspaceId:
+    Type: String
+  SlackChannelIdDeploy:
+    Type: String
+    Description: デプロイの承認と通知を流すチャンネル(#njp-deploy)
+
+  # --- その他 ---
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+  ArtifactExpirationDays:
+    Type: Number
+    Default: 30
+    Description: アーティファクトは再現可能なので溜め続ける意味がない
+
+Resources:
+  # ==========================================================================
+  # アーティファクト置き場
+  # ==========================================================================
+  # pipeline-destroy.yml は delete-stack の前にこれを空にする。空でないバケットが
+  # あると 15 分待たされた末に DELETE_FAILED になる(cfn-destroy.yml と同じ理由)。
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub ${ProjectName}-${EnvName}-pipeline-artifacts
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: expire-artifacts
+            Status: Enabled
+            ExpirationInDays: !Ref ArtifactExpirationDays
+          - Id: abort-incomplete-uploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+
+  # ==========================================================================
+  # CodeBuild
+  # ==========================================================================
+  BuildLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/codebuild/${ProjectName}-${EnvName}-build
+      RetentionInDays: !Ref LogRetentionDays
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: build
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${BuildLogGroup.Arn}:*
+              - Sid: Artifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                Resource: !Sub ${ArtifactBucket.Arn}/*
+              # GetAuthorizationToken だけはリソース指定ができない(トークンは
+              # レジストリ単位で、リポジトリに紐づかないため)
+              - Sid: EcrAuth
+                Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: "*"
+              - Sid: EcrPush
+                Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:DescribeImages
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource: !Sub arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${EcrRepositoryName}
+              # taskdef のプレースホルダに差し込む値をスタックから読む。
+              # 初回構築ではスタックがまだ無く、buildspec 側で握り潰して先へ進む
+              - Sid: ReadAppStack
+                Effect: Allow
+                Action: cloudformation:DescribeStacks
+                Resource: !Sub arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}-${EnvName}/*
+              # migrate 用タスク定義の登録。RegisterTaskDefinition はリソース指定ができない
+              - Sid: RegisterMigrateTaskDefinition
+                Effect: Allow
+                Action: ecs:RegisterTaskDefinition
+                Resource: "*"
+              # 【RegisterTaskDefinition だけでは足りない】
+              # taskdef-migrate.json に書いたロール ARN を ECS に引き渡す形になるので、
+              # iam:PassRole が別に審査される。RegisterTaskDefinition は上のとおり
+              # Resource を絞れないため、これが無いと「アカウント内の任意のロールを
+              # 指定したタスク定義を作れる」= 権限昇格の経路になる。
+              # Condition で渡し先を ECS に限定し、他サービスへの持ち出しも塞ぐ。
+              #
+              # 【task-role は渡さない】
+              # ここが register するのは migrate 用だけで、taskdef-migrate.json は
+              # executionRoleArn しか持たない(Flyway を流すだけで AWS API を叩かないため)。
+              # アプリ用の taskdef.json は taskRoleArn も持つが、あれを register するのは
+              # CodePipeline なので、渡す権利も向こうのロールにある(→ 下の PassTaskRoles)。
+              # migrate に taskRoleArn を足すときは、ここにも task-role を追加すること。
+              - Sid: PassTaskExecutionRole
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${EnvName}-task-execution-role
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - ecs-tasks.amazonaws.com
+
+  BuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-build
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      TimeoutInMinutes: !Ref BuildTimeoutMinutes
+      Source:
+        Type: CODEPIPELINE
+        # ソースルートからの相対パス(既定は直下の buildspec.yml)。
+        # デプロイに使うファイルは deploy/ にまとめてある
+        BuildSpec: deploy/buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      # 【ほぼ当たらないと分かったうえで入れている】
+      # 同じビルドホストに割り当てられたときだけ効く。AWS 自身が
+      # "This is not the best option if your builds are infrequent." と書いており、
+      # このリポジトリの使い方はまさにそれ。ただしテンプレート 3 行で外部リソースも
+      # 権限も増えないので、当たればラッキーという位置づけで置いておく。
+      # なお VPC 設定を入れるとローカルキャッシュは使えなくなる。
+      Cache:
+        Type: LOCAL
+        Modes:
+          - LOCAL_DOCKER_LAYER_CACHE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: !Ref BuildComputeType
+        Image: !Ref BuildImage
+        # docker build のために Docker デーモンが要る。
+        # Docker レイヤーキャッシュも privileged が前提
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: ENV_NAME
+            Value: !Ref EnvName
+          - Name: ECR_REPOSITORY
+            Value: !Ref EcrRepositoryName
+          # cfn-apply.yml が組み立てるスタック名と同じ規則
+          - Name: STACK_NAME
+            Value: !Sub ${ProjectName}-${EnvName}
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref BuildLogGroup
+
+  # ==========================================================================
+  # CodePipeline
+  # ==========================================================================
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-codepipeline-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pipeline
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Artifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:PutObject
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub ${ArtifactBucket.Arn}/*
+              - Sid: UseGitHubConnection
+                Effect: Allow
+                Action: codestar-connections:UseConnection
+                Resource: !Ref ConnectionArn
+              - Sid: StartBuild
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                Resource: !GetAtt BuildProject.Arn
+              # Deploy アクション(CodeDeployToECS)に必要な最小権限。
+              # → CodePipeline のアクションリファレンスに載っている一覧
+              - Sid: CodeDeployDeployment
+                Effect: Allow
+                Action:
+                  - codedeploy:CreateDeployment
+                  - codedeploy:GetDeployment
+                Resource: !Sub arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentgroup:${ProjectName}-${EnvName}-app/*
+              - Sid: CodeDeployApplication
+                Effect: Allow
+                Action:
+                  - codedeploy:GetApplication
+                  - codedeploy:GetApplicationRevision
+                  - codedeploy:RegisterApplicationRevision
+                Resource:
+                  - !Sub arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:application:${ProjectName}-${EnvName}-app
+              - Sid: CodeDeployConfig
+                Effect: Allow
+                Action: codedeploy:GetDeploymentConfig
+                Resource: !Sub arn:aws:codedeploy:${AWS::Region}:${AWS::AccountId}:deploymentconfig:*
+              # 【アプリのタスク定義を register するのはこのロール】
+              # CodeDeployToECS アクションが taskdef.json から新しいリビジョンを作る。
+              # CodeBuild ではない(CodeBuild が register するのは migrate 用だけ)
+              - Sid: RegisterAppTaskDefinition
+                Effect: Allow
+                Action: ecs:RegisterTaskDefinition
+                Resource: "*"
+              # こちらは taskdef.json を register するので 2 本とも渡す。
+              # CodeBuild 側が execution-role だけなのは、あちらが register するのが
+              # migrate 用(taskRoleArn を持たない)だけだから
+              - Sid: PassTaskRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${EnvName}-task-execution-role
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${EnvName}-task-role
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - ecs-tasks.amazonaws.com
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-app
+      # Triggers は V2 のパラメータ。V1 のまま書くと弾かれる
+      PipelineType: V2
+      # 既定と同じ。承認待ちのまま新しい push が来たら、後発が先発を追い越す。
+      # 古いコミットを承認してしまう事故が起きないほうを取る
+      ExecutionMode: SUPERSEDED
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      # 【Triggers を書くと既定の変更検知は無効になる】
+      # "When a trigger configuration is specified, default change detection for
+      #  repository and branch commits is disabled." と明記されている。
+      # したがってここに書いたフィルタが唯一の自動起動条件になる。
+      # ソースアクション側に DetectChanges: false は書かない(webhook ごと切れて
+      # フィルタも効かなくなる恐れがあるため)。
+      #
+      # 手動の StartPipelineExecution はこの設定と無関係にいつでも叩けるので、
+      # 「フィルタに合う push で自動 + いつでも手動」が両立する。
+      #
+      # cloudformation/** は入れない。テンプレートの反映は cfn-apply.yml の仕事なので、
+      # インフラを直しただけでイメージを作り直す意味がない。
+      Triggers:
+        - ProviderType: CodeStarSourceConnection
+          GitConfiguration:
+            SourceActionName: Source
+            Push:
+              - Branches:
+                  Includes:
+                    - !Ref BranchName
+                FilePaths:
+                  Includes:
+                    - backend/**
+                    - frontend/**
+                    - docker/**
+                    # ビルドコンテキストが `.` なので、除外設定はイメージの中身に効く
+                    - .dockerignore
+                    # ビルド手順・タスク定義・appspec。環境変数を足したときに
+                    # 反映されないと困るので、deploy/ の中身はまるごと対象にする
+                    #
+                    # 【ここは「リポジトリのパス」】
+                    # 下の Deploy アクションの *TemplatePath は「アーティファクト内のパス」で、
+                    # 字面が同じ deploy/ でも意味が違う。片方だけ直すと、
+                    # エラーは出ないのに自動起動しなくなる
+                    - deploy/**
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeStarSourceConnection
+                Version: "1"
+              Configuration:
+                ConnectionArn: !Ref ConnectionArn
+                FullRepositoryId: !Ref FullRepositoryId
+                BranchName: !Ref BranchName
+              OutputArtifacts:
+                - Name: SourceArtifact
+              RunOrder: 1
+
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref BuildProject
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+
+        # 【この承認は 2 つの役割を兼ねている】
+        #   1. 本来の役割: Slack で承認が下りるまでデプロイしない
+        #   2. パイプライン作成時に必ず走る初回実行を、ここで止める
+        #      (CreatePipeline トリガーの初回実行は無効化できない)
+        # 承認しなければ Deploy に進まないので、スタックがまだ無くても失敗しない。
+        # これが初回構築のイメージを作る手段になる(→ 設計書の決定20)
+        - Name: Approve
+          Actions:
+            - Name: Approve
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                # 通知は NotificationRule 経由で Chatbot に届くので、
+                # ここに NotificationArn(SNS)は指定しない
+                CustomData: !Sub "${ProjectName} (${EnvName}) をデプロイします。承認するとこのイメージが本番のリスナーに切り替わります。"
+              RunOrder: 1
+
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeployToECS
+                Version: "1"
+              Configuration:
+                # app.yml(作り捨て)にある CodeDeploy のリソースを名前で参照する。
+                # スタックが無ければここで失敗するが、それは正しい失敗
+                ApplicationName: !Sub ${ProjectName}-${EnvName}-app
+                DeploymentGroupName: !Sub ${ProjectName}-${EnvName}-app-dg
+                # buildspec.yml がプレースホルダを埋めて出したものを使う。
+                # Image1ArtifactName / Image1ContainerName は指定しない
+                # (どちらも Required: No。イメージ URI は buildspec が直接書き込むので
+                #  imageDetail.json 経由の差し込みが要らない)
+                #
+                # 【*TemplatePath は「アーティファクト内のパス」。リポジトリのパスではない】
+                # 中身を決めているのは deploy/buildspec.yml の artifacts.files で、
+                # base-directory を付けていないので deploy/ 付きのまま梱包される。
+                # 置き場を動かすときは、あちらと必ず対で直すこと
+                TaskDefinitionTemplateArtifact: BuildArtifact
+                TaskDefinitionTemplatePath: deploy/taskdef.json
+                AppSpecTemplateArtifact: BuildArtifact
+                AppSpecTemplatePath: deploy/appspec.yaml
+              InputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+
+  # ==========================================================================
+  # Slack への通知と、Slack からの承認
+  # ==========================================================================
+  # 方針 → ADR-0013 の「結果として生じること」6
+  #
+  # 【既存のアラート用 2 本(app.yml)とは別に建てる】
+  # あちらは GuardrailPolicies: AWSDenyAll で、通知の一方向だけだから権限ゼロという
+  # 判断だった(→ ADR-0011)。承認には codepipeline:PutApprovalResult が要るので、
+  # あちらを緩めるのではなく、承認専用の設定をここに 3 本目として建てる。
+  #
+  # 【GuardrailPolicies を省略してはいけない】
+  # 省略すると AdministratorAccess が既定で適用される。必ず明示する。
+  ChatbotGuardrailPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${ProjectName}-${EnvName}-chatbot-approve-guardrail
+      Description: Slack から実行できる操作の上限。承認と状態確認だけ
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - codepipeline:PutApprovalResult
+              - codepipeline:GetPipelineState
+              - codepipeline:GetPipelineExecution
+            Resource:
+              - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
+              - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app/*
+
+  # チャンネルロール。GuardrailPolicies と AND されるので、実効権限は両方の積になる。
+  # 信頼するプリンシパルは chatbot.amazonaws.com(app.yml の ChatbotRole と同じ。
+  # あちらは stg の実機で通っている)。
+  ChatbotApproveRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-chatbot-approve-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: chatbot.amazonaws.com
+            Action: sts:AssumeRole
+      # 承認の権限。GuardrailPolicies と同じものをロール側にも付ける
+      ManagedPolicyArns:
+        - !Ref ChatbotGuardrailPolicy
+      Policies:
+        # app.yml の ChatbotRole と同じ NotificationsOnly。
+        # 通知カードの描画に使う読み取りで、GuardrailPolicies 側では許していないので
+        # Slack から人が叩くことはできない(AND で効くため)
+        - PolicyName: NotificationsOnly
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudwatch:Describe*
+                  - cloudwatch:Get*
+                  - cloudwatch:List*
+                Resource: "*"
+
+  DeployApprovalChannel:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ${ProjectName}-${EnvName}-deploy
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelIdDeploy
+      IamRoleArn: !GetAtt ChatbotApproveRole.Arn
+      GuardrailPolicies:
+        - !Ref ChatbotGuardrailPolicy
+      # false にすると、チャンネルの全員がチャンネルロールの権限で操作できる。
+      # 個人ごとにロールを紐づけたいなら true にするが、1 人で使うので false
+      UserRoleRequired: false
+      # 承認が権限で弾かれたときの手掛かりが /aws/chatbot/<ConfigurationName> に出る。
+      # このチャンネルは通知だけでなく承認も担うので、app.yml の 2 本より切実。
+      # ロググループは Chatbot が us-east-1 に自分で作る(このスタックのリージョンではない)。
+      # スタックの外にあるので撤収しても残り、保持期間は既定の無期限。
+      # → docs/slack/README.md §8-2
+      LoggingLevel: ERROR
+
+  # 【SNS トピックを挟まない】
+  # CodeStar Notifications は Chatbot のチャンネル設定を直接ターゲットにできる
+  # (TargetType: AWSChatbotSlack)。アラート系(app.yml)が SNS を挟んでいるのは
+  # CloudWatch アラームが SNS にしか送れないからで、こちらにはその制約が無い。
+  PipelineNotificationRule:
+    Type: AWS::CodeStarNotifications::NotificationRule
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-pipeline
+      DetailType: FULL
+      # 【!GetAtt Pipeline.Arn ではなく静的な文字列にする】
+      # ARN 自体は !GetAtt Pipeline.Arn で取れる(Ref は名前を返すので使えない)。
+      # だが Resource は createOnly(Update requires: Replacement)で、Pipeline は
+      # Stages や Triggers を直すたびに更新対象に入る。更新対象への GetAtt は
+      # Change Set で解決されない(Evaluation: Dynamic)ため、このルールに
+      # Replacement: Conditional が付き、そのたびに allow_replacement=true が要る。
+      # パイプライン名は固定文字列なので、同じものを直接書いて静的に確定させる。
+      # → app.yml の ScalableTarget / CodeDeployDeploymentGroup と同じ理由。
+      # 下の Targets が !Ref のままなのは、あちらが更新可能なプロパティだから。
+      Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
+      EventTypeIds:
+        # 承認まわり。needed が「Slack で承認してください」の本体
+        - codepipeline-pipeline-manual-approval-needed
+        - codepipeline-pipeline-manual-approval-succeeded
+        - codepipeline-pipeline-manual-approval-failed
+        # 失敗を見逃さないための通知。CodeDeploy のロールバックもここに出る
+        - codepipeline-pipeline-pipeline-execution-failed
+        - codepipeline-pipeline-action-execution-failed
+        # 締めの 1 通。これが来たらデプロイは終わっている
+        - codepipeline-pipeline-pipeline-execution-succeeded
+      Targets:
+        - TargetType: AWSChatbotSlack
+          TargetAddress: !Ref DeployApprovalChannel
+
+Outputs:
+  PipelineName:
+    Value: !Ref Pipeline
+
+  PipelineConsoleUrl:
+    Description: 承認や実行状況を見る画面
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view?region=${AWS::Region}
+
+  BuildProjectName:
+    Value: !Ref BuildProject
+
+  ArtifactBucketName:
+    Description: pipeline-destroy.yml が空にするバケット
+    Value: !Ref ArtifactBucket

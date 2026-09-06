@@ -1,0 +1,151 @@
+# デプロイパイプラインの常駐スタックを作成/更新する(フェーズ16)。
+#
+# 方針 → docs/adr/0013-app-deploy-with-code-services.md
+# 設計 → docs/superpowers/specs/2026-09-05-phase16-codepipeline-design.md の決定11
+#
+# 【ADR-0009 の「唯一の呼び出し元」との関係】
+# ADR-0009 は aws cloudformation の呼び出しを cfn-apply.yml に集約すると決めたが、
+# その「唯一」は cloudformation/app.yml に対してのものと読み替える(ADR に追記済み)。
+# あの集約が守りたかったのは Change Set の差分表示・Replacement ガード・スタック状態の
+# 前提チェックで、pipeline.yml にはどれも意味が無い。RDS も ECS も無く、
+# 作り直しで失われるデータも無いので aws cloudformation deploy で足りる。
+#
+# 【テンプレートを S3 に置かない】
+# app.yml は 51,200 バイト(リクエストに直接載せられる上限)を超えているので S3 経由が
+# 必須だったが(→ ADR-0008)、pipeline.yml は 25KB 程度なので直接渡せる。
+name: パイプラインのスタックを反映
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 対象環境
+        type: choice
+        options: [stg]
+        default: stg
+      dry_run:
+        description: Change Set を作って差分を見るだけで実行しない
+        type: boolean
+        default: false
+
+env:
+  AWS_REGION: ap-northeast-1
+  TEMPLATE: cloudformation/pipeline.yml
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: pipeline-stack-${{ inputs.env }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: AWS に AssumeRole する(OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # 前提が崩れている状態で叩かれたときは、AWS の生のエラーではなく
+      # 「代わりに何をすべきか」を出して落ちる(cfn-apply.yml と同じ考え方)。
+      - name: 前提を確かめる
+        id: pre
+        env:
+          PARAMS: cloudformation/params/pipeline-${{ inputs.env }}.json
+          # ConnectionArn だけ params に置かず Secret から渡す。ARN に AWS アカウント ID が
+          # 入っていて、このリポジトリは public だから(IAM ロールの ARN を Secret にしたのと
+          # 同じ理由 → docs/infrastructure/github-secrets.md §2-3)。
+          # Secret 経由なら実行ログでも *** にマスクされる。
+          CONNECTION_ARN: ${{ secrets.AWS_CODESTAR_CONNECTION_ARN }}
+        run: |
+          set -euo pipefail
+          echo "stack=nuxt-java-practice-${{ inputs.env }}-pipeline" >> "$GITHUB_OUTPUT"
+
+          # プレースホルダのまま流すと、スタックは成功するのにパイプラインが
+          # ソースを取れない(緑なのに機能していない、という一番厄介な壊れ方)。
+          if grep -q 'REPLACE_ME_' "$PARAMS"; then
+            echo "::error::$PARAMS にプレースホルダが残っています。埋めてから再実行してください"
+            echo "::error::手順 → docs/infrastructure/cloudformation-operations.md §12-3"
+            grep -n 'REPLACE_ME_' "$PARAMS" >&2
+            exit 1
+          fi
+
+          # 登録していない Secret は空文字で降りてくる(名前違い、Environment の付け忘れも同じ)。
+          # 空のまま流すと ConnectionArn が空で渡り、AWS 側の分かりにくいエラーになる
+          if [ -z "$CONNECTION_ARN" ]; then
+            echo "::error::Environment '${{ inputs.env }}' の secret AWS_CODESTAR_CONNECTION_ARN が空です"
+            echo "::error::CodeStar Connections をコンソールで作成し GitHub と握手してから登録してください"
+            echo "::error::手順 → docs/infrastructure/github-secrets.md §2-3"
+            exit 1
+          fi
+
+          # 握手が済んでいない接続は PENDING のまま。この状態でもスタックは作れてしまうので、
+          # ここで確かめる。AVAILABLE 以外なら止める
+          status=$(aws codestar-connections get-connection --connection-arn "$CONNECTION_ARN" \
+            --query Connection.ConnectionStatus --output text)
+          if [ "$status" != "AVAILABLE" ]; then
+            echo "::error::CodeStar Connections が $status です。コンソールで「保留中の接続を更新」から GitHub と握手してください"
+            exit 1
+          fi
+          echo "接続: AVAILABLE"
+
+          # params ファイル(CreateChangeSet 形式)を deploy が受ける Key=Value 形式に直す。
+          # 値に空白が入らない前提。入るようになったらここを見直すこと。
+          # ConnectionArn はここに混ぜない(GITHUB_OUTPUT に書くとマスクの効かない
+          # 経路が増えるため)。deploy のステップで Secret から直接足す
+          overrides=$(jq -r '.[] | "\(.ParameterKey)=\(.ParameterValue)"' "$PARAMS" | tr '\n' ' ')
+          echo "overrides=$overrides" >> "$GITHUB_OUTPUT"
+
+      - name: スタックを反映する
+        env:
+          CONNECTION_ARN: ${{ secrets.AWS_CODESTAR_CONNECTION_ARN }}
+        run: |
+          set -euo pipefail
+          # CAPABILITY_NAMED_IAM は RoleName と ManagedPolicyName を明示しているため要る。
+          # --no-fail-on-empty-changeset で「差分なし」を成功として扱う(deploy の既定は失敗)。
+          # --tags は app.yml と同じ 3 つ。ManagedBy は cloudformation のまま
+          aws cloudformation deploy \
+            --stack-name "${{ steps.pre.outputs.stack }}" \
+            --template-file "$TEMPLATE" \
+            --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" \
+            --capabilities CAPABILITY_NAMED_IAM \
+            --no-fail-on-empty-changeset \
+            --tags Project=nuxt-java-practice Env=${{ inputs.env }} ManagedBy=cloudformation \
+            --parameter-overrides ${{ steps.pre.outputs.overrides }} ConnectionArn="$CONNECTION_ARN" \
+            ${{ inputs.dry_run && '--no-execute-changeset' || '' }}
+
+      - name: 結果をサマリに出す
+        if: ${{ success() && !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          json=$(aws cloudformation describe-stacks --stack-name "${{ steps.pre.outputs.stack }}" --output json)
+          out() { echo "$json" | jq -r --arg k "$1" '.Stacks[0].Outputs[] | select(.OutputKey == $k) | .OutputValue'; }
+          {
+            echo "### パイプラインを反映しました(${{ inputs.env }})"
+            echo ""
+            echo '```'
+            echo "パイプライン: $(out PipelineName)"
+            echo "ビルド      : $(out BuildProjectName)"
+            echo "成果物置き場: $(out ArtifactBucketName)"
+            echo '```'
+            echo ""
+            echo "[コンソールで開く]($(out PipelineConsoleUrl))"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: dry run の差分を出す
+        if: ${{ success() && inputs.dry_run }}
+        run: |
+          {
+            echo "### dry run のため実行していません"
+            echo ""
+            echo "作られた Change Set はコンソールから確認できます。反映するには dry_run=false で再実行してください。"
+          } >> "$GITHUB_STEP_SUMMARY"
