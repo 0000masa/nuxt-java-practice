@@ -1,0 +1,25 @@
+# CodeDeploy(ECS Blue/Green)のデプロイ定義。
+#
+# 方針 → docs/adr/0013-app-deploy-with-code-services.md
+#
+# 【TaskDefinition をプレースホルダのままにしておく】
+# CodePipeline の CodeDeployToECS アクションが taskdef.json から新しいリビジョンを
+# register し、その ARN でこの <TASK_DEFINITION> を置換する。
+# 「CodeBuild が register して ARN をここに埋める」形は取れない
+# (TaskDefinitionTemplateArtifact が Required: Yes で、register するのはアクション自身)。
+#
+# 【Hooks を書かない】
+# ECS の appspec の Hooks(BeforeInstall / AfterInstall / AfterAllowTestTraffic /
+# BeforeAllowTraffic / AfterAllowTraffic)は Lambda 関数でしか実装できない。
+# アプリケーション以外のコードを持たない方針(→ ADR-0011)なので使わない。
+# 結果として「green を確認してから切り替える」はできず、承認は Build と Deploy の間に置く。
+version: 0.0
+Resources:
+  - TargetService:
+      Type: AWS::ECS::Service
+      Properties:
+        TaskDefinition: "<TASK_DEFINITION>"
+        LoadBalancerInfo:
+          ContainerName: "app"
+          ContainerPort: 8080
+        PlatformVersion: "LATEST"
