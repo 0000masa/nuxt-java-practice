@@ -3,6 +3,9 @@
 日付: 2026-08-28
 ステータス: accepted
 
+**デプロイ承認については [ADR-0014](./0014-slack-approval-with-lambda.md) で変更した**(アラート通知の判断はここのまま有効。
+覆るのは「アプリケーション以外のコードを持ちたくない」という原則の適用範囲だけ)
+
 ## 決定
 
 [ADR-0010](./0010-monitoring-in-ephemeral-stack.md) で作った検知層の通知先を、**SNS のメール購読から Slack に置き換える。** 配線は **Amazon Q Developer in chat applications(旧 AWS Chatbot)** に任せ、**Incoming Webhook も Lambda も使わない。**

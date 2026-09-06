@@ -6,6 +6,9 @@
 **[ADR-0007](./0007-app-deploy-inside-cloudformation.md) を supersede する**(`main` ブランチにおいて。
 `github-actions-deploy` ブランチでは ADR-0007 が引き続き有効 → [ADR-0012](./0012-deploy-method-per-branch.md))
 
+**デプロイ承認の実現手段は [ADR-0014](./0014-slack-approval-with-lambda.md) で変更した**(下記「結果として生じること」6 の
+「Slack 承認は Chatbot で行う」「Lambda は増えない」は覆っている。Code 系に移すという決定そのものは有効)
+
 ## 決定
 
 `main` ブランチで、**アプリのイメージ更新を CodePipeline + CodeBuild + CodeDeploy で行う。**
