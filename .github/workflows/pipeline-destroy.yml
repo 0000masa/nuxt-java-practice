@@ -1,0 +1,146 @@
+# デプロイパイプラインの常駐スタックを削除する(フェーズ16)。
+#
+# 【実務では用意しないもの】
+# パイプラインは常駐リソースで、普通は消さない。それでも用意しておくのは、
+# 作って壊して覚えるためのリポジトリだから。ただし壊すと次の 2 つが要る。
+#   - CodeStar Connections 自体は残る(スタックの外にあるので握手はやり直さなくてよい)
+#   - 建て直すと ArtifactBucket は空から始まる。過去の実行履歴も消える
+#
+# 【app.yml のスタックとは独立している】
+# アプリのスタックが建っていても、このスタックだけ消せる(参照は名前だけで
+# Export / ImportValue を使っていないため)。逆も同じ。
+name: パイプラインのスタックを削除
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 対象環境
+        type: choice
+        options: [stg]
+        default: stg
+      confirm:
+        description: 削除する場合は destroy と入力する
+        type: string
+        required: true
+
+env:
+  AWS_REGION: ap-northeast-1
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: pipeline-stack-${{ inputs.env }}
+  cancel-in-progress: false
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    timeout-minutes: 30
+
+    steps:
+      - name: 入力を確かめる
+        run: |
+          if [ "${{ inputs.confirm }}" != "destroy" ]; then
+            echo "::error::confirm に destroy と入力してください"
+            exit 1
+          fi
+
+      - name: AWS に AssumeRole する(OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_CFN_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: スタックの存在を確かめる
+        id: check
+        run: |
+          set -uo pipefail
+          stack="nuxt-java-practice-${{ inputs.env }}-pipeline"
+          echo "stack=$stack" >> "$GITHUB_OUTPUT"
+          if aws cloudformation describe-stacks --stack-name "$stack" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "スタックが存在しないので何もしません"
+          fi
+
+      # 進行中の実行があると、削除の途中でアーティファクトが書き込まれて
+      # BucketNotEmpty になりうる。先に止まっていることを確かめる
+      - name: 進行中の実行が無いか確かめる
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          pipeline="nuxt-java-practice-${{ inputs.env }}-app"
+          # パイプラインが既に無い(前回の削除が途中で失敗した等)場合もあるので握り潰す
+          state=$(aws codepipeline get-pipeline-state --name "$pipeline" --output json 2>/dev/null || echo '{}')
+          running=$(echo "$state" | jq -r '[.stageStates[]?.latestExecution?.status // empty] | map(select(. == "InProgress")) | length')
+          if [ "${running:-0}" != "0" ]; then
+            echo "::error::パイプラインに進行中の実行があります。承認待ちなら却下するか、完了を待ってから実行してください"
+            exit 1
+          fi
+
+      # 素の CloudFormation には force_destroy 相当が無く、オブジェクトが残っている
+      # バケットは削除に失敗する。cfn-destroy.yml と同じ形で空にしてから消す。
+      # あちらと違って書き手(Firehose)が常駐していないので、本来リトライは要らない。
+      # それでも 1 回だけやり直すのは、直前に終わったばかりの実行が
+      # アーティファクトを書き終えていない可能性を潰すため。
+      - name: バケットを空にしてスタックを削除する
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          set -euo pipefail
+          stack="${{ steps.check.outputs.stack }}"
+
+          bucket=$(aws cloudformation describe-stacks --stack-name "$stack" \
+            --query "Stacks[0].Outputs[?OutputKey=='ArtifactBucketName'].OutputValue | [0]" --output text)
+
+          empty_bucket() {
+            if [ -n "$bucket" ] && [ "$bucket" != "None" ]; then
+              echo "空にします: s3://$bucket"
+              aws s3 rm "s3://$bucket" --recursive
+            fi
+          }
+
+          # サービスロールを明示する理由は cfn-destroy.yml と同じ。
+          # 紐づいていないスタックだと Actions 側のロールで削除が試みられ、
+          # リソースを消せずに DELETE_FAILED になる
+          delete_stack() {
+            aws cloudformation delete-stack --stack-name "$stack" \
+              --role-arn "${{ secrets.AWS_CFN_SERVICE_ROLE_ARN }}" &&
+            aws cloudformation wait stack-delete-complete --stack-name "$stack"
+          }
+
+          empty_bucket
+          if delete_stack; then
+            exit 0
+          fi
+
+          echo "::warning::1 回目の削除に失敗しました。失敗したリソースは以下です"
+          aws cloudformation describe-stack-events --stack-name "$stack" \
+            --query "StackEvents[?ResourceStatus=='DELETE_FAILED'].[LogicalResourceId,ResourceStatusReason]" \
+            --output text | head -20 || true
+
+          echo "バケットを空にして 1 回だけやり直します"
+          empty_bucket
+          delete_stack
+
+      - name: 結果をサマリに出す
+        if: always()
+        run: |
+          {
+            echo "### パイプラインの撤収(${{ inputs.env }})"
+            echo ""
+            if [ "${{ steps.check.outputs.exists }}" != "true" ]; then
+              echo "スタックが存在しなかったため、何もしていません。"
+            elif [ "${{ job.status }}" = "success" ]; then
+              echo "削除しました。"
+              echo ""
+              echo "**CodeStar Connections は残っています**(スタックの外にある常駐リソース)。"
+              echo "建て直すときに GitHub との握手をやり直す必要はありません。"
+            else
+              echo "失敗しました。上のログで DELETE_FAILED になったリソースを確認してください。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

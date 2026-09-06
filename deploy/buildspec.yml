@@ -1,0 +1,205 @@
+# CodeBuild のビルド定義(フェーズ16)。
+#
+# 方針 → docs/adr/0013-app-deploy-with-code-services.md
+# 設計 → docs/superpowers/specs/2026-09-05-phase16-codepipeline-design.md
+#
+# 【このファイルがやること】
+#   1. イメージタグを決める(コミットの短縮 SHA)
+#   2. 既に ECR にあるなら、ビルドと push を飛ばす
+#   3. 無ければビルドして push する
+#   4. deploy/taskdef.json / deploy/taskdef-migrate.json のプレースホルダを、スタックの実際の値で埋める
+#   5. migrate 用のタスク定義だけ、ここで register する
+#   6. deploy/taskdef.json と deploy/appspec.yaml をアーティファクトとして出す(Deploy アクションが使う)
+#
+# 【アプリのタスク定義はここでは register しない】
+# CodePipeline の CodeDeployToECS アクションは TaskDefinitionTemplateArtifact を
+# 必須で要求し、register するのはアクション自身である。ここが出すのは埋めたテンプレート。
+# 一方 migrate 用のタスク定義はどのアクションも面倒を見ないので、ここで register する。
+#
+# 【パスはすべてソースルートからの相対】
+# このファイル自体は deploy/ にあるが、CodeBuild のカレントディレクトリは
+# ソースルート(CODEBUILD_SRC_DIR)であってこのファイルの場所ではない。
+# docker build のコンテキスト `.` も -f docker/app/Dockerfile も deploy/taskdef.json も、
+# すべてソースルート基準で書く。
+#
+# 【必要な環境変数(CodeBuild プロジェクト側で渡す)】
+#   PROJECT_NAME / ENV_NAME / ECR_REPOSITORY / STACK_NAME
+version: 0.2
+
+env:
+  # 承認の通知や後続アクションから参照できるようにしておく
+  exported-variables:
+    - IMAGE_TAG
+    - IMAGE_URI
+    - IMAGE_PUSHED
+
+phases:
+  pre_build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+
+        ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+        REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_DEFAULT_REGION}.amazonaws.com"
+
+        # CodeStar Connections のソースでは完全なコミット SHA が入る。
+        # ecr-push.yml が ${GITHUB_SHA::7} を使っていたのと同じ 7 文字に揃える
+        IMAGE_TAG="${CODEBUILD_RESOLVED_SOURCE_VERSION:0:7}"
+        IMAGE_URI="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+        echo "イメージ: ${IMAGE_URI}"
+
+        # ECR リポジトリはタグの上書きを禁止(IMMUTABLE)しているので、同じタグへの push は
+        # 必ず失敗する。同じコミットで 2 回パイプラインを回すのは普通に起きる操作なので、
+        # 先に調べて飛ばす。「見つからない」以外のエラー(権限不足・リポジトリ名の間違い)を
+        # 「無いからビルドしよう」と取り違えないよう、例外の種類で分けている。
+        if error=$(aws ecr describe-images \
+            --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag="$IMAGE_TAG" 2>&1 >/dev/null); then
+          IMAGE_EXISTS=true
+          echo "同じタグのイメージが既にあります。ビルドと push は飛ばします"
+        elif echo "$error" | grep -q 'ImageNotFoundException'; then
+          IMAGE_EXISTS=false
+        else
+          echo "$error" >&2
+          exit 1
+        fi
+
+        aws ecr get-login-password --region "$AWS_DEFAULT_REGION" \
+          | docker login --username AWS --password-stdin "$REGISTRY"
+
+        # 後続フェーズは別プロセスなので、シェル変数は引き継がれない。ファイルに書いて渡す
+        {
+          echo "export ACCOUNT_ID=$ACCOUNT_ID"
+          echo "export REGISTRY=$REGISTRY"
+          echo "export IMAGE_TAG=$IMAGE_TAG"
+          echo "export IMAGE_URI=$IMAGE_URI"
+          echo "export IMAGE_EXISTS=$IMAGE_EXISTS"
+        } > /tmp/build.env
+
+  build:
+    # 【ABORT を明示する】
+    # CodeBuild の post_build は既定で「build が失敗しても」走る。ここでは
+    # ビルドに失敗しているのにタスク定義を register してしまう経路になるので止める。
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+        . /tmp/build.env
+
+        if [ "$IMAGE_EXISTS" = "true" ]; then
+          echo "スキップ"
+          export IMAGE_PUSHED=false
+        else
+          # 【buildx ではなく素の docker build を使う】
+          # ecr-push.yml は buildx の GitHub Actions キャッシュ(type=gha)を使っていたが、
+          # あれは Actions ランナーにしか無い認証情報で喋るものなので CodeBuild では使えない。
+          # 代わりに CodeBuild の LOCAL_DOCKER_LAYER_CACHE を使うが、これは
+          # 「Docker デーモンのレイヤーキャッシュ」であって、buildx の docker-container
+          # ドライバは独自のキャッシュを持つため当たらない。素の docker build なら
+          # デーモンのイメージストアに層が残るので、同じホストに当たったときだけ効く。
+          #
+          # なお AWS 自身が「ビルドが稀ならローカルキャッシュは向かない」と書いており、
+          # このリポジトリの使い方ではほぼ当たらない。5〜8 分かかる前提で運用する。
+          #
+          # provenance の除外は指定していない。ecr-push.yml が --provenance=false を
+          # 付けていたのは buildx が既定でアテステーションを付けてイメージインデックスに
+          # してしまうためで、素の docker build ではそもそも付かない。
+          #
+          # Fargate の既定アーキテクチャは X86_64。CodeBuild のホストも x86_64 なので
+          # 一致するが、取り違えると exec format error で起動しないので明示しておく。
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/amd64 \
+            -f docker/app/Dockerfile \
+            -t "$IMAGE_URI" \
+            .
+          docker push "$IMAGE_URI"
+          export IMAGE_PUSHED=true
+        fi
+        echo "export IMAGE_PUSHED=$IMAGE_PUSHED" >> /tmp/build.env
+
+  post_build:
+    commands:
+      - |
+        set -euo pipefail
+        . /tmp/build.env
+
+        # 【スタックがまだ無いことがある】
+        # ブートストラップ(初回構築)では、パイプラインを先に回してイメージだけ作り、
+        # そのタグを指定して cfn-deploy.yml を流す。その最初の 1 回はスタックが存在しないので、
+        # プレースホルダを埋める値がどこにも無い。
+        # そのときは埋めずに抜ける。承認しない限り Deploy には進まないので実害は無い。
+        # → 設計書の決定20
+        if ! stack=$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --output json 2>/dev/null); then
+          echo "スタック $STACK_NAME がありません。taskdef のレンダリングと migrate の register は飛ばします"
+          echo "(初回構築では想定どおりです。イメージ ${IMAGE_TAG} を cfn-deploy.yml に渡してください)"
+          exit 0
+        fi
+
+        # cfn-apply.yml の「結果をサマリに出す」と同じ形の取り出し方
+        out()   { echo "$stack" | jq -r --arg k "$1" '.Stacks[0].Outputs[]    | select(.OutputKey    == $k) | .OutputValue'; }
+        param() { echo "$stack" | jq -r --arg k "$1" '.Stacks[0].Parameters[] | select(.ParameterKey == $k) | .ParameterValue'; }
+
+        # 【値はすべてスタックから取る】
+        # taskdef.json が持つのは「どの環境変数があるか」という構造だけで、値は持たない。
+        # app.yml と二重管理になるのは構造だけに留め、値のずれは起こさない。
+        SSM_PATH=$(param SsmParameterPath)
+        SES_IDENTITY=$(out SesIdentity)
+
+        render() {
+          sed -i \
+            -e "s|__FAMILY__|${PROJECT_NAME}-${ENV_NAME}-app|g" \
+            -e "s|__FAMILY_MIGRATE__|${PROJECT_NAME}-${ENV_NAME}-db-migrate|g" \
+            -e "s|__CPU__|$(param WebCpu)|g" \
+            -e "s|__MEMORY__|$(param WebMemory)|g" \
+            -e "s|__EXECUTION_ROLE_ARN__|arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENV_NAME}-task-execution-role|g" \
+            -e "s|__TASK_ROLE_ARN__|arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENV_NAME}-task-role|g" \
+            -e "s|__IMAGE__|${IMAGE_URI}|g" \
+            -e "s|__DB_HOST__|$(out DbEndpoint)|g" \
+            -e "s|__DB_PORT__|$(out DbPort)|g" \
+            -e "s|__DB_NAME__|$(param DbName)|g" \
+            -e "s|__DB_APP_USER__|$(param DbAppUsername)|g" \
+            -e "s|__DB_MIGRATE_USER__|$(param DbMigrateUsername)|g" \
+            -e "s|__APP_BASE_URL__|$(out AppUrl)|g" \
+            -e "s|__MAIL_FROM__|no-reply@${SES_IDENTITY}|g" \
+            -e "s|__S3_BUCKET__|$(out ImageBucketName)|g" \
+            -e "s|__IMAGE_CDN_DOMAIN__|$(out ImageCdnDomain)|g" \
+            -e "s|__SSM_ARN_PREFIX__|arn:aws:ssm:${AWS_DEFAULT_REGION}:${ACCOUNT_ID}:parameter${SSM_PATH}|g" \
+            -e "s|__LOG_GROUP__|/ecs/${PROJECT_NAME}-${ENV_NAME}|g" \
+            -e "s|__AWS_REGION__|${AWS_DEFAULT_REGION}|g" \
+            "$1"
+        }
+        render deploy/taskdef.json
+        render deploy/taskdef-migrate.json
+
+        # 埋め忘れたプレースホルダがあれば、ここで落とす。
+        # 埋まっていないまま register すると「__DB_HOST__ に接続できない」という
+        # 分かりにくいクラッシュになり、原因にたどり着くまで遠回りする。
+        if left=$(grep -ho '__[A-Z0-9_]*__' deploy/taskdef.json deploy/taskdef-migrate.json | sort -u) && [ -n "$left" ]; then
+          echo "埋まっていないプレースホルダがあります:" >&2
+          echo "$left" >&2
+          exit 1
+        fi
+
+        # 【migrate 用だけここで register する】
+        # app.yml の Outputs MigrateTaskDefinition は family 名を返すので、
+        # db-task.yml が run-task するとここで登録した最新 ACTIVE が使われる。
+        # 承認より前に登録しておくことで「Build → migrate → 承認 → デプロイ」の順に流せる。
+        rev=$(aws ecs register-task-definition \
+          --cli-input-json file://deploy/taskdef-migrate.json \
+          --query 'taskDefinition.taskDefinitionArn' --output text)
+        echo "migrate 用タスク定義を登録しました: $rev"
+
+        echo "アプリのタスク定義は register しません(Deploy アクションが taskdef.json から作ります)"
+
+# Deploy アクション(CodeDeployToECS)が読むファイル。
+#
+# 【ここに書いたパスがアーティファクトの中でもそのまま残る】
+# base-directory も discard-paths も付けていないので、deploy/ 付きで梱包される。
+# pipeline.yml の指定と字面がそのまま一致していなければならない。
+#   TaskDefinitionTemplatePath: deploy/taskdef.json
+#   AppSpecTemplatePath:        deploy/appspec.yaml
+artifacts:
+  files:
+    - deploy/taskdef.json
+    - deploy/appspec.yaml
