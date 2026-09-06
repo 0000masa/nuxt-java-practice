@@ -212,6 +212,11 @@ ADR-0011 の Slack ワークスペース認可とまったく同じ形である�
 → コンソールで 1 回作り、ARN を `pipeline.yml` のパラメータで渡す。
 ECR・ホストゾーン・テンプレートバケット・Slack ワークスペース認可に続く **5 つ目の常駐手動リソース。**
 
+**ARN の渡し方だけ実装で変えた(→ 5-2)。** 当初は `params/pipeline-<env>.json` に平文で置くつもりだったが、
+ARN は `arn:aws:codeconnections:<リージョン>:<アカウントID>:connection/<uuid>` の形で **AWS アカウント ID を含む。**
+このリポジトリは public なので、IAM ロールの ARN と同じく GitHub の Environment secret
+`AWS_CODESTAR_CONNECTION_ARN` に置き、`pipeline-apply.yml` が `--parameter-overrides` で足す。
+
 ### 決定11 `pipeline-apply.yml` と `pipeline-destroy.yml` を新設する
 
 `pipeline.yml` の適用は GitHub Actions から行う(既に OIDC で CloudFormation を叩ける口がある)。
@@ -379,7 +384,7 @@ CREATE では省略できない(`UsePreviousValue` にできる前の値が無�
 | ファイル | 中身 |
 | --- | --- |
 | `cloudformation/pipeline.yml` | CodePipeline / CodeBuild / アーティファクト S3 / IAM / 承認用 Chatbot 設定 / NotificationRule |
-| `cloudformation/params/pipeline-<env>.json` | パラメータ(CodeStar Connection ARN、Slack チャンネル ID など) |
+| `cloudformation/params/pipeline-<env>.json` | パラメータ(リポジトリ名・ブランチ名・Slack チャンネル ID など。**Connection ARN は入れない** → 5-2) |
 | `buildspec.yml` | ビルド手順(タグ決定 → 存在チェック → build/push → taskdef レンダリング → migrate 用 register) |
 | `appspec.yaml` | `TaskDefinition: <TASK_DEFINITION>` / ContainerName: app / ContainerPort: 8080 |
 | `taskdef.json` | アプリのタスク定義(プレースホルダ入り) |
@@ -391,6 +396,7 @@ CREATE では省略できない(`UsePreviousValue` にできる前の値が無�
 | --- | --- | --- | --- |
 | パイプラインのスタック名 | 未定 | `nuxt-java-practice-<env>-pipeline` | アプリのスタックと並べたときに見分けが付く |
 | `taskdef` / `appspec` の置き場 | 未定 | **リポジトリ直下** | `CodeDeployToECS` の既定パス(`taskdef.json` / `appspec.yaml`)に合わせた |
+| CodeStar Connection ARN の渡し方 | `params/pipeline-<env>.json` に平文 | **GitHub の Environment secret `AWS_CODESTAR_CONNECTION_ARN`** | ARN にアカウント ID が入る。このリポジトリは public で、しかも params は `--parameter-overrides` に展開されるので Actions のログにも出る。Secret 経由なら両方 `***` にマスクされる(→ [github-secrets.md](../../infrastructure/github-secrets.md) §2-3) |
 | 承認通知の経路 | NotificationRule → SNS → Chatbot | **NotificationRule → Chatbot(SNS なし)** | CodeStar Notifications は `TargetType: AWSChatbotSlack` で Chatbot を直接ターゲットにできる。SNS を挟んでいるアラート系は、CloudWatch アラームが SNS にしか送れないからで、こちらにその制約は無い |
 | イメージのビルド方法 | buildx | **素の `docker build`** | `LOCAL_DOCKER_LAYER_CACHE` は Docker デーモンのレイヤーキャッシュで、buildx の `docker-container` ドライバは独自のキャッシュを持つため当たらない。`--provenance=false` も不要になった(素の `docker build` はアテステーションを付けない) |
 | `taskdef.json` の値 | Git に固定値 | **構造だけ Git、値はスタックから差し込む** | プレースホルダ(`__DB_HOST__` など)を CodeBuild が `describe-stacks` の Outputs / Parameters で埋める。二重管理を「どの環境変数があるか」という構造だけに限定し、値のずれは起こさない |
