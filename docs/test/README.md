@@ -179,6 +179,28 @@ Google が返す `OidcUser` も `mock(OidcUser.class)` で足りる。`ClientReg
 
 確認メールの送信は「登録トランザクションのコミット後」に走る(`@TransactionalEventListener(AFTER_COMMIT)`)。テストをトランザクションで囲むとコミットされないため送信が発火せず、メール本文からトークンを取れなくなる。そのため作ったデータは `@BeforeEach` / `@AfterEach` で自分で消している。
 
+## Lambda のテスト(バックエンドとは別枠)
+
+`lambda/slack-approval/` の Lambda だけ、**backend コンテナを使わずホストの Node で走らせる。**
+
+```bash
+node --test lambda/slack-approval/test/*.test.mjs
+```
+
+依存は 1 つも無い(Node 22 標準の `node:test` と `node:crypto` だけ)ので、`npm install` は要らない。
+
+### 何をテストしていて、何をしていないか
+
+テストしているのは**署名検証だけ**(`interaction/verify.mjs`)。
+
+**理由は「壊れても正常に見える」から。** 署名検証を常に `true` にしても Slack からのリクエストは通るので、動作確認では気づけない。タイムスタンプの窓を見忘れても、生ボディではなくパース後の文字列で HMAC を計算しても同じ。**そして通ってしまえば、公開エンドポイントで誰でもデプロイを承認できる**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))。
+
+逆に Slack のメッセージの見た目や通知の分岐は、**Slack を見れば分かる**のでテストしていない。
+
+### CI でも走る
+
+`.github/workflows/pipeline-apply.yml` が**スタックを反映する前**に同じコマンドを実行する。落ちたら S3 へのアップロードもデプロイも行われない。
+
 ## なぜ専用 database なのか
 
 4 つの選択肢を比較して `app_test` を選んだ。

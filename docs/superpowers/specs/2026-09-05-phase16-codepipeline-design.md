@@ -432,9 +432,15 @@ CDK の `EcsDeploymentGroup` もこのリソースをそのまま合成する。
    **落ちた場合の逃げ道**: 4 段目を CloudFormation ではなく `aws ecs update-service --desired-count` に
    置き換える(CODE_DEPLOY でも desired count の更新は許されている)。ただし ADR-0009 の
    「CloudFormation を叩くのは 1 か所」とは別に、ECS を直接叩く経路が 1 つ増えることになる。
-1. **Chatbot が承認ボタンを自動で出すのか、カスタムアクションとして自分で作るのか。**
-   コマンド(`@aws codepipeline put-approval-result ...`)で承認できることは確実だが、
-   ボタンの出方は AWS ドキュメントの本文が取得できず未確定
+1. ~~**Chatbot が承認ボタンを自動で出すのか、カスタムアクションとして自分で作るのか。**~~
+   **確認済み(実機)。自動では出ない。カスタムアクションとして自分で作る。**
+   通知カードに承認ボタンは付かない。使える通知変数は `$Action` / `$CustomData` /
+   `$ExternalEntityLink` / `$Pipeline` / `$Stage` の 5 つで、**承認トークンは含まれない。**
+   ただし「Add new variable」で `$Token` を足すと、**押したときに Chatbot が確認画面を出して
+   値を入れさせる**ので、承認は **2 手**(トークン表示ボタン → 承認ボタンに貼る)で成立する。
+   1 クリックで完結させたければ承認アクションの `NotificationArn` → SNS → Lambda の経路が要るが、
+   Lambda を持たない方針(ADR-0011)なので採らない。
+   手順と実機の見え方 → [docs/slack/README.md](../../slack/README.md) §6-3
 2. **`GuardrailPolicies` をどこまで絞ると承認が通るか。** `PutApprovalResult` だけで足りるのか、
    `GetPipelineState` も要るのか
 3. **`CodeDeployToECS` が register したタスク定義と、`app.yml` の初代の family が正しく揃うか**
