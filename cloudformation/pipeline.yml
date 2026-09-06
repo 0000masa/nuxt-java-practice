@@ -290,9 +290,14 @@ Resources:
                 Resource:
                   - !GetAtt ArtifactBucket.Arn
                   - !Sub ${ArtifactBucket.Arn}/*
+              # サービス改名(CodeStar Connections → CodeConnections)で IAM の
+              # プレフィックスが増えたので両方書く。CLI は codestar-connections のままだが
+              # 権限は codeconnections の名前で審査される(gha-cfn-stg の ReadConnection と同じ話)
               - Sid: UseGitHubConnection
                 Effect: Allow
-                Action: codestar-connections:UseConnection
+                Action:
+                  - codeconnections:UseConnection
+                  - codestar-connections:UseConnection
                 Resource: !Ref ConnectionArn
               - Sid: StartBuild
                 Effect: Allow
