@@ -19,6 +19,8 @@
 - Slack App は **Incoming Webhook + `response_url`。** bot トークンは使わない
 - コードは `lambda/slack-approval/` に置き、**素の `AWS::Lambda::Function` +
   `aws cloudformation package`** で S3 経由デプロイ。**SAM は使わない**
+- **zip の置き場はテンプレート置き場と分け、Lambda 専用の常駐バケットを新設する**(→ 結果 7)。
+  あわせて `pipeline.yml` 自身も `deploy --s3-bucket` で S3 経由にし、`app.yml` と渡し方を揃える
 - **アラート用の Chatbot 2 本(`app.yml`)はそのまま。** 触るのは `pipeline.yml` だけ
 - `pipeline.yml` から `AWS::Chatbot::SlackChannelConfiguration` /
   `ChatbotGuardrailPolicy` / `ChatbotApproveRole` を削除する
@@ -141,6 +143,10 @@ Chatbot 方式で問題になった「古い通知にボタンが残る」は、
 そこで `pipeline-apply.yml` に**事前チェック**を足す(CodeStar Connections の `AVAILABLE`
 チェックと同じ考え方)。副作用として `gha-cfn-stg` ロールに `ssm:GetParameter` の追加が要る。
 
+**さらに結果 7 の専用バケットも手で作る。** まとめると、着手前の手動作業は
+**Slack App / SecureString 2 つ / S3 バケット 1 つ / IAM 2 文(`CheckSlackSecrets` と
+`PutLambdaCode`)**、そして**デプロイ後**に Interactivity の URL 登録。
+
 ### 5. secret は SSM に置き、Lambda が実行時に読む
 
 **CloudFormation の `{{resolve:ssm-secure:...}}` は Lambda の環境変数では使えない**
@@ -167,7 +173,53 @@ zip は `.mjs` を固めるだけ。** 代償として SDK のバージョンは
 `node:test` で固定し、`pipeline-apply.yml` がデプロイ前に走らせる。
 メッセージの見た目は Slack を見れば分かるのでテストしない。
 
-### 7. Slack のアプリ枠を 1 つ使う
+### 7. S3 の置き場を 2 つに分ける
+
+zip も `pipeline.yml` も S3 を経由するが、**別のバケットに置く。**
+
+```
+s3://nuxt-java-practice-lambda-artifacts-<アカウントID>/slack-approval/<ハッシュ>   ← zip
+s3://nuxt-java-practice-cfn-templates-<アカウントID>/templates/<ハッシュ>            ← テンプレート
+```
+
+**分ける理由は、保存要件が正反対だから。**
+
+| | テンプレート | Lambda の zip |
+|---|---|---|
+| CloudFormation が持つもの | **中身のコピー**(`aws cloudformation get-template` で読める) | **在り処だけ**(`S3Bucket` / `S3Key`) |
+| S3 の実体が消えると | 何も起きない | **ロールバックが失敗する** |
+| あるべき設定 | 30 日で削除 | **削除しない** |
+
+**Lambda 関数そのものは作成時に zip のコピーを持つ**ので、S3 のオブジェクトを消しても
+稼働中の関数は動き続ける。**壊れるのは CloudFormation がロールバック・置換をするとき** ——
+前のテンプレートが持つ古い `S3Key` をもう一度取りに行くため、そこに実体が無いと失敗する。
+
+**同居させると「静かに壊れる」。** 1 つのバケットにプレフィックスで同居させることもできるが、
+将来ライフサイクルを触ったとき(`Prefix` を外す、バケット全体に一括ルールを足す)
+**zip が消えても誰も気づかない。** 気づくのはロールバックが必要になった最悪のタイミング。
+**バケットが分かれていれば、そもそも同じ設定が届かない。**
+
+専用バケットの設定は 3 つとも「消さない」に寄せてある。
+
+- **ライフサイクルを一切設定しない。** `package` はオブジェクト名を中身のハッシュにし、
+  同名があればアップロードを飛ばすので、増えるのは**コードを変えたときだけ**。
+  数 KB なので溜めても実害が無い。**削除ルールを書かないこと自体が設定として意味を持つ**
+- **バージョニングも有効にしない。** ハッシュ名なので同じキーが上書きされることがなく、守る対象が無い
+- **`pipeline-destroy.yml` では触らない。** スタックの外にある常駐リソースであり、
+  かつ **stg と prod で共用している**ので、片方の撤収がもう片方のロールバックを壊す
+
+`gha-cfn-stg` には `PutLambdaCode`(`s3:PutObject` / `s3:GetObject`)を足す。
+**`s3:DeleteObject` は入れない** —— 消せる権限を持たせないこと自体が設定になる。
+`GetObject` が要るのは、`package` がアップロード前に `HeadObject` で存在確認するため。
+
+**`pipeline.yml` を S3 経由にしたのは統一性のため。** 40,131 バイトで上限 51,200 に
+収まるので技術的な必要は無い。それでも揃えるのは、`app.yml` と渡し方が違う理由が
+説明しづらいことと、**上限に触れた日に `DeployBucketRequiredError` で足を止めない**ため
+(残り 11 KB。日本語コメントは 1 文字 3 バイトなので減りが速い)。
+**`create-change-set` 方式には寄せない** —— 差分表示と Replacement ガードは
+RDS も ECS も無い `pipeline.yml` には意味が無く、ADR-0009 の読み替えはそのまま維持する。
+
+### 8. Slack のアプリ枠を 1 つ使う
 
 無料プランは 10 個まで。Amazon Q Developer(アラート用に残る)と合わせて **2/10**。
 
