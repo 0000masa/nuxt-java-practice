@@ -2,7 +2,6 @@
   { "ParameterKey": "ProjectName",            "ParameterValue": "nuxt-java-practice" },
   { "ParameterKey": "EnvName",                "ParameterValue": "prod" },
 
-  { "ParameterKey": "ConnectionArn",          "ParameterValue": "REPLACE_ME_CODESTAR_CONNECTION_ARN" },
   { "ParameterKey": "FullRepositoryId",       "ParameterValue": "0000masa/nuxt-java-practice" },
   { "ParameterKey": "BranchName",             "ParameterValue": "main" },
 
