@@ -58,9 +58,15 @@ Parameters:
     Type: String
     Description: 手動管理の ECR リポジトリ名。イメージ URI はアカウント ID とリージョンから組み立てる
 
+  # 【初回構築でだけ意味を持つ】
+  # AppTaskDefinition と MigrateTaskDefinition の初代を作るための値。
+  # 2 代目以降のイメージはパイプラインが taskdef.json / taskdef-migrate.json から
+  # register するので、ここを変えても既に動いているサービスは切り替わらない
+  # (Service.TaskDefinition が family 名の固定文字列になったため)。
+  # だから cfn-apply.yml の workflow_dispatch には image_tag を宣言していない。→ ADR-0013
   ImageTag:
     Type: String
-    Description: ECR のイメージタグ(コミットの短縮 SHA)。ecr-push.yml のジョブサマリに出る値
+    Description: ECR のイメージタグ(コミットの短縮 SHA)。パイプラインの Build ステージのログに出る値
 
   SsmParameterPath:
     Type: String
@@ -233,11 +239,6 @@ Parameters:
   WebMemoryScaleOutCooldown:
     Type: Number
     MinValue: 0
-  BakeTimeInMinutes:
-    Type: Number
-    MinValue: 0
-    MaxValue: 10080
-    Description: Blue/Green の切替後に blue を残す時間。stg は 0、prod は自動ロールバックの猶予として 30〜60
   ContainerInsights:
     Type: String
     # disabled を許していない。ECS タスク数不足のアラーム(EcsRunningLessThanDesiredAlarm)は
@@ -888,8 +889,9 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-alb
 
-  # ECS ネイティブ Blue/Green はターゲットグループを 2 つ使い、デプロイのたびに
-  # 本番用リスナールールの重みを入れ替える。
+  # Blue/Green はターゲットグループを 2 つ使う。CodeDeploy はデプロイのたびに
+  # green 側へタスクセットを作り、HTTPS リスナーの既定アクションを付け替える。
+  # 2 つとも CodeDeployDeploymentGroup の LoadBalancerInfo が TargetGroupName 属性で参照する。
   # ヘルスチェックは actuator の liveness(DB を含まない)。DB を含む health を使うと
   # RDS が一時的に落ちたときに全タスクが unhealthy になって入れ替わり続ける。
   TargetGroupBlue:
@@ -944,8 +946,36 @@ Resources:
             Port: "443"
             StatusCode: HTTP_301
 
-  # 既定は 403 で落とす。想定したホスト名で来たものだけを下のルールが通す。
-  # Blue/Green の重み入れ替えはリスナールール側で行われる。
+  # 【既定アクションが本番トラフィックの入口である】
+  # CodeDeploy の Blue/Green は「リスナーの既定アクション」を blue と green の間で
+  # 書き換えることで切り替える。TrafficRoute.ListenerArns の定義は
+  # 「The Amazon Resource Name (ARN) of one listener.」で、リスナールール ARN は渡せない。
+  #
+  # CodeDeploy がデプロイ中にこの既定アクションを書き換える。Terraform では
+  # ignore_changes = [default_action] が要るところだが、CloudFormation は実リソースの
+  # 状態を読み直さず「前回のテンプレート」との差分だけを適用するので不要。
+  # ただし後でこのリソースの定義を編集すると、そのとき向き先もテンプレートの値(blue)に戻る。
+  #
+  # 【かつてここは fixed-response 403 だった】
+  # 「既定は 403、ホスト名が一致したものだけを priority 100 のルールが blue/green へ通す」
+  # という構成にしていた。ECS ネイティブ Blue/Green はリスナールール単位で動くので
+  # それが成立したが、CodeDeploy はルール単位では動けない。ルールは既定より先に評価されるため、
+  # あのルールを残したまま CodeDeploy に繋ぐと「デプロイは成功するのにトラフィックが
+  # 一切切り替わらない」という壊れ方をする。→ ADR-0013
+  #
+  # 【ホスト名による絞り込みを再現していない理由】
+  # ALB の DNS 名(*.elb.amazonaws.com)や IP を直接叩かれても、この構成では失うものが無い。
+  #   - 前段に CloudFront が無い(CloudFront は画像専用)ので、迂回されて困る層が存在しない。
+  #     実務で ALB 直アクセスを塞ぐのは CloudFront が前段にある構成で、しかも手段は
+  #     オリジンカスタムヘッダーの検証やマネージドプレフィックスリストであって WAF ではない
+  #   - ALB の DNS 名や IP で HTTPS を叩くと証明書名が一致しない。ALB は SNI が一致しなくても
+  #     デフォルト証明書でハンドシェイクを完了するので「ALB が弾く」わけではないが、
+  #     証明書を検証するクライアント(ブラウザ・クローラ)は中身を取れない。
+  #     したがってインデックスもされず、SEO 上の実害も無い(curl -k なら通る)
+  #   - stg は WAF の Basic 認証が全リクエストに掛かる。prod はそもそもアプリを公開している
+  # なお ALB のリスナールール条件に否定形は無いので「想定ホスト名でなければ 403」は書けない。
+  # *.elb.amazonaws.com を弾く肯定形のルールなら書けるが、IP 直アクセスは Host が IP になるため
+  # 拾えず、中途半端な防御になる。完全にやるなら WAF の NotStatement だけが手段になる。
   HttpsListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
@@ -956,38 +986,8 @@ Resources:
       Certificates:
         - CertificateArn: !Ref Certificate
       DefaultActions:
-        - Type: fixed-response
-          FixedResponseConfig:
-            StatusCode: "403"
-            ContentType: text/plain
-            MessageBody: Forbidden
-
-  # ECS がデプロイ中にこのルールの重みを書き換える。
-  # Terraform では ignore_changes = [action] が必要だったが、CloudFormation は
-  # 実リソースの状態を読み直さず「前回のテンプレート」との差分だけを適用するので不要。
-  # ただし後でこのリソースの定義を編集すると、そのとき重みもテンプレートの値に戻る。
-  ProductionListenerRule:
-    Type: AWS::ElasticLoadBalancingV2::ListenerRule
-    Properties:
-      ListenerArn: !Ref HttpsListener
-      Priority: 100
-      # 【注意】この Conditions は ELB の語彙で、テンプレート直下の Conditions
-      # (CloudFormation の条件定義)とは無関係。ここは「どのリクエストをこのルールに
-      # 一致させるか」のマッチ条件で、ALB がリクエストごとに評価する。
-      # CloudFormation の条件参照は Properties の外に単数形で書く(下の WebAcl がその例)。
-      Conditions:
-        - Field: host-header
-          HostHeaderConfig:
-            Values:
-              - !Sub ${EnvName}.${AppSubdomain}.${DomainName}
-      Actions:
         - Type: forward
-          ForwardConfig:
-            TargetGroups:
-              - TargetGroupArn: !Ref TargetGroupBlue
-                Weight: 1
-              - TargetGroupArn: !Ref TargetGroupGreen
-                Weight: 0
+          TargetGroupArn: !Ref TargetGroupBlue
 
   # ===========================================================================
   # WAF(Basic 認証)
@@ -1169,21 +1169,23 @@ Resources:
                   - secretsmanager:GetSecretValue
                 Resource: !GetAtt Database.MasterUserSecret.SecretArn
 
-  # ECS が ALB のリスナールールの重みを書き換えるために引き受けるロール。
-  # ネイティブ Blue/Green に必須。
-  EcsInfrastructureRoleForLoadBalancers:
+  # CodeDeploy が ECS のタスクセットを作り、ALB のリスナーを付け替えるために引き受けるロール。
+  # ネイティブ Blue/Green のときは ECS 自身がリスナールールの重みを書き換えていたので
+  # AmazonECSInfrastructureRolePolicyForLoadBalancers を ecs.amazonaws.com に渡していたが、
+  # CODE_DEPLOY 制御では切り替えの主体が CodeDeploy に移る(→ ADR-0013)。
+  CodeDeployServiceRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${ProjectName}-${EnvName}-ecs-infra-lb-role
+      RoleName: !Sub ${ProjectName}-${EnvName}-codedeploy-role
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Service: ecs.amazonaws.com
+              Service: codedeploy.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/AmazonECSInfrastructureRolePolicyForLoadBalancers
+        - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
 
   # ===========================================================================
   # ECS
@@ -1200,6 +1202,16 @@ Resources:
         - FARGATE_SPOT
 
   # アプリのタスク定義。Flyway は走らせない(FLYWAY_ENABLED=false)。
+  #
+  # 【この定義は初回構築でだけ使われる】
+  # 2 代目以降は taskdef.json(リポジトリ直下)が正で、CodePipeline の Deploy アクションが
+  # そこから新しいリビジョンを register する。ここを消せないのは AWS::ECS::Service が
+  # タスク定義の指定を必須にしているからで、WebDesiredCount=0 で作る 1 段目でも要る。
+  #
+  # **環境変数・Secrets・CPU/メモリを変えるときは taskdef.json も必ず揃えること。**
+  # 片方だけ直すと「構築直後の初回起動だけ古い定義で立ち上がってクラッシュする」という
+  # 気づきにくい壊れ方をする(スタックは緑、パイプラインも緑、最初のタスクだけ落ちる)。
+  # → ADR-0013 の「結果として生じること」1
   AppTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -1260,6 +1272,13 @@ Resources:
 
   # マイグレーション用。同じイメージを APP_TASK=migrate で起動し、
   # Flyway を流して終了する。DDL 権限を持つ migrate ユーザーを使う。
+  #
+  # 【こちらも初回構築でだけ使われる】
+  # 2 代目以降は taskdef-migrate.json が正で、CodeBuild が register する
+  # (CodeDeploy の Deploy アクションはアプリのタスク定義しか面倒を見ない)。
+  # db-task.yml は Outputs の family 名を run-task するので、リビジョンを省略した
+  # 「最新 ACTIVE」= パイプラインが作った新しいイメージのものが使われる。
+  # AppTaskDefinition と同じく、変えるときは taskdef-migrate.json も揃えること。
   MigrateTaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
@@ -1409,10 +1428,29 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
+    # TaskDefinition を !Ref から family 名の固定文字列に変えた結果、CloudFormation が
+    # 依存関係を推論できなくなった(参照が無いので暗黙の依存も無い)。明示しないと
+    # タスク定義と並列に作られ、まだ存在しない family を参照して失敗する。
+    # タイミング次第で成否が変わるので、通ってしまう回もある。
+    DependsOn: AppTaskDefinition
     Properties:
       ServiceName: !Sub ${ProjectName}-${EnvName}-app
       Cluster: !Ref Cluster
-      TaskDefinition: !Ref AppTaskDefinition
+      # 【リビジョンを指定しない】
+      # CODE_DEPLOY 制御のサービスに対して、ECS の UpdateService はタスク定義の更新を
+      # 受け付けない(Unable to update task definition on services with a CODE_DEPLOY
+      # deployment controller. Use AWS CodeDeploy to trigger a new deployment)。
+      # 受け付けるのは desired count / deployment configuration / grace period /
+      # 配置制約 / タグだけ。
+      #
+      # !Ref AppTaskDefinition のままにすると ImageTag を変えるたびに新しいリビジョン ARN が
+      # 渡り、スタック更新が必ず落ちる。family だけを書けばテンプレート上の値が不変になり、
+      # 実際にどのリビジョンが動くかは CodeDeploy が決める。
+      # これは ADR-0007 が「タスク定義の所有者が 2 つになる」として退けた形だが、
+      # CodeDeploy を使う以上ほかに選択肢が無い。→ ADR-0013
+      TaskDefinition: !Sub ${ProjectName}-${EnvName}-app
+      DeploymentController:
+        Type: CODE_DEPLOY
       DesiredCount: !Ref WebDesiredCount
       EnableExecuteCommand: true
       # stg: [FARGATE_SPOT(1)] / prod: [FARGATE(base 2, weight 0), FARGATE_SPOT(1)]
@@ -1425,15 +1463,10 @@ Resources:
           - !Ref AWS::NoValue
         - CapacityProvider: FARGATE_SPOT
           Weight: !Ref WebSpotWeight
-      DeploymentConfiguration:
-        MinimumHealthyPercent: 100
-        MaximumPercent: 200
-        # ECS ネイティブ Blue/Green。切替後に blue を残す時間は環境で変える
-        Strategy: BLUE_GREEN
-        BakeTimeInMinutes: !Ref BakeTimeInMinutes
-        DeploymentCircuitBreaker:
-          Enable: true
-          Rollback: true
+      # DeploymentConfiguration は書かない。Strategy / BakeTimeInMinutes /
+      # DeploymentCircuitBreaker はどれも ECS コントローラ専用で、CODE_DEPLOY では使えない
+      # (MinimumHealthyPercent と MaximumPercent も CODE_DEPLOY では参照されない)。
+      # 切替方式・待ち時間・自動ロールバックは CodeDeployDeploymentGroup が持つ。
       # Spring Boot の起動に 30〜60 秒かかる。短いと起動途中に殺され続ける
       HealthCheckGracePeriodSeconds: 120
       NetworkConfiguration:
@@ -1444,22 +1477,22 @@ Resources:
           SecurityGroups:
             - !Ref EcsSecurityGroup
           AssignPublicIp: DISABLED
+      # AdvancedConfiguration(AlternateTargetGroupArn / ProductionListenerRule / RoleArn)は
+      # ネイティブ Blue/Green 専用なので書かない。green 側のターゲットグループと、
+      # 付け替える対象のリスナーは CodeDeployDeploymentGroup の LoadBalancerInfo が持つ。
       LoadBalancers:
         - ContainerName: app
           ContainerPort: 8080
           TargetGroupArn: !Ref TargetGroupBlue
-          AdvancedConfiguration:
-            AlternateTargetGroupArn: !Ref TargetGroupGreen
-            ProductionListenerRule: !Ref ProductionListenerRule
-            RoleArn: !GetAtt EcsInfrastructureRoleForLoadBalancers.Arn
 
   # DesiredCount が 0 の段では作らない(Condition)。
   # 作ってしまうと Application Auto Scaling が MinCapacity まで増やしてしまい、
   # ユーザーがまだ存在しない DB につなごうとしてクラッシュループする。
   #
-  # 【ResourceId に !GetAtt Service.Name を使わない理由】
-  # かつては `!Sub service/${Cluster}/${Service.Name}` と書いていたが、これだと
-  # ECS のイメージ更新のたびに cfn-apply.yml の Replacement ガードに止められる。
+  # 【ResourceId が Service を参照している理由 — 一度やめて、戻した】
+  # ここは `!Sub service/${Cluster}/${ProjectName}-${EnvName}-app` という静的な文字列に
+  # 書き換えてあった。cfn-apply.yml でイメージを更新していた頃、次の連鎖でイメージ更新の
+  # たびに Replacement ガードに止められたため。
   #
   #   1. ImageTag を変える → タスク定義は 19 プロパティ中 17 が createOnly なので
   #      AppTaskDefinition / MigrateTaskDefinition が必ず Replacement: True になる
@@ -1467,44 +1500,38 @@ Resources:
   #   2. Service が `TaskDefinition: !Ref AppTaskDefinition` で新しい ARN を受けるため、
   #      Service も毎回 Modify に入る
   #   3. Change Set は「更新対象に入っているリソースの Ref / GetAtt」を実行時まで
-  #      解決しない(Evaluation: Dynamic)。よって Service.Name は毎回 Dynamic 扱いになる
+  #      解決しない(Evaluation: Dynamic)。よって Service.Name も Dynamic 扱いになる
   #   4. ResourceId は createOnlyProperty(変わるなら作り直すしかない)。
-  #      「変わるかもしれない値」が入っているので Replacement: Conditional が付く
+  #      Dynamic x RequiresRecreation: Always = Replacement: Conditional が付く
   #   5. ScalingPolicy 2 本は `ScalingTargetId: !Ref ScalableTarget` なので芋づるで Conditional
   #
-  # 実際には ServiceName は固定文字列なので何も作り直されない。だが Change Set の時点では
-  # それを確定できず、ガードは Conditional も止める(→ 学習メモ §7-2)。結果として
-  # 「イメージを更新するたびに allow_replacement=true を付ける」手順が生まれ、
-  # Database が本当に作り直されるときにも同じ反射で解除してしまう。
-  # タスク定義のときは型ごと除外したが、同じ手はここでは使えない。タスク定義と違って
-  # ScalableTarget の Replacement は「常に無害」ではなく、本当に登録し直しが起きる変更
-  # (ServiceName やクラスタを変えたとき)も一緒に見逃すことになるため。
+  # 【CodeDeploy に移って 2 が消えたので、参照に戻した】
+  # Service.TaskDefinition は family 名の固定文字列になり(→ 上の Service のコメントと ADR-0013)、
+  # ImageTag を変えても Service はもう Modify に入らない。そもそも通常のリリースは
+  # CodePipeline の仕事で、CloudFormation を通らない。連鎖の 2 が切れたので 3 以降も起きない。
+  # この回避が要るのは、cfn-apply.yml でイメージを更新している github-actions-deploy 側だけ。
   #
-  # そこで、参照そのものを断って値を静的に確定させる。下の式は Service の ServiceName と
-  # 同じものを書いており、解決後の文字列も前と一致する
-  # (実測: service/nuxt-java-practice-stg-cluster/nuxt-java-practice-stg-app)。
-  # ServiceName を変えるときは 2 か所を揃えて直すこと。
+  # 【それでも残る代償 — Service を編集する更新では今も止まる】
+  # WebDesiredCount を変えるなど Service 自身に手を入れる更新では、今でも Service が Modify に
+  # 入るので 4 の Conditional が出てガードに止まる。そのときは allow_replacement=true で通す。
+  # 「イメージ更新のたび」だった頃と違って意図してサービスを触ったときだけなので、
+  # 反射で解除する手順にはならない(ガードが形骸化するという当初の懸念はここで解ける)。
+  # なお構築フロー(cfn-deploy.yml)の 4 段目で WebDesiredCount が 0 → 1 になるときは、
+  # Condition が偽から真に変わるので ScalableTarget は Add で入る。Replacement は出ない。
   #
-  # 【ただし、この書き換え自体は一度だけ Replacement: True を出す】
-  # 値が同じでも CloudFormation は「動的参照 → 静的値」の書き換えを変更として扱う。
-  # ResourceId は createOnly なので Evaluation: Static x RequiresRecreation: Always = True になり、
-  # ScalingPolicy 2 本も ScalingTargetId 経由で巻き込まれる。移行のときだけ
+  # 【静的値 → 参照の書き換え自体が一度だけ Conditional を出す】
+  # 解決後の値が同じでも CloudFormation は書き換えを変更として扱う。移行のときだけ
   # allow_replacement=true が要る(または撤収して建て直す。新規作成なら Add なので出ない)。
-  # 移行後は静的値どうしの比較になるので、イメージ更新でこの 3 つが差分に出ることはもう無い。
   #
-  # 【DependsOn: Service が要る理由】
-  # CloudFormation の作成順は Ref / GetAtt / Sub の参照から自動で組まれる。上の変更で
-  # Service への参照が消えた = 暗黙の依存も消えた。明示しないと Service と並列に作られ、
-  # まだ存在しないサービスを登録しようとして失敗する(タイミング次第で成否が変わる)。
+  # DependsOn: Service は消した。参照が戻ったので暗黙の依存も戻っている。
   # → 依存の話は docs/notes/cloudformation/terraform-to-cloudformation.md §4-5
   ScalableTarget:
     Type: AWS::ApplicationAutoScaling::ScalableTarget
     Condition: ServiceEnabled
-    DependsOn: Service
     Properties:
       ServiceNamespace: ecs
       ScalableDimension: ecs:service:DesiredCount
-      ResourceId: !Sub service/${Cluster}/${ProjectName}-${EnvName}-app
+      ResourceId: !Sub service/${Cluster}/${Service.Name}
       MinCapacity: !Ref WebMinCapacity
       MaxCapacity: !Ref WebMaxCapacity
 
@@ -1535,6 +1562,108 @@ Resources:
         TargetValue: !Ref WebMemoryTarget
         ScaleInCooldown: !Ref WebMemoryScaleInCooldown
         ScaleOutCooldown: !Ref WebMemoryScaleOutCooldown
+
+  # ===========================================================================
+  # CodeDeploy(アプリのデプロイ)
+  # ===========================================================================
+  # 方針 → docs/adr/0013-app-deploy-with-code-services.md
+  # 設計 → docs/superpowers/specs/2026-09-05-phase16-codepipeline-design.md
+  #
+  # 【パイプライン本体はここに無い】
+  # CodePipeline と CodeBuild は常駐の別スタック cloudformation/pipeline.yml にある。
+  # ここに置くのは DeploymentGroup だけで、理由は ALB のリスナー ARN と ECS サービスを
+  # 参照する必要があるため。リスナー ARN は生成 ID を含むので命名規則では組み立てられない。
+  #
+  # 逆に、パイプライン側の Deploy アクションが必要とするのは ApplicationName と
+  # DeploymentGroupName という文字列だけで、これは ${ProjectName}-${EnvName}-... で予測できる。
+  # だから Export / ImportValue は使わない(エクスポート元は参照側が消えるまで削除できず、
+  # 「全部まとめて建てて全部まとめて消す」撤収運用と正面衝突する → ADR-0007)。
+  CodeDeployApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Sub ${ProjectName}-${EnvName}-app
+      ComputePlatform: ECS
+
+  # 【ドキュメントの注意書きに引っかからないこと】
+  # AWS::CodeDeploy::DeploymentGroup のリファレンス冒頭には
+  #   "Amazon ECS blue/green deployments through CodeDeploy do not use the
+  #    AWS::CodeDeploy::DeploymentGroup resource. ... use the AWS::CodeDeploy::BlueGreen hook."
+  # と書かれているが、これは「CloudFormation のスタック更新として ECS の Blue/Green
+  # デプロイを *実行* する」話であって、デプロイグループを *作る* 話ではない。
+  # ECS 用の ECSServices と LoadBalancerInfo.TargetGroupPairInfoList という
+  # プロパティが存在すること自体がその証拠で、CDK の EcsDeploymentGroup も
+  # このリソースをそのまま合成する。
+  #
+  # そして AWS::CodeDeploy::BlueGreen フックのほうは、ADR-0007 が
+  # 「タスク定義の更新と他リソースの更新を同一スタック更新に混ぜられない」という理由で
+  # 退けたもの。ここで採っているのは「デプロイグループを作り、デプロイは
+  # CodePipeline から CodeDeploy に依頼する」形なので、その制約とは無関係。
+  CodeDeployDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    # DependsOn は書かない。ECSServices と LoadBalancerInfo が Service と
+    # TargetGroup を参照しているので、作成順はそこから自動で組まれる
+    Properties:
+      ApplicationName: !Ref CodeDeployApplication
+      DeploymentGroupName: !Sub ${ProjectName}-${EnvName}-app-dg
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      # 【最小構成にしてある】
+      # 段階的なトラフィック移行(CodeDeployDefault.ECSCanary10Percent5Minutes など)と
+      # CloudWatch アラーム連動(DEPLOYMENT_STOP_ON_ALARM)は意図的に入れていない。
+      # 入れるときは DeploymentConfigName と AutoRollbackConfiguration を差し替えるだけで済む。
+      # 今の設定は「全タスクを一度に切り替え、成功したら blue を待たずに終了する」。
+      DeploymentConfigName: CodeDeployDefault.ECSAllAtOnce
+      DeploymentStyle:
+        DeploymentType: BLUE_GREEN
+        DeploymentOption: WITH_TRAFFIC_CONTROL
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+      BlueGreenDeploymentConfiguration:
+        # CONTINUE_DEPLOYMENT は「green が healthy になったらすぐ本番トラフィックを移す」。
+        # STOP_DEPLOYMENT にすると切替の直前で止まり、人が continue-deployment を呼ぶまで待つ
+        # (コンソールの「トラフィックの再ルーティング」も CLI / SDK もこの API)。
+        # つまり承認ゲートとしては使えるが、採らない理由が 2 つある。
+        #   1. 確認する手段が無い。TestTrafficRoute を作っていないので、待っている間 green に
+        #      接続できない(→ 下の LoadBalancerInfo のコメント)。見ないまま承認するだけになる
+        #   2. 承認は Build と Deploy の間(パイプラインの Approve ステージ)に既にある。
+        #      ここでも止めると窓口が二重になり、しかも CodeDeploy 側の待ちは
+        #      WaitTimeInMinutes を過ぎると中止扱いになるので、承認忘れが失敗として残る
+        # なお appspec の Hooks は Lambda でしか実装できないので、ライフサイクルの任意の位置に
+        # 「人に聞く」ステップを差し込むことはできない。人を待たせられるのは切替の直前だけ。
+        DeploymentReadyOption:
+          ActionOnTimeout: CONTINUE_DEPLOYMENT
+        TerminateBlueInstancesOnDeploymentSuccess:
+          Action: TERMINATE
+          TerminationWaitTimeInMinutes: 0
+      # ここも ScalableTarget と同じ理由で静的な文字列にしていたが、Service がイメージ更新で
+      # Modify に入らなくなったので参照に戻した(→ ScalableTarget の長いコメント)。
+      # なお ECSServices と LoadBalancerInfo はどちらも更新可能プロパティなので、仮に
+      # Dynamic 扱いになっても Replacement: False どまりで、そもそもガードには止められない。
+      # createOnly な ScalableTarget.ResourceId とはそこが違う。
+      ECSServices:
+        - ClusterName: !Ref Cluster
+          ServiceName: !GetAtt Service.Name
+      # 【ListenerArns はリスナー ARN のみ。リスナールール ARN は渡せない】
+      # 「The Amazon Resource Name (ARN) of one listener.」と定義されており、配列だが最大 1 個。
+      # CodeDeploy はこのリスナーの既定アクションを blue と green の間で書き換える。
+      # TestTrafficRoute(切替前に green だけを叩けるリスナー)は作っていない。
+      # これを足して DeploymentReadyOption を STOP_DEPLOYMENT にすれば、Lambda を書かずに
+      # 「人が green を確認してから切り替える」にできる。ただしリスナーを 1 本増やし、
+      # ALB のセキュリティグループ(80 と 443 だけ)にも口を開けたうえで、承認の窓口が
+      # 二重になる。作り捨ての検証環境では割に合わないので、今は採らない。
+      LoadBalancerInfo:
+        TargetGroupPairInfoList:
+          - ProdTrafficRoute:
+              ListenerArns:
+                - !Ref HttpsListener
+            # 【ここが要求するのは ARN ではなく「名前」】
+            # TargetGroupInfo.Name はターゲットグループ名で、!Ref が返す ARN とは別物。
+            # 名前を返すのは TargetGroupName 属性なので !GetAtt を使う。
+            # すぐ上の ListenerArns が !Ref で書けているのは、あちらが ARN を要求しているから。
+            TargetGroups:
+              - Name: !GetAtt TargetGroupBlue.TargetGroupName
+              - Name: !GetAtt TargetGroupGreen.TargetGroupName
 
   # ===========================================================================
   # 監視・検知(SNS + CloudWatch アラーム + RDS イベント購読)
@@ -1635,8 +1764,14 @@ Resources:
       GuardrailPolicies:
         - arn:aws:iam::aws:policy/AWSDenyAll
       UserRoleRequired: false
-      # 転送に失敗した理由が /aws/chatbot/... に出る。実機で一度も動かしていないので
-      # ERROR にしてある(NONE にすると「届かない」ときに手掛かりが無くなる)。
+      # 転送に失敗した理由が /aws/chatbot/<ConfigurationName> に出る。実機で一度も
+      # 動かしていないので ERROR にしてある(NONE にすると「届かない」ときに手掛かりが無くなる)。
+      #
+      # 【このロググループはスタックの外にある】
+      # Chatbot が自分で作る。しかも作られるのは us-east-1 で、このスタックのリージョン
+      # (ap-northeast-1)ではない。撤収しても残り、保持期間は既定の無期限。
+      # NONE にしても消えない(コマンド実行の監査ログは常時有効で無効化できない)。
+      # → docs/slack/README.md §8-2
       LoggingLevel: ERROR
 
   RdsAlertsSlackChannel:
@@ -1674,15 +1809,11 @@ Resources:
         - !Ref EcsTaskShortageTopic
       OKActions:
         - !Ref EcsTaskShortageTopic
-      # ServiceName の次元も !GetAtt Service.Name を使わず、Service の ServiceName と同じ式を
-      # 直に書いている。理由は ScalableTarget と同じ(更新対象の Service を参照すると
-      # Change Set が値を実行時まで解決できない)。こちらは次元が更新可能プロパティなので
-      # Replacement: False どまりでガードには止められないが、実質何も変わらないアラームが
-      # イメージ更新のたびに差分表へ並ぶと、差分を読む価値が下がる。
-      #
-      # ScalableTarget と違って DependsOn は足していない。次元はただの文字列なので Service が
-      # まだ無くてもアラームは作れる。メトリクスが来ないだけで、TreatMissingData: notBreaching
-      # により誤検知にもならない。
+      # ServiceName の次元も静的な文字列にしていた。あちらはガードの話ではなく
+      # 「実質何も変わらないアラームがイメージ更新のたびに差分表へ並ぶと、差分を読む価値が
+      # 下がる」というノイズ対策だったが、Service が Modify に入らなくなってノイズ自体が
+      # 出なくなったので参照に戻した(→ ScalableTarget の長いコメント)。
+      # 次元は更新可能プロパティなので、Dynamic 扱いになっても Replacement: False どまり。
       Metrics:
         - Id: m_running
           ReturnData: false
@@ -1694,7 +1825,7 @@ Resources:
                 - Name: ClusterName
                   Value: !Ref Cluster
                 - Name: ServiceName
-                  Value: !Sub ${ProjectName}-${EnvName}-app
+                  Value: !GetAtt Service.Name
             Period: 60
             Stat: Minimum
         - Id: m_desired
@@ -1707,7 +1838,7 @@ Resources:
                 - Name: ClusterName
                   Value: !Ref Cluster
                 - Name: ServiceName
-                  Value: !Sub ${ProjectName}-${EnvName}-app
+                  Value: !GetAtt Service.Name
             Period: 60
             Stat: Minimum
         - Id: e_shortage
@@ -2093,8 +2224,8 @@ Outputs:
   ClusterName:
     Value: !Ref Cluster
 
-  # ここだけ !GetAtt のまま。Outputs は Change Set の Changes に現れないので、
-  # ScalableTarget やアラームで避けた「毎回 Dynamic になる」問題が起きない。
+  # Outputs は Change Set の Changes に現れないので、リソース側で一度問題になった
+  # 「毎回 Dynamic になる」現象(→ ScalableTarget の長いコメント)がそもそも起きない場所。
   # 実物から読むぶん、名前の式を写し間違える余地も無い。
   ServiceName:
     Value: !GetAtt Service.Name
@@ -2111,12 +2242,25 @@ Outputs:
     Description: db-task.yml が run-task するタスク定義(ユーザー作成 / 任意 SQL)
     Value: !Ref DbOpsTaskDefinition
 
+  # 【リビジョン固定の ARN ではなく family 名を返す】
+  # !Ref MigrateTaskDefinition はリビジョン付き ARN になるので、構築時のイメージに固定される。
+  # パイプラインが新しいイメージで taskdef-migrate.json から register した後も、
+  # db-task.yml は古い方を run-task してしまい、古いイメージの Flyway が走る
+  # (ecs run-task の containerOverrides に image は無いので回避できない)。
+  # family 名を返せば run-task がリビジョン省略として扱い、最新 ACTIVE が使われる。
+  # → ADR-0013 の「結果として生じること」2
   MigrateTaskDefinition:
-    Description: db-task.yml が run-task するタスク定義(Flyway)
-    Value: !Ref MigrateTaskDefinition
+    Description: db-task.yml が run-task するタスク定義の family(Flyway。最新 ACTIVE が使われる)
+    Value: !Sub ${ProjectName}-${EnvName}-db-migrate
 
   DbEndpoint:
     Value: !GetAtt Database.Endpoint.Address
+
+  # buildspec.yml が taskdef.json / taskdef-migrate.json の DB_PORT に差し込む。
+  # 実際には 3306 だが、他の値と同じく describe-stacks 一発で取れるようにしておく
+  DbPort:
+    Description: taskdef のプレースホルダに差し込む DB のポート
+    Value: !GetAtt Database.Endpoint.Port
 
   DbMasterSecretArn:
     Description: RDS が作ったマスターパスワードのシークレット(手元から DB に入るときに読む)
