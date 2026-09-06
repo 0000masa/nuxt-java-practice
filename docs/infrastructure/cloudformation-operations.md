@@ -15,8 +15,8 @@
   3. OIDC プロバイダ            … フェーズ11 で作成済み
   4. IAM ロール(ECR push 用)   … 凍結ブランチ用に残す(main では使わない)
   5. IAM ロール 3 つ(今回)     … §2
-  6. テンプレート置き場の S3     … §3
-  7. SSM の SecureString 4 つ   … §4
+  6. S3 バケット 2 つ            … §3
+  7. SSM の SecureString 6 つ   … §4
   8. GitHub の Secrets 5 つ     … §5(手順 → github-secrets.md)
   9. Slack と AWS を接続        … docs/slack/README.md
  10. params/stg.json を埋める   … §6
@@ -215,6 +215,12 @@ aws iam put-role-policy \
         "Resource": "arn:aws:s3:::nuxt-java-practice-cfn-templates-${ACCOUNT_ID}/*"
       },
       {
+        "Sid": "PutLambdaCode",
+        "Effect": "Allow",
+        "Action": ["s3:PutObject", "s3:GetObject"],
+        "Resource": "arn:aws:s3:::nuxt-java-practice-lambda-artifacts-${ACCOUNT_ID}/*"
+      },
+      {
         "Sid": "EmptyBuckets",
         "Effect": "Allow",
         "Action": ["s3:ListBucket", "s3:DeleteObject"],
@@ -224,6 +230,12 @@ aws iam put-role-policy \
           "arn:aws:s3:::nuxt-java-practice-stg-logs-archive",
           "arn:aws:s3:::nuxt-java-practice-stg-logs-archive/*"
         ]
+      },
+      {
+        "Sid": "CheckSlackSecrets",
+        "Effect": "Allow",
+        "Action": "ssm:GetParameter",
+        "Resource": "arn:aws:ssm:ap-northeast-1:${ACCOUNT_ID}:parameter/nuxt-java-practice/*/slack_*"
       },
       {
         "Sid": "ReadConnection",
@@ -246,6 +258,12 @@ aws iam put-role-policy \
 `PutTemplate` はテンプレートを S3 に置くために要る(→ §3)。**CloudFormation サービスロール側は `s3:*` を持っているので追加不要**(置いたテンプレートを読むのは CloudFormation)。
 
 **`EmptyBuckets` にはバケットが 2 つ並ぶ。** 素の CloudFormation に `force_destroy` 相当が無いので、撤収ワークフローが `aws s3 rm --recursive` で空にしてから消している。**フェーズ14 でログアーカイブのバケットが増えたので、ここに ARN を足していないと撤収が必ず失敗する。**
+
+**`CheckSlackSecrets` はフェーズ17 で足した。** `pipeline-apply.yml` が反映の前に SecureString 2 つの存在を確かめるため(→ §12-3)。**`kms:Decrypt` は付けていない。** 存在を見るだけで値は要らないので `--with-decryption` を使わない。**「読めない権限で存在だけ確かめる」ほうが、うっかり値をログに出す経路も塞げる。**
+
+**`PutLambdaCode` はフェーズ17 で足した。** `aws cloudformation package` が Lambda の zip を上げるため(→ §3-2)。**`s3:GetObject` も要る**のは、`package` がアップロード前に `HeadObject` で同じオブジェクトの有無を確かめるから。**`s3:DeleteObject` は入れていない。** あのバケットは消さない前提なので、消せる権限を持たせないこと自体が設定になっている。
+
+**`PutTemplate` と分けてあるのは用途が違うから。** 1 文にまとめると「なぜこの権限があるのか」が読めなくなり、片方を消すときに巻き添えを起こす。
 
 **`ReadConnection` はフェーズ16 で足した。** `pipeline-apply.yml` が反映の前に `get-connection` で接続が `AVAILABLE` か確かめるため(→ §12-3)。**このロールが CodeStar Connections に触るのはこの 1 回だけ**で、接続を使うのはパイプライン側のロール(`pipeline.yml` の `UseGitHubConnection`)。
 
@@ -389,7 +407,25 @@ aws iam put-role-policy \
 
 ---
 
-## 3. テンプレート置き場の S3 バケットを作る
+## 3. S3 バケットを 2 つ作る
+
+**どちらも手動管理の常駐リソース**で、スタックを撤収しても残る。**用途も保存要件も違うので、同居させずに分けてある。**
+
+| バケット | 中に置くもの | 消えると | ライフサイクル |
+|---|---|---|---|
+| `...-cfn-templates-<アカウントID>` | CloudFormation テンプレート | **何も起きない** | 30 日で削除 |
+| `...-lambda-artifacts-<アカウントID>` | Slack 承認まわりの Lambda の zip | **ロールバックが失敗する** | **削除しない** |
+
+**この差は CloudFormation が何を保持しているかから来ている。**
+
+- **テンプレート**は、Change Set を作る瞬間に読まれたあと**中身がスタックの中に写し取られる**(`aws cloudformation get-template` で読める)。S3 の実体は運び屋にすぎない
+- **Lambda の zip** は違う。スタックが持つのは `S3Bucket` / `S3Key` という**在り処だけ**で、中身は持っていない。**ロールバックは古いキーをもう一度取りに行く**ので、消えていると失敗する
+
+> **稼働中の関数は止まらない。** Lambda はスタック作成時に zip のコピーを自分の中に持つので、S3 のオブジェクトを消しても動き続ける。壊れるのは CloudFormation がロールバック/置換をしようとしたときだけ。**だから気づくのが遅れる。**
+
+**同居させないのは「静かに壊れる」から。** 1 つのバケットにプレフィックスで分けて置くこともできるが、将来ライフサイクルを触ったとき——`Prefix` を外す、バケット全体に一括ルールを足す——**zip が消えても誰も気づかない。** 置き場ごと分けておけば、そもそも同じ設定が届かない(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))。
+
+### 3-1. テンプレート置き場
 
 `cloudformation/app.yml` は **54,178 バイト**あり、CloudFormation が**リクエストに直接受け取れる上限 51,200 バイト**を超えている。`TemplateURL` で渡せる場所は **S3 バケットか Systems Manager ドキュメントだけ**で、GitHub の raw URL は渡せない(`CreateChangeSet` の API リファレンスに「S3 の静的ウェブサイト URL は非対応」とまで書かれている)。
 
@@ -428,13 +464,61 @@ aws s3api put-bucket-lifecycle-configuration --bucket "$BUCKET" \
 
 **このバケットは撤収しても残る。** 中身は数十 KB なので費用は実質ゼロ。
 
----
+### 3-2. Lambda 成果物置き場(フェーズ17 で追加)
 
-## 4. SSM に SecureString を 4 つ作る
+Slack 承認まわりの Lambda のコードを置く。`pipeline-apply.yml` の `aws cloudformation package` が zip 化してここへ上げ、`Code` を `S3Bucket` / `S3Key` に書き換えたテンプレートを `deploy` に渡す。
+
+**stg と prod で共用する。** `package` はオブジェクト名を**中身のハッシュ**にするので、同じコードなら自動的に同じオブジェクトになる。環境ごとに分けても同じバイト列が 2 か所に置かれるだけ。
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+BUCKET=nuxt-java-practice-lambda-artifacts-$ACCOUNT_ID
+
+aws s3api create-bucket --bucket "$BUCKET" \
+  --region ap-northeast-1 \
+  --create-bucket-configuration LocationConstraint=ap-northeast-1
+
+# 中身は実行されるコード。公開しない
+aws s3api put-public-access-block --bucket "$BUCKET" \
+  --public-access-block-configuration \
+  'BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true'
+```
+
+**ライフサイクルは設定しない。バージョニングも有効にしない。** どちらも意図的に「やらない」ので、コマンドが 2 つで終わる。
+
+| | なぜ設定しないか |
+|---|---|
+| ライフサイクル | **消えるとロールバックが失敗する**(→ §3 の冒頭)。溜まる心配も要らない —— `package` は**同名のオブジェクトがあればアップロードをスキップ**するので、増えるのは**コードを変えたときだけ**。数 KB なので費用は無視できる |
+| バージョニング | オブジェクト名が中身のハッシュなので、**同じキーが上書きされることがない**。守る対象がそもそも無い。有効にすると一括削除で削除マーカーが残り、かえって扱いづらくなる |
+
+**「削除ルールを書かない」ことが設定として意味を持つ。** 1 つでも書けば「いつか消える」経路ができる。
+
+### オブジェクトの並び
+
+```
+s3://nuxt-java-practice-lambda-artifacts-<アカウントID>/
+└── slack-approval/<コンテンツハッシュ>
+```
+
+**プレフィックスを付けるのは、オブジェクト名が読めないから。** ハッシュ名だけでは「何の zip か」が分からない。将来ほかの Lambda が増えたときも並べられる。
+
+### 撤収では触らない
+
+**`pipeline-destroy.yml` はこのバケットを空にしない。** 理由が 2 つある。
+
+1. **スタックの外にある常駐リソース**なので、消す必要がない(テンプレート置き場と同じ)
+2. **stg と prod で共用している。** `stg` の撤収で zip を消すと、**`prod` のスタックがロールバックできなくなる**
+
+`pipeline-destroy.yml` が空にするのは `...-pipeline-artifacts`(スタック内のアーティファクト置き場)だけ。
+
+## 4. SSM に SecureString を 6 つ作る
+
+**ライフサイクルが 2 種類ある。** 前半 4 つはアプリのスタック(作り捨て)が使い、後半 2 つはパイプラインのスタック(常駐)が使う。**置き場は同じパスで揃えている。**
 
 ```bash
 P=/nuxt-java-practice/stg
 
+# --- アプリ用(app.yml が読む) ---
 # DB のユーザー(→ docs/adr/0005)。
 # 注意: この値は SQL の文字列リテラルに埋め込まれるので、
 # シングルクォートとバックスラッシュを含めないこと(詳細 → §4-1)。
@@ -444,9 +528,18 @@ aws ssm put-parameter --type SecureString --name "$P/migrate_db_password" --valu
 # Google ログイン(→ docs/setup/google-oauth.md)
 aws ssm put-parameter --type SecureString --name "$P/google_client_id"     --value '<Google のクライアント ID>'
 aws ssm put-parameter --type SecureString --name "$P/google_client_secret" --value '<Google のクライアントシークレット>'
+
+# --- パイプライン用(pipeline.yml の Lambda が読む。フェーズ17 で追加 → ADR-0014) ---
+# 値の取り方は docs/slack/README.md。どちらも Slack App の画面から控える
+aws ssm put-parameter --type SecureString --name "$P/slack_webhook_url"     --value '<Incoming Webhook の URL>'
+aws ssm put-parameter --type SecureString --name "$P/slack_signing_secret"  --value '<Slack App の Signing Secret>'
 ```
 
 RDS のマスターパスワードはここに置かない(RDS が Secrets Manager に作る)。
+
+**webhook URL を SecureString にしているのは、URL そのものが資格情報だから。** 知っている人は誰でもそのチャンネルに投稿できる。`slack_signing_secret` は逆で、**これが漏れると公開エンドポイントへのリクエストを偽装できる**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))。
+
+**パイプライン用の 2 つを作り忘れても、スタックの作成は成功する。** 気づくのは Slack のボタンを押したときで、しかも Slack には何も出ない。そのため `pipeline-apply.yml` が反映の前に存在を確かめて落ちるようにしてある(→ §12-3)。
 
 ### 4-1. DB パスワードの長さと使えない文字
 
@@ -682,7 +775,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 **このワークフローは stg 専用。** 本番のスタックを消すボタンは作らない。
 
-**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 4 つ / **CodeStar Connections** / **パイプラインのスタック**(別スタックなので `cfn-destroy` では消えない → §12)/ ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
+**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 6 つ / **S3 バケット 2 つ**(テンプレート置き場・Lambda 成果物置き場 → §3)/ **CodeStar Connections** / **パイプラインのスタック**(別スタックなので `cfn-destroy` では消えない → §12)/ ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
 
 撤収し忘れると課金が続くもの: **NAT Gateway(約 $0.062/時)・RDS・ALB・WAF(Web ACL 月 $5 + ルール 月 $1 の時間割り)**。
 
@@ -740,7 +833,7 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 
 | スタック | 中身 | ライフサイクル |
 |---|---|---|
-| `nuxt-java-practice-stg-pipeline` | CodePipeline / CodeBuild / アーティファクト S3 / IAM / 承認用 Chatbot 設定 | 常駐 |
+| `nuxt-java-practice-stg-pipeline` | CodePipeline / CodeBuild / アーティファクト S3 / IAM / **承認用の SNS + Lambda 2 つ + Function URL** | 常駐 |
 | `nuxt-java-practice-stg` | CodeDeploy の Application + DeploymentGroup / ECS / ALB / RDS | 作り捨て |
 
 `Export` / `ImportValue` は使っていない。パイプラインが必要とするのは `ApplicationName` と `DeploymentGroupName` という**文字列だけ**で、命名規則から予測できるため。おかげでアプリのスタックはいつでも撤収できる。
@@ -776,23 +869,29 @@ gh secret set AWS_CODESTAR_CONNECTION_ARN --env stg \
 
 ### 12-2. Slack にチャンネルを 1 つ足す
 
-`#njp-deploy` を作り、`/invite @Amazon Q` する。チャンネル ID を控える。
+`#njp-deploy` を作る。**Amazon Q Developer の招待は要らない**(承認は自作 Slack App が担う → [docs/slack/README.md](../slack/README.md) §6-2)。
+
+**あわせて Slack App を作り、webhook URL と signing secret を SSM に入れる**(→ §4)。**Interactivity の URL 登録はスタックを作った後**(Function URL が決まらないため)。
 **ワークスペースの認可は済んでいる前提**(アラート用に済ませてある)。手順 → [docs/slack/README.md](../slack/README.md)
 
 ### 12-3. `params/pipeline-stg.json` を埋めてスタックを建てる
 
 ```
-SlackChannelIdDeploy … 12-2 で控えたチャンネル ID
+SsmParameterPath … /nuxt-java-practice/stg/(末尾スラッシュまで)
 ```
 
-**`ConnectionArn` はこのファイルに無い。** 12-1 の Secret から `pipeline-apply.yml` が `--parameter-overrides` で足す。未登録のまま流すと、スタックを作る前に「secret が空です」で落ちる。
+**Slack の ID はこのファイルに無い。** フェーズ17 で承認が自作 Slack App に変わり、Lambda は webhook URL に投稿するだけになった(ワークスペースもチャンネルも知らない)。
+
+**`ConnectionArn` もこのファイルに無い。** 12-1 の Secret から `pipeline-apply.yml` が `--parameter-overrides` で足す。未登録のまま流すと、スタックを作る前に「secret が空です」で落ちる。
+
+**SecureString 2 つ(`slack_webhook_url` / `slack_signing_secret`)も反映前に存在を確かめる。** 無いままでもスタックは成功してしまい、気づくのは Slack のボタンを押したときになるため(→ §4)。
 
 ```
 Actions → 「パイプラインのスタックを反映」を実行
   inputs: env=stg / dry_run=false
 ```
 
-`REPLACE_ME_` が残っている、または接続の Secret が空・`PENDING` のときは流す前に落ちる。**設定が欠けたまま作ると、スタックは成功するのにパイプラインがソースを取れない**(ADR-0011 が嫌っていた「緑なのに機能していない」形)ので、そこで止める。
+`REPLACE_ME_` が残っている、接続の Secret が空・`PENDING`、SecureString が無い、Lambda のテストが落ちる —— のいずれかなら反映の前に止まる。**設定が欠けたまま作ると、スタックは成功するのにパイプラインがソースを取れない**(ADR-0011 が嫌っていた「緑なのに機能していない」形)ので、そこで止める。
 
 **このスタックは `aws cloudformation deploy` で反映する。** `app.yml` を叩くのは `cfn-apply.yml` だけという [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md) の集約は維持されていて、範囲を「`app.yml` に対して」と読み替えている。あの集約が守りたかった Replacement ガードや `WebDesiredCount` の前提チェックは、RDS も ECS も無い `pipeline.yml` には意味を持たない。
 
@@ -814,7 +913,9 @@ Source(GitHub)→ Build(CodeBuild)→ Approve(Slack)→ Deploy(CodeDeploy)
 Build 完了 → db-task.yml で migrate → Slack で承認 → CodeDeploy が切り替え
 ```
 
-**承認は Slack から行える。** `#njp-deploy` に届いた通知に対して操作する。権限は `codepipeline:PutApprovalResult` と状態確認だけに絞ってあり、アラート用の 2 チャンネル(`AWSDenyAll`)は触っていない。
+**承認は Slack のボタンで行う。** `#njp-deploy` に届く通知に「承認 / 却下」が付く(承認だけ確認ダイアログが挟まる)。押すとボタンが消えて結果に置き換わり、**誰が押したかは `PutApprovalResult` の `summary` に入って後続の通知に出る**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))。
+
+**フェーズ17 で Chatbot をやめた。** 承認トークンが Chatbot の通知変数に無く 1 クリックで完結しないこと、押せない既製ボタンが消せないこと、カスタムアクションが全通知に付くことが理由。アラート用 2 チャンネル(`AWSDenyAll`)はそのまま。
 
 **切替は即時(`ECSAllAtOnce`)、blue は待たずに終了する。** 段階的な移行(Canary / Linear)と CloudWatch アラーム連動は入れていない。入れるときは `app.yml` の `DeploymentConfigName` と `AutoRollbackConfiguration` を差し替えるだけで済む。
 
@@ -858,9 +959,12 @@ Actions → 「パイプラインのスタックを削除」を実行(confirm �
 | migrate が古いコードのマイグレーションを流す | パイプラインの Build を通したか。`taskdef-migrate.json` から register するのは Build ステージで、`db-task.yml` は family の最新 ACTIVE を使う |
 | パイプラインの Deploy が「アプリケーションが見つからない」で失敗する | スタックがまだ無い。CodeDeploy の Application と DeploymentGroup は `app.yml` 側にある。初回はここまで進めず承認待ちで止めておく(→ §8 の手順 1) |
 | `pipeline-apply` が `codeconnections:GetConnection` で `AccessDeniedException` | `gha-cfn-stg` の `DeployStack` に `ReadConnection` を足したか(→ §2-2)。**CLI のコマンド名は `codestar-connections` のままだが、権限は改名後の `codeconnections` で審査される** |
+| `pipeline-apply` が `Invalid request provided: AWS::CodeStarNotifications::NotificationRule` | 通知ルールがパイプラインより先に作られている。`Resource` を静的な ARN にすると暗黙の依存が消えるので `DependsOn: Pipeline` が要る。**作成に失敗したスタックは更新できない**ので、`pipeline-destroy.yml` で消してから建て直す |
+| Build が `PRE_BUILD` / `COMMAND_EXECUTION_ERROR` / `exit status 2` で落ちる | buildspec の `env` に `shell: bash` があるか。CodeBuild の Linux 既定シェルは `/bin/sh`(dash)で、`set -o pipefail` も `${VAR:0:7}` も dash では exit 2 になる |
 | パイプラインが push しても動かない | `Triggers` の `FilePaths` に一致しない変更ではないか。`cloudformation/**` は意図的に外してある。手動起動はコンソールの「リリースの変更」から |
-| Slack に承認の通知が来ない | `#njp-deploy` に `/invite @Amazon Q` したか(→ [docs/slack/README.md](../slack/README.md))。`SlackChannelIdDeploy` が `params/pipeline-stg.json` に入っているか |
-| Slack から承認しようとすると権限エラーになる | `GuardrailPolicies` はチャンネルロールと **AND** される。`codepipeline:PutApprovalResult` が両方に必要 |
+| Slack に承認の通知が来ない | `/aws/lambda/nuxt-java-practice-<env>-slack-notify`(**ap-northeast-1**)。SSM に `slack_webhook_url` があるか。→ [docs/slack/README.md](../slack/README.md) §10 |
+| Slack のボタンを押しても何も起きない | **Slack App の Interactivity に Function URL を登録したか。** スタックを建て直すと URL が変わる(→ [docs/slack/README.md](../slack/README.md) §6-3) |
+| ボタンを押すと Slack にエラーが出る | `/aws/lambda/nuxt-java-practice-<env>-slack-interaction`。`401` は署名検証の失敗(`slack_signing_secret` の値違い) |
 | 反映が `Parameter 'SlackWorkspaceId' must match pattern` などで止まった | `params` の `REPLACE_WITH_...` を置き換えたか(→ §6・[docs/slack/README.md](../slack/README.md)) |
 | `DELETE_FAILED` で `EmptyBuckets` の権限エラーが出る | `gha-cfn-stg` の `EmptyBuckets` にログアーカイブのバケット ARN を足したか(→ §2-2)。**フェーズ14 で増えた** |
 | アラームは `ALARM` になっているのに Slack に来ない | **`/invite @Amazon Q` を忘れていないか**(→ §11-1)。Chatbot コンソールの **テストメッセージを送信** で切り分ける。転送の失敗理由は `/aws/chatbot/...` に出る |
