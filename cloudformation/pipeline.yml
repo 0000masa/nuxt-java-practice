@@ -77,13 +77,17 @@ Parameters:
     MaxValue: 480
 
   # --- 通知と承認 ---
-  # ワークスペース ID もチャンネル ID も秘密ではない(認可済みの AWS アカウントからしか
-  # 使えない)。HostedZoneId と同じ扱いで params に平文で置く → ADR-0011 の帰結 4
-  SlackWorkspaceId:
+  # 【Slack のワークスペース ID / チャンネル ID はもう要らない】
+  # フェーズ17 で Chatbot をやめ、自作 Slack App に投稿するようになった(→ ADR-0014)。
+  # 投稿先は webhook URL が持っているので、テンプレートはチャンネルを知らない。
+  #
+  # 秘密は 2 つとも SSM の SecureString に置き、Lambda が実行時に読む。
+  # CloudFormation の {{resolve:ssm-secure:...}} は Lambda の環境変数では使えないため、
+  # ここで渡すのは「パラメータのパス」だけ。
+  SsmParameterPath:
     Type: String
-  SlackChannelIdDeploy:
-    Type: String
-    Description: デプロイの承認と通知を流すチャンネル(#njp-deploy)
+    Description: 手動作成した SecureString の置き場(末尾スラッシュあり。例 /nuxt-java-practice/stg/)
+    AllowedPattern: ^/.*/$
 
   # --- その他 ---
   LogRetentionDays:
@@ -508,87 +512,240 @@ Resources:
   # ==========================================================================
   # Slack への通知と、Slack からの承認
   # ==========================================================================
-  # 方針 → ADR-0013 の「結果として生じること」6
+  # 方針 → docs/adr/0014-slack-approval-with-lambda.md(ADR-0011 / ADR-0013 を一部変更)
+  # 手順 → docs/slack/README.md §6
   #
-  # 【既存のアラート用 2 本(app.yml)とは別に建てる】
-  # あちらは GuardrailPolicies: AWSDenyAll で、通知の一方向だけだから権限ゼロという
-  # 判断だった(→ ADR-0011)。承認には codepipeline:PutApprovalResult が要るので、
-  # あちらを緩めるのではなく、承認専用の設定をここに 3 本目として建てる。
+  # 【フェーズ17 で Chatbot をやめた】
+  # 承認そのものは Chatbot でもできたが、1 クリックで完結せず(トークンが通知変数に
+  # 無い)、Get info / Start Pipeline という押しても AccessDenied になる既製ボタンが
+  # 消せず、カスタムアクションは全通知に付いてしまった。**承認者はアプリ開発担当**なので
+  # 「押していいものが一目で分かる」ことを優先し、自作 Slack App に切り替えた。
+  # やめた方式の記録 → docs/notes/aws-code-service/chatbot-approval-attempt.md
   #
-  # 【GuardrailPolicies を省略してはいけない】
-  # 省略すると AdministratorAccess が既定で適用される。必ず明示する。
-  ChatbotGuardrailPolicy:
-    Type: AWS::IAM::ManagedPolicy
+  # 【アラート 2 本(app.yml)は Chatbot のまま】
+  # あちらは作り捨てスタックにあり、Lambda を持ち込むと環境を建て直すたびに
+  # 作り直しになる。ボタンの問題も承認チャンネル固有なので、混在を選んだ。
+  PipelineNotificationTopic:
+    Type: AWS::SNS::Topic
     Properties:
-      ManagedPolicyName: !Sub ${ProjectName}-${EnvName}-chatbot-approve-guardrail
-      Description: Slack から実行できる操作の上限。承認と状態確認だけ
+      TopicName: !Sub ${ProjectName}-${EnvName}-pipeline-notifications
+      DisplayName: pipeline
+
+  # CodeStarNotifications が publish できるようにする。
+  # aws:SourceAccount を付けているのは、他アカウントのルールから撃ち込まれないため
+  PipelineNotificationTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref PipelineNotificationTopic
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
-          - Effect: Allow
-            Action:
-              - codepipeline:PutApprovalResult
-              - codepipeline:GetPipelineState
-              - codepipeline:GetPipelineExecution
-            Resource:
-              - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
-              - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app/*
+          - Sid: AllowCodeStarNotifications
+            Effect: Allow
+            Principal:
+              Service: codestar-notifications.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref PipelineNotificationTopic
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
 
-  # チャンネルロール。GuardrailPolicies と AND されるので、実効権限は両方の積になる。
-  # 信頼するプリンシパルは chatbot.amazonaws.com(app.yml の ChatbotRole と同じ。
-  # あちらは stg の実機で通っている)。
-  ChatbotApproveRole:
+  # --------------------------------------------------------------------------
+  # 通知を Slack に投げる Lambda
+  # --------------------------------------------------------------------------
+  # コードは lambda/slack-approval/notify/。ローカルパスのまま書いてあり、
+  # pipeline-apply.yml の `aws cloudformation package` が zip 化して S3 に上げ、
+  # Code を S3Bucket/S3Key に書き換えたテンプレートを吐く(→ ADR-0014)。
+  #
+  # 【置き場はテンプレート置き場とは別のバケット】
+  # nuxt-java-practice-lambda-artifacts-<アカウントID>/slack-approval/<ハッシュ>。
+  # テンプレートは CloudFormation が中身を写し取るので S3 の実体が消えても困らないが、
+  # zip はスタックが S3Key という「在り処」しか持たないため、消えるとロールバックが失敗する。
+  # 保存要件が正反対なので、ライフサイクルが届かないよう置き場ごと分けてある(→ 手順書 §3-2)。
+  NotifyLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-${EnvName}-slack-notify
+      RetentionInDays: !Ref LogRetentionDays
+
+  NotifyFunctionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub ${ProjectName}-${EnvName}-chatbot-approve-role
+      RoleName: !Sub ${ProjectName}-${EnvName}-slack-notify-role
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
           - Effect: Allow
             Principal:
-              Service: chatbot.amazonaws.com
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
-      # 承認の権限。GuardrailPolicies と同じものをロール側にも付ける
-      ManagedPolicyArns:
-        - !Ref ChatbotGuardrailPolicy
       Policies:
-        # app.yml の ChatbotRole と同じ NotificationsOnly。
-        # 通知カードの描画に使う読み取りで、GuardrailPolicies 側では許していないので
-        # Slack から人が叩くことはできない(AND で効くため)
-        - PolicyName: NotificationsOnly
+        - PolicyName: notify
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Effect: Allow
+              - Sid: Logs
+                Effect: Allow
                 Action:
-                  - cloudwatch:Describe*
-                  - cloudwatch:Get*
-                  - cloudwatch:List*
-                Resource: "*"
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${NotifyLogGroup.Arn}:*
+              # 【承認の権限は持たせない】
+              # この関数は投稿するだけ。承認できるのは Function URL を持つ
+              # InteractionFunction だけ、という切り分けにしてある。
+              # 読むのは「どのコミットを承認しようとしているのか」を出すためだけ
+              - Sid: ReadExecution
+                Effect: Allow
+                Action: codepipeline:GetPipelineExecution
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
+              # webhook URL を実行時に読む。CloudFormation の {{resolve:ssm-secure}} は
+              # Lambda の環境変数では使えないので、パス名だけ渡して自分で取りに行く
+              #
+              # 【kms:Decrypt は要らない】
+              # SecureString なので WithDecryption: true を付けており、SSM は呼び出し元
+              # (このロール)の身分のまま KMS の Decrypt を呼ぶ。それでも IAM 側に
+              # kms:Decrypt を書かなくていいのは、既定の aws/ssm キーのキーポリシーが
+              # 「同じアカウントの主体が SSM 経由で復号すること」を直接許しているから
+              # (Principal: "*" に kms:CallerAccount と kms:ViaService の条件が付いた形)。
+              # 要るのは SecureString をカスタマーマネージドキーで作ったときで、
+              # そのキーのポリシーは IAM に委譲する形が既定なので明示が必要になる。
+              # → app.yml の SsmSecureStrings(タスク実行ロール)と同じ判断
+              - Sid: ReadWebhookUrl
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}slack_webhook_url
 
-  DeployApprovalChannel:
-    Type: AWS::Chatbot::SlackChannelConfiguration
+  NotifyFunction:
+    Type: AWS::Lambda::Function
     Properties:
-      ConfigurationName: !Sub ${ProjectName}-${EnvName}-deploy
-      SlackWorkspaceId: !Ref SlackWorkspaceId
-      SlackChannelId: !Ref SlackChannelIdDeploy
-      IamRoleArn: !GetAtt ChatbotApproveRole.Arn
-      GuardrailPolicies:
-        - !Ref ChatbotGuardrailPolicy
-      # false にすると、チャンネルの全員がチャンネルロールの権限で操作できる。
-      # 個人ごとにロールを紐づけたいなら true にするが、1 人で使うので false
-      UserRoleRequired: false
-      # 承認が権限で弾かれたときの手掛かりが /aws/chatbot/<ConfigurationName> に出る。
-      # このチャンネルは通知だけでなく承認も担うので、app.yml の 2 本より切実。
-      # ロググループは Chatbot が us-east-1 に自分で作る(このスタックのリージョンではない)。
-      # スタックの外にあるので撤収しても残り、保持期間は既定の無期限。
-      # → docs/slack/README.md §8-2
-      LoggingLevel: ERROR
+      FunctionName: !Sub ${ProjectName}-${EnvName}-slack-notify
+      Role: !GetAtt NotifyFunctionRole.Arn
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Timeout: 15
+      # 【AWS SDK v3 は runtime が持っている】
+      # nodejs18.x 以降は同梱されているので npm install もバンドラも要らない。
+      # zip は .mjs を固めるだけ。代償として SDK のバージョンは AWS 任せになる
+      Code: ../lambda/slack-approval/notify
+      LoggingConfig:
+        LogGroup: !Ref NotifyLogGroup
+      Environment:
+        Variables:
+          SLACK_WEBHOOK_URL_PARAM: !Sub ${SsmParameterPath}slack_webhook_url
 
-  # 【SNS トピックを挟まない】
-  # CodeStar Notifications は Chatbot のチャンネル設定を直接ターゲットにできる
-  # (TargetType: AWSChatbotSlack)。アラート系(app.yml)が SNS を挟んでいるのは
-  # CloudWatch アラームが SNS にしか送れないからで、こちらにはその制約が無い。
+  NotifySubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref PipelineNotificationTopic
+      Protocol: lambda
+      Endpoint: !GetAtt NotifyFunction.Arn
+
+  NotifyInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt NotifyFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+      SourceArn: !Ref PipelineNotificationTopic
+
+  # --------------------------------------------------------------------------
+  # Slack のボタン押下を受ける Lambda(公開エンドポイント)
+  # --------------------------------------------------------------------------
+  InteractionLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProjectName}-${EnvName}-slack-interaction
+      RetentionInDays: !Ref LogRetentionDays
+
+  InteractionFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-slack-interaction-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: interaction
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${InteractionLogGroup.Arn}:*
+              # 【承認できるのはこのロールだけ】
+              # GetPipelineState はトークンを取るため(押された時点で読む)。
+              # Chatbot 方式の GuardrailPolicies が持っていた 3 つのうち、
+              # 実際に使う 2 つだけに絞ってある
+              - Sid: Approve
+                Effect: Allow
+                Action:
+                  - codepipeline:GetPipelineState
+                  - codepipeline:PutApprovalResult
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
+              # kms:Decrypt を持たせない理由は notify 側と同じ(既定の aws/ssm キー)
+              - Sid: ReadSigningSecret
+                Effect: Allow
+                Action: ssm:GetParameter
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}slack_signing_secret
+
+  InteractionFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${EnvName}-slack-interaction
+      Role: !GetAtt InteractionFunctionRole.Arn
+      Runtime: nodejs22.x
+      Handler: index.handler
+      # Slack は 3 秒で応答を期待する。AWS API 2 本ぶんの余裕として 10 秒
+      Timeout: 10
+      # 【叩かれ続けても課金が青天井にならないようにする】
+      # Function URL は AuthType: NONE で公開されている。署名検証で中身は守れるが、
+      # 呼び出しそのものは止められない。同時実行数に上限を置いて被害を面積で抑える。
+      # API Gateway を挟めばレート制限も WAF も付けられるが、リソースが増えるので採らない
+      ReservedConcurrentExecutions: 5
+      Code: ../lambda/slack-approval/interaction
+      LoggingConfig:
+        LogGroup: !Ref InteractionLogGroup
+      Environment:
+        Variables:
+          SLACK_SIGNING_SECRET_PARAM: !Sub ${SsmParameterPath}slack_signing_secret
+
+  # 【AuthType: NONE は「認証しない」であって「無防備」ではない】
+  # Slack は IAM 署名を付けられないので、AWS 側の認証は使えない。
+  # 代わりに Slack の署名を関数の中で検証している(lambda/.../verify.mjs)。
+  # ここを IAM にすると Slack からのリクエストが全部 403 になる
+  InteractionFunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt InteractionFunction.Arn
+      AuthType: NONE
+
+  # Function URL は関数呼び出しの権限を別に要求する。
+  # FunctionUrlAuthType を揃えないと URL は出来るのに 403 になる
+  InteractionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt InteractionFunction.Arn
+      Action: lambda:InvokeFunctionUrl
+      Principal: "*"
+      FunctionUrlAuthType: NONE
+
+  # 【フェーズ17 で宛先を Chatbot から SNS に変えた】
+  # CodeStarNotifications は Chatbot のチャンネル設定を直接指せる(AWSChatbotSlack)が、
+  # 整形を自前でやる以上、間に SNS を挟んで Lambda に渡す形になる。
+  # アラート系(app.yml)が SNS を挟むのは CloudWatch アラームの制約が理由だったが、
+  # こちらは「Lambda を起動したいから」という別の理由で同じ形になった。
   PipelineNotificationRule:
     Type: AWS::CodeStarNotifications::NotificationRule
     # 【Resource を静的な文字列にしたので、依存を自分で書く】
@@ -622,8 +779,8 @@ Resources:
         # 締めの 1 通。これが来たらデプロイは終わっている
         - codepipeline-pipeline-pipeline-execution-succeeded
       Targets:
-        - TargetType: AWSChatbotSlack
-          TargetAddress: !Ref DeployApprovalChannel
+        - TargetType: SNS
+          TargetAddress: !Ref PipelineNotificationTopic
 
 Outputs:
   PipelineName:
@@ -639,3 +796,10 @@ Outputs:
   ArtifactBucketName:
     Description: pipeline-destroy.yml が空にするバケット
     Value: !Ref ArtifactBucket
+
+  # 【この URL を Slack App の Interactivity に登録する】
+  # スタックを作るまで URL は決まらないので、手順は
+  # 「Slack App を作る → デプロイ → URL を登録」の 3 段になる(→ docs/slack/README.md §6-3)
+  SlackInteractionUrl:
+    Description: Slack App の Interactivity Request URL に設定する値
+    Value: !GetAtt InteractionFunctionUrl.FunctionUrl
