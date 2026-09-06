@@ -290,7 +290,7 @@ curl -s -w '\nstatus=%{http_code}\n' \
 |---|---|
 | 承認待ちの通知が Slack に来ない | `/aws/lambda/nuxt-java-practice-<env>-slack-notify`。`slack_webhook_url` が SSM にあるか、値が正しいか。**そもそも SNS まで来ているか**は CodeStarNotifications のルールと SNS トピックのメトリクスで切り分ける |
 | 通知は来るがボタンが無い / 内容が汎用的 | 承認待ちだと判定できていない。**`notify` は生の `Sns.Message` をログに出す**ので、`detail` の形を見て判定条件を直す(→ [フェーズ17 の設計書](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)の未確認事項) |
-| ボタンを押すと「このアプリから403が返されました」 | **Function URL の呼び出し許可が足りない。** `curl <Function URL>` を直接叩いて再現するか確かめる(Slack は無関係)。**`lambda:InvokeFunctionUrl` だけでは足りず `lambda:InvokeFunction` も要る** —— コンソールの関数ページが警告を出してくれる。関数は 1 度も起動しないので**ログには何も残らない**(→ 下記) |
+| ボタンを押すと「このアプリから403が返されました」 | **Function URL の呼び出し許可が足りない。** `curl <Function URL>` を直接叩いて再現するか確かめる(Slack は無関係)。**`lambda:InvokeFunctionUrl` だけでは足りず `lambda:InvokeFunction` も要る**(2 つ目に `FunctionUrlAuthType` 条件は付けられない → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) の結果 8) —— コンソールの関数ページが警告を出してくれる。関数は 1 度も起動しないので**ログには何も残らない**(→ 下記) |
 | Interactivity のトグルが On にならない | **上と同じ原因。** Slack は保存時に Request URL の疎通を見るので、403 が返ると受理しない。**Slack 側をいくら触っても直らない** |
 | ボタンを押しても何も起きない | **Interactivity の Request URL を登録したか**(→ §6-3)。スタックを建て直した後は URL が変わっている |
 | ボタンを押すと Slack にエラーが出る | `/aws/lambda/nuxt-java-practice-<env>-slack-interaction`。`401` なら署名検証で落ちている(`slack_signing_secret` の値違い)。3 秒を超えた場合は Slack 側にタイムアウトが出る |

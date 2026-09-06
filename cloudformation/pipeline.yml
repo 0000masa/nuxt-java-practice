@@ -752,13 +752,16 @@ Resources:
   # **コンソールの関数ページが「2 つ付与せよ」と警告してくれる**ので、迷ったらそこを見る。
   # AWS::Lambda::Permission は Action を 1 つしか取れないのでリソースを 2 つに分ける。
   #
-  # 【"*" でも無制限ではない。効いているのは条件のほう】
-  # FunctionUrlAuthType: NONE は条件キー lambda:FunctionUrlAuthType として効き、
-  # 「認証なしの Function URL 経由の呼び出し」だけにこの許可を縛る。
-  # **アクションが 2 つに増えても、範囲は広がらない。** SDK から
-  # lambda:InvokeFunction を叩くリクエストはこの条件キーを持たないので一致せず、
-  # 下の文では許可されない(許可の出所が別に要る)。誰でも POST を投げられる
-  # ところまでが許可の範囲で、中身の正当性は署名検証(verify.mjs)が守る。
+  # 【2 文目に FunctionUrlAuthType は付けられない】
+  # 付けると "FunctionUrlAuthType is only supported for lambda:InvokeFunctionUrl action"
+  # で作成に失敗する(これも実際に踏んだ)。条件キーで縛れるのは 1 文目だけ。
+  #
+  # 【結果として 2 文目は広い。そのうえで受け入れている】
+  # 条件が付けられないので、2 文目は「任意の AWS プリンシパルがこの関数を Invoke できる」
+  # という意味になる。狭める手段が無いため、次の 2 つで実害を抑える方針を採る。
+  #   1. **署名検証(verify.mjs)が本体の防御。** 呼べても承認はできず 401 で終わる
+  #   2. **ReservedConcurrentExecutions: 5** で費用と影響範囲に上限を置く
+  # → ADR-0014 の「結果として生じること」に代償として記録した。
   InteractionUrlPermission:
     Type: AWS::Lambda::Permission
     Properties:
@@ -773,7 +776,6 @@ Resources:
       FunctionName: !GetAtt InteractionFunction.Arn
       Action: lambda:InvokeFunction
       Principal: "*"
-      FunctionUrlAuthType: NONE
 
   # 【フェーズ17 で宛先を Chatbot から SNS に変えた】
   # CodeStarNotifications は Chatbot のチャンネル設定を直接指せる(AWSChatbotSlack)が、

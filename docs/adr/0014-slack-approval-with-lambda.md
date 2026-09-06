@@ -219,6 +219,30 @@ s3://nuxt-java-practice-cfn-templates-<アカウントID>/templates/<ハッシ�
 **`create-change-set` 方式には寄せない** —— 差分表示と Replacement ガードは
 RDS も ECS も無い `pipeline.yml` には意味が無く、ADR-0009 の読み替えはそのまま維持する。
 
+### 8. Function URL の呼び出し許可が、狙ったより広くなる
+
+**`AuthType: NONE` の Function URL を成立させるには、リソースベースポリシーにアクションが 2 つ要る。**
+
+| アクション | 条件 `lambda:FunctionUrlAuthType: NONE` |
+|---|---|
+| `lambda:InvokeFunctionUrl` | **付けられる**(付けないと URL 経由でも弾かれる) |
+| `lambda:InvokeFunction` | **付けられない** |
+
+2 つ目に条件を付けると、作成時に `FunctionUrlAuthType is only supported for lambda:InvokeFunctionUrl action` で失敗する。**条件で縛れるのは 1 文目だけ。**
+
+その結果、2 文目は `Principal: "*"` のまま条件無しになり、**任意の AWS プリンシパルがこの関数を Invoke できる**状態になる。当初は「条件があるので範囲は広がらない」と考えていたが、**それは誤りだった。**
+
+**狭める手段が無いと分かったうえで受け入れる。** 実害を抑えているのは次の 2 つで、**アクセス制御ではなく処理の中身で守る**形になっている。
+
+1. **署名検証(`verify.mjs`)が本体の防御。** 呼び出せても、Slack の署名が無ければ `401` を返して終わる。**承認は通らない**
+2. **`ReservedConcurrentExecutions: 5`** が同時実行数の上限。費用も影響範囲も面積で抑える
+
+**残るリスクは、無駄な起動による僅かな費用と、同時実行枠を埋められることによる承認の遅延。** どちらも一時的で、失われるものが無い。
+
+> **踏んだ順序を残しておく。** `lambda:InvokeFunctionUrl` だけを書いた状態では、**URL は正常に作られるのに全リクエストが 403 になり、関数は 1 度も起動しないのでログにも何も残らない。**
+> しかも Slack は保存時に Request URL の疎通を見るため、**Interactivity のトグルが On にならない**という別の症状としても現れる。Slack 側を触っても直らない。
+> 診断の近道は 2 つ。**コンソールの関数ページが「2 つ付与せよ」と警告してくれる**ことと、`aws lambda invoke`(URL を経由しない)で関数の健全性を先に切り分けること。
+
 ### 8. Slack のアプリ枠を 1 つ使う
 
 無料プランは 10 個まで。Amazon Q Developer(アラート用に残る)と合わせて **2/10**。
