@@ -27,6 +27,14 @@
 version: 0.2
 
 env:
+  # 【bash を明示しないと dash で走る】
+  # CodeBuild の Linux 既定シェルは /bin/sh で、standard:7.0(Ubuntu)では dash。
+  # このファイルは bash 固有の記法を 2 つ使っているので、無指定だと PRE_BUILD が
+  # 即座に exit 2 で落ちる(実際に踏んだ)。
+  #   - set -o pipefail        … dash は -o pipefail を知らない(Illegal option)
+  #   - ${VAR:0:7} の部分文字列 … dash では Bad substitution
+  shell: bash
+
   # 承認の通知や後続アクションから参照できるようにしておく。
   # 【ここに並べるだけでは参照できない】
   # pipeline.yml の Build アクションに Namespace: BuildVariables が要る。
