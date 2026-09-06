@@ -1,8 +1,11 @@
-# Slack にアラートを流す(Amazon Q Developer in chat applications)
+# Slack にアラートを流し、デプロイを承認する(Amazon Q Developer in chat applications)
 
-> 方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、検知層そのものの設計 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)
+> 方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)(アラート)/ [ADR-0013](../adr/0013-app-deploy-with-code-services.md)(デプロイ承認)
+> 検知層そのものの設計 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)
 
-CloudFormation スタックが作る CloudWatch アラームと RDS イベントを、Slack の 2 チャンネルに流すための手順書。**AWS 側は `cfn-apply` が作るので、ここに書くのは Slack 側の手動作業と、そこで得た ID を `params` に書き写すところまで。**
+CloudFormation スタックが作る CloudWatch アラームと RDS イベント、そしてデプロイパイプラインの通知を Slack に流すための手順書。**AWS 側はスタックが作るので、ここに書くのは Slack 側の手動作業と、そこで得た ID を `params` に書き写すところまで。**
+
+チャンネルは 3 つある。**うち 1 つ(`#njp-deploy`)だけは、Slack から AWS を操作できる。**
 
 ## 0. 全体像
 
@@ -17,10 +20,15 @@ RDS イベント購読 ─────────┤
               Slack チャンネル 2 つ
 ```
 
-| SNS トピック | Slack チャンネル | 流れてくるもの |
-|---|---|---|
-| `nuxt-java-practice-stg-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足(D) |
-| `nuxt-java-practice-stg-rds-alerts` | `#njp-alerts-rds` | RDS のメトリクス(A)・ログ由来(B)・イベント購読(C) |
+| 経路 | Slack チャンネル | 流れてくるもの | Slack からの操作 |
+|---|---|---|---|
+| SNS `...-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足(D) | できない(`AWSDenyAll`) |
+| SNS `...-rds-alerts` | `#njp-alerts-rds` | RDS のメトリクス(A)・ログ由来(B)・イベント購読(C) | できない(`AWSDenyAll`) |
+| CodeStar Notifications | `#njp-deploy` | デプロイの承認待ち・成否 | **承認できる** |
+
+**`#njp-deploy` だけ SNS を挟まない。** CodeStar Notifications は Chatbot のチャンネル設定を直接ターゲットにできる(`TargetType: AWSChatbotSlack`)。アラート系が SNS を挟んでいるのは、CloudWatch アラームが SNS にしか送れないからで、こちらにはその制約が無い。
+
+**`#njp-deploy` の設定だけ別スタックにある。** アラート用 2 本は `app.yml`(作り捨て)、承認用は `pipeline.yml`(常駐)。パイプラインと同じライフサイクルだから。
 
 **チャンネルの分割単位は SNS トピックの分割単位。** Chatbot 側にフィルタ機能は無く、「どのアラームがどのチャンネルに出るか」はテンプレートで各アラームの `AlarmActions` にどちらのトピックを指定しているかで決まる。チャンネルを増やしたければ、まずトピックを増やすことになる。
 
@@ -36,12 +44,13 @@ Slack の通知というと「カスタムアプリを作って Incoming Webhook
 
 その結果、**Slack に入れるのは自分で作るカスタムアプリではなく、App Directory にある公式の「Amazon Q Developer」アプリ 1 つ**になる。無料プランのアプリ枠 10 個のうち 1 つを使う。
 
-## 2. Slack にチャンネルを 2 つ作る
+## 2. Slack にチャンネルを 3 つ作る
 
-ワークスペース「自分用」に **public チャンネル**を 2 つ作る。
+ワークスペース「自分用」に **public チャンネル**を 3 つ作る。
 
 - `njp-alerts-ecs`
 - `njp-alerts-rds`
+- `njp-deploy` — デプロイの承認と通知(フェーズ16 で追加)
 
 **private でも動くが public にしている。** 1 人のワークスペースで private にする実利が無く、private にすると「アプリを招待し忘れて無音」という経路が 1 つ増えるため。
 
@@ -64,13 +73,13 @@ Slack の通知というと「カスタムアプリを作って Incoming Webhook
 
 ## 4. 各チャンネルにアプリを招待する
 
-**2 つのチャンネルそれぞれで**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
+**3 つのチャンネルそれぞれで**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
 
 `/invite @Amazon Q` とテキストで打ち切る形は勧めない。アプリ名に空白が入るうえ、メンションが候補から確定されていないと**ただの人の招待コマンドとして解釈されて弾かれる**。上の UI から選ぶほうが確実。
 
 **これを忘れるとスタックは成功するのに通知だけ届かない。** チャンネル ID は実在するのでリソースの作成は通り、投稿の段になって初めて失敗する。
 
-## 5. チャンネル ID を 2 つ控える
+## 5. チャンネル ID を 3 つ控える
 
 Slack の左ペインでチャンネル名を右クリック → **リンクをコピー**。URL の末尾がチャンネル ID。
 
@@ -83,7 +92,7 @@ https://自分用.slack.com/archives/C0123ABCDEF
 
 ## 6. `params` に書き写す
 
-`cloudformation/params/stg.json` と `prod.json` の 3 つのプレースホルダを置き換える。
+`cloudformation/params/stg.json` と `prod.json`(アラート用)。
 
 ```json
 { "ParameterKey": "SlackWorkspaceId",  "ParameterValue": "T0123ABCDEF" },
@@ -91,9 +100,28 @@ https://自分用.slack.com/archives/C0123ABCDEF
 { "ParameterKey": "SlackChannelIdRds", "ParameterValue": "C0456GHIJKL" },
 ```
 
-**この 3 つは秘密ではないので `params` に平文で置く。** ID を知っていても、ワークスペースを認可済みの AWS アカウントからでなければ使えない。「知っていれば誰でも投稿できる」webhook URL とはここが違う。`HostedZoneId` と同じ扱いで、GitHub の Environment secret にはしない(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
+`cloudformation/params/pipeline-stg.json` と `pipeline-prod.json`(承認用)。
+
+```json
+{ "ParameterKey": "SlackWorkspaceId",     "ParameterValue": "T0123ABCDEF" },
+{ "ParameterKey": "SlackChannelIdDeploy", "ParameterValue": "C0789MNOPQR" },
+```
+
+**これらは秘密ではないので `params` に平文で置く。** ID を知っていても、ワークスペースを認可済みの AWS アカウントからでなければ使えない。「知っていれば誰でも投稿できる」webhook URL とはここが違う。`HostedZoneId` と同じ扱いで、GitHub の Environment secret にはしない(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
 置き換え忘れると **Change Set の作成が `Parameter 'SlackWorkspaceId' must match pattern` で落ちる**(テンプレート側に `AllowedPattern` を付けてあるため)。プレースホルダのまま構築が成功して無音になるより、止まるほうがマシという判断。
+
+## 6-2. デプロイ承認だけは権限を持つ
+
+アラート用 2 本の `GuardrailPolicies` は **`AWSDenyAll`** のままにしてある。通知の一方向だけなら権限はゼロでよい、という [ADR-0011](../adr/0011-slack-notification-with-chatbot.md) の判断は変えない。
+
+一方 `#njp-deploy` は承認のために **`codepipeline:PutApprovalResult`** が要る。そこであちらを緩めるのではなく、**承認専用の 3 本目**を `pipeline.yml` に建てて、権限をそこだけに閉じ込めている。
+
+- チャンネルロールと `GuardrailPolicies` は **AND** で効く。どちらにも同じ権限が要る
+- **`GuardrailPolicies` を省略すると `AdministratorAccess` が既定で適用される。** 必ず明示する
+- 許可しているのは `PutApprovalResult` / `GetPipelineState` / `GetPipelineExecution` の 3 つで、対象もこのパイプラインに限定してある
+
+承認の操作は、通知に付くボタンか `@Amazon Q` へのコマンドで行う。**どちらの見え方になるかは実機で確認する**(→ [フェーズ16 の設計書 §6](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md))。
 
 ## 7. 反映して確かめる
 
@@ -115,10 +143,33 @@ https://自分用.slack.com/archives/C0123ABCDEF
 | Slack のチャンネルとアプリの追加(§2・§4) | **残る** | 何もしなくてよい |
 | SNS トピック 2 本 | 消える | スタックが同じ名前で作り直す |
 | Chatbot のチャンネル設定 | 消える | スタックが作り直す |
+| CloudWatch Logs の `/aws/chatbot/...`(us-east-1) | **残る**(スタックの外にあるため) | 何もしなくてよい → §8-2 |
 
 **毎回踏む手作業は無い。**これがメール通知から移った一番の実利で、以前は建てるたびに SNS の購読確認メールを 2 通踏む必要があり、踏み忘れた系統は無音のままだった(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
 **チャンネル設定を常駐にはできない。** トピック名が固定なので ARN は毎回同じになり、設定を手動で作って使い回せそうに見えるが、Chatbot の設定は対象トピックに自分自身を購読させる形で動くため、**撤収でトピックが消えるとその購読も失われる。**次に建てても Chatbot 側から繋ぎ直すまで無音になるので、設定はスタック内に置いて毎回作り直している。
+
+## 8-2. Chatbot のログは us-east-1 に、スタックの外に残る
+
+**ロググループ名は `/aws/chatbot/<ConfigurationName>`。** このリポジトリでは 3 つできる。
+
+| チャンネル設定 | ロググループ |
+|---|---|
+| `nuxt-java-practice-<env>-ecs-task-shortage`(`app.yml`) | `/aws/chatbot/nuxt-java-practice-<env>-ecs-task-shortage` |
+| `nuxt-java-practice-<env>-rds-alerts`(`app.yml`) | `/aws/chatbot/nuxt-java-practice-<env>-rds-alerts` |
+| `nuxt-java-practice-<env>-deploy`(`pipeline.yml`) | `/aws/chatbot/nuxt-java-practice-<env>-deploy` |
+
+**リージョンは us-east-1 で固定。** このリポジトリのスタックは ap-northeast-1 に建てるが、Chatbot のログはそこには出ない。公式ドキュメントが「ログを見るときは US East (N. Virginia) を指定すること」と明記している(→ [Accessing Amazon CloudWatch Logs](https://docs.aws.amazon.com/chatbot/latest/adminguide/cloudwatch-logs.html))。**コンソールで探して見つからないときは、たいていリージョンを間違えている。**
+
+**ロググループを作るのは Chatbot 自身で、スタックではない。** したがって、
+
+- **撤収しても消えない。** `app.yml` のチャンネル設定は作り捨てだが、ログは残り続ける
+- **保持期間は既定の無期限。** テンプレートの `LogRetentionDays` はここには効かない(あれが効くのは `pipeline.yml` が自分で作る CodeBuild のロググループだけ)
+- **同じリージョンのスタックに `AWS::Logs::LogGroup` を書いても代わりにはならない。** 作られるのは ap-northeast-1 で、Chatbot が使う us-east-1 のものとは別物になる
+
+**`LoggingLevel: NONE` にしてもロググループは消えない。** コマンド実行の監査ログは常時有効で無効化できないと明記されている。**Slack からの承認は「コマンドの実行」**なので、承認するたびに監査イベントが出る。`NONE` で減るのはエラーログのほうだけ。
+
+書き込まれる量はエラーと承認の監査だけなので、放っておいても課金上の実害はほぼ無い。それでも保持期間を付けるなら、**us-east-1 に対する、スタックの外の操作**になる。
 
 ## 9. 無料プランで効いてくる制限
 
@@ -139,5 +190,6 @@ https://自分用.slack.com/archives/C0123ABCDEF
 | `ConfigurationName` の衝突で `CREATE_FAILED` | コンソールで手動のチャンネル設定を作っていないか(→ §3 の最後)。同名はアカウント内で 1 つだけ |
 | スタックは成功したのに Slack に何も来ない | **チャンネルに Amazon Q Developer を追加し忘れていないか**(→ §4)。次に、コンソールの **テストメッセージを送信** で切り分ける |
 | テストメッセージは届くがアラートが来ない | アラーム側の問題。まだ一度も `ALARM` になっていないだけの可能性が高い。`aws cloudwatch describe-alarms` で状態を見る |
-| 転送が失敗している理由を知りたい | CloudWatch Logs の `/aws/chatbot/...`。テンプレートは `LoggingLevel: ERROR` にしてある |
+| 転送が失敗している理由を知りたい | CloudWatch Logs の `/aws/chatbot/<ConfigurationName>`。テンプレートは `LoggingLevel: ERROR` にしてある。**リージョンは us-east-1**(→ §8-2) |
+| Slack から承認を押したのに進まない | 同じく `/aws/chatbot/nuxt-java-practice-<env>-deploy`(us-east-1)。`codepipeline:PutApprovalResult` が `GuardrailPolicies` とチャンネルロールの AND で通っているかを見る(→ §6-2) |
 | Slack から AWS のコマンドを打ちたい | 意図的に塞いである。`GuardrailPolicies` に `AWSDenyAll` を入れているので、緩めるならそこを変える(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)) |
