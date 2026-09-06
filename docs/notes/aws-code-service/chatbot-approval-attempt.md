@@ -193,3 +193,66 @@ Automation を採らなかったのは費用対効果。SSM ドキュメント�
 **カスタムアクションはコンソールで作る手動リソース**でもあった。
 CloudFormation の管理外なので、ワークスペースを作り直したら再作成が要る。
 **`AWS::Chatbot::CustomAction` で IaC 化できるかは未確認のまま。**
+
+---
+
+## 7. やめた後に残るもの — スタックの外にできた 2 つ
+
+**Chatbot 方式のリソースをテンプレートから消しても、AWS 側に 2 つ残った。**
+どちらも**スタックが作ったものではない**ので、スタックの更新でも削除でも道連れにならない。
+フェーズ17 から数日後に SNS のトピック一覧で見つけて手で消した。
+
+| 残ったもの | 誰が作ったか | リージョン |
+|---|---|---|
+| SNS トピック `CodeStarNotifications-<チャンネル設定名>-<40 桁の 16 進>` | CodeStar Notifications | スタックと同じ |
+| ロググループ `/aws/chatbot/<チャンネル設定名>` | Chatbot | **us-east-1** |
+
+### なぜ SNS トピックができるのか
+
+**`TargetType: AWSChatbotSlack` は「SNS を挟まない」書き方であって、
+実際に SNS を通らないわけではない。** CodeStar Notifications は Chatbot を宛先に指定されると、
+**配送用の SNS トピックを自分で作って間に挟む。** だからトピック名に
+`AWS::Chatbot::SlackChannelConfiguration` の `ConfigurationName` が入る
+(パイプライン名でもデプロイグループ名でもない)。末尾の 16 進は宛先のハッシュ。
+
+**このトピックは CloudFormation の管理外**なので、`DeployApprovalChannel` を消しても残る。
+購読(Chatbot への配送先)だけが消えて、空のトピックが居座る形になる。
+
+### 消してよいかの確かめ方
+
+```bash
+# 購読が空か
+aws sns list-subscriptions-by-topic --topic-arn <トピックのARN>
+
+# このトピックを宛先にしている通知ルールが無いか
+aws codestar-notifications list-notification-rules
+aws codestar-notifications describe-notification-rule --arn <ルールのARN> \
+  --query '{name:Name,targets:Targets[].TargetAddress}'
+```
+
+現行(フェーズ17)のルールは 1 本で、宛先は `pipeline.yml` の
+`PipelineNotificationTopic`(`<プロジェクト>-<env>-pipeline-notifications`)。
+これ以外を指すルールが無ければ、`aws sns delete-topic` してよい。
+
+### ロググループの方
+
+`LoggingLevel: ERROR` を書いた分だけ Chatbot が us-east-1 に作る(→ [docs/slack/README.md](../../slack/README.md) §8-2)。
+**保持期間は無期限**で、これもスタックの外。
+
+```bash
+aws logs describe-log-groups --region us-east-1 \
+  --log-group-name-prefix /aws/chatbot/<プロジェクト> \
+  --query 'logGroups[].{name:logGroupName,retention:retentionInDays,bytes:storedBytes}'
+```
+
+**アラート用(`app.yml` の 2 本)のロググループは現役なので消さないこと。**
+承認チャンネル(`-deploy`)の分だけを消す。
+なお**エラーが一度も出ていないチャンネル設定はロググループ自体が作られない**ので、
+一覧に出てこないことがある(`-ecs-task-shortage` がそうだった)。
+
+### 教訓
+
+**AWS が「自分で作ってくれる」リソースは、CloudFormation の撤収から漏れる。**
+Chatbot・CodeStar Notifications のように**サービスが裏でリソースを立てる**組み合わせを
+やめるときは、テンプレートから消しただけで終わりにせず、コンソールか CLI で
+現物を数えること。作り捨て運用のつもりでも、こういうものが少しずつ残っていく。
