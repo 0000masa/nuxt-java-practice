@@ -156,8 +156,8 @@ Lambda が投稿するのは**コンソールへのリンク**ではなく、**A
 
 | 関数 | 起動 | AWS 権限 |
 | --- | --- | --- |
-| `<プロジェクト>-<env>-slack-notify` | SNS サブスクリプション | `codepipeline:GetPipelineExecution` / `ssm:GetParameter` / `kms:Decrypt` |
-| `<プロジェクト>-<env>-slack-interaction` | Function URL | `codepipeline:GetPipelineState` + `PutApprovalResult` / `ssm:GetParameter` / `kms:Decrypt` |
+| `<プロジェクト>-<env>-slack-notify` | SNS サブスクリプション | `codepipeline:GetPipelineExecution` / `ssm:GetParameter` |
+| `<プロジェクト>-<env>-slack-interaction` | Function URL | `codepipeline:GetPipelineState` + `PutApprovalResult` / `ssm:GetParameter` |
 
 **1 つにまとめない理由は最小権限。** まとめると、SNS から呼ばれるだけの経路にも承認権限が付いてくる。
 分ければ **公開エンドポイントを持つ関数だけが承認権限を持つ**形に閉じられる。
@@ -165,8 +165,12 @@ Lambda が投稿するのは**コンソールへのリンク**ではなく、**A
 **`notify` が `GetPipelineExecution` を持っているのは設計から動いた点**(→ 5-2)。
 当初は権限ゼロの想定だった。
 
-`kms:Decrypt` は `Resource: "*"` だが `kms:ViaService` を `ssm.<リージョン>.amazonaws.com` に
-限定しているので、**SSM 経由の復号以外には使えない。**
+**どちらも `kms:Decrypt` は持たない。** SecureString なので `WithDecryption: true` を付けており、
+SSM は呼び出し元の身分のまま KMS を呼ぶが、**既定の `aws/ssm` キーのキーポリシーが
+「同じアカウントの主体が SSM 経由で復号すること」を直接許している**(`kms:CallerAccount` と
+`kms:ViaService` の条件が付いた `Principal: "*"`)ため、IAM 側に書き足す必要が無い。
+明示が要るのは SecureString を**カスタマーマネージドキー**で作ったときで、そのキーのポリシーは
+IAM に委譲する形が既定だから。`app.yml` のタスク実行ロール(`SsmSecureStrings`)と同じ判断。
 
 ### 決定7 Function URL(`AuthType: NONE`)+ 署名検証 + `ReservedConcurrentExecutions: 5`
 
@@ -375,7 +379,7 @@ done
 | 押下時に承認が終わっていた場合 | 設計になし | **`findToken` が空なら「すでに終わっています」を返す** | コンソールで承認した場合とタイムアウトした場合、Slack のメッセージにボタンが残る(ADR-0014 の「結果 3」)。押されても壊れないようにした |
 | テストファイルの置き場 | `interaction/` 配下 | **`test/` に分けた** | `Code:` が指すディレクトリに入れると **zip に混ざる** |
 | SNS トピックの保護 | 設計になし | **`aws:SourceAccount` 条件を付けた** | `codestar-notifications.amazonaws.com` に `sns:Publish` を開ける以上、他アカウントのルールから撃ち込まれない条件を足す |
-| `kms:Decrypt` の絞り方 | 未定 | **`kms:ViaService` で SSM 経由に限定** | 既定の SSM キーはエイリアスしか無く ARN で絞りにくい。**経由するサービスで絞れば同じ効果**になる |
+| `kms:Decrypt` | 未定 | **持たせない** | 一度は `kms:ViaService` で SSM 経由に絞って書いたが、**既定の `aws/ssm` キーのキーポリシーが同じアカウントからの SSM 経由の復号を直接許している**ので IAM 側は要らなかった。要るのは CMK に替えたときだけ。`app.yml` のタスク実行ロールが最初からこの判断で、**同じ状況で 2 つの書き方が並んでいると「なぜこちらには要るのか」を毎回考えることになる**ので揃えた |
 | zip の置き場 | テンプレート置き場を `lambda/` プレフィックスで間借り | **Lambda 専用バケットを新設**(`...-lambda-artifacts-<アカウントID>` / `slack-approval/`) | **保存要件が正反対**だった。テンプレートは CloudFormation が中身を写し取るので消えても困らない(30 日で削除)が、zip はスタックが `S3Key` で参照し続け、**消えるとロールバックが失敗する**。同居させると将来ライフサイクルを触ったときに**静かに壊れる** |
 | `pipeline.yml` の渡し方 | 直接渡す(40,131 バイトで上限内) | **`deploy --s3-bucket` で S3 経由** | `app.yml` と揃える。技術的な必要は無いが、上限まで残り 11 KB で**日本語コメントは 1 文字 3 バイト**。超えた日に `DeployBucketRequiredError` で足を止めない先回り |
 
