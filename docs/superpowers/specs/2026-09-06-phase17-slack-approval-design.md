@@ -223,8 +223,9 @@ Code: ../lambda/slack-approval/notify   # 相対パスはテンプレートの�
 `Code` を `S3Bucket` / `S3Key` に差し替えたテンプレートが出力される。
 **`sam` CLI は要らない。**`package` は AWS CLI の標準コマンド。
 
-**S3 は既存のテンプレート置き場を使い回す**(`--s3-prefix lambda`)。
-バケットもそこへの `s3:PutObject` 権限(`gha-cfn-stg` の `PutTemplate`)も既にある(→ ADR-0008)。
+**zip は Lambda 専用のバケットに置く**(`--s3-prefix slack-approval`)。
+テンプレート置き場を間借りする案もあったが、**保存要件が正反対なので分けた**(→ 5-2)。
+バケットは手動管理の常駐リソースで、`gha-cfn-stg` に `PutLambdaCode` を足す必要がある。
 
 **SAM を捨てた理由。** 同じファイル・同じスタックに書ける点は SAM も同じで、
 `--s3-bucket` を指定すれば専用バケットも作られない。**当初考えていたほどの障害は無い。**
@@ -348,8 +349,9 @@ done
 | --- | --- |
 | 冒頭 | `node --test lambda/slack-approval/test/*.test.mjs`(AssumeRole より前。AWS に触らないため) |
 | 「前提を確かめる」 | SecureString 2 つの存在チェックを追加(→ 決定13) |
-| 新規ステップ | `aws cloudformation package`(`--s3-prefix lambda`。zip 化と S3 アップロード) |
-| 「スタックを反映する」 | `--template-file` を `package` の出力に変更 |
+| 新規ステップ | `aws cloudformation package`(**Lambda 専用バケット** / `--s3-prefix slack-approval`。zip 化と S3 アップロード) |
+| 「スタックを反映する」 | `--template-file` を `package` の出力に変更。あわせて **`--s3-bucket`(テンプレート置き場)を追加**し、`app.yml` と渡し方を揃える |
+| 「前提を確かめる」 | `aws sts get-caller-identity` を 1 回だけ引いて `account` を outputs に置く(バケット名の組み立てに 2 か所で使う) |
 | 「結果をサマリに出す」 | `SlackInteractionUrl` を出す(初回に Slack App へ登録するため) |
 
 ### `cloudformation/params/pipeline-{stg,prod}.json`
@@ -359,7 +361,8 @@ done
 ### その他のドキュメント
 
 `docs/slack/README.md`(Slack App の作成手順)、
-`docs/infrastructure/cloudformation-operations.md`(§4 の SecureString が 4 → 6、§2-2 に `CheckSlackSecrets`)、
+`docs/infrastructure/cloudformation-operations.md`(§4 の SecureString が 4 → 6、
+§3 が「S3 バケットを 2 つ作る」に、§2-2 に `CheckSlackSecrets` と `PutLambdaCode`)、
 `docs/test/README.md`(Lambda のテスト)、`CLAUDE.md`(`lambda/` をフォルダ構成に追加)。
 
 ## 5-2. 実装で確定したこと(設計から動いた点)
@@ -373,6 +376,8 @@ done
 | テストファイルの置き場 | `interaction/` 配下 | **`test/` に分けた** | `Code:` が指すディレクトリに入れると **zip に混ざる** |
 | SNS トピックの保護 | 設計になし | **`aws:SourceAccount` 条件を付けた** | `codestar-notifications.amazonaws.com` に `sns:Publish` を開ける以上、他アカウントのルールから撃ち込まれない条件を足す |
 | `kms:Decrypt` の絞り方 | 未定 | **`kms:ViaService` で SSM 経由に限定** | 既定の SSM キーはエイリアスしか無く ARN で絞りにくい。**経由するサービスで絞れば同じ効果**になる |
+| zip の置き場 | テンプレート置き場を `lambda/` プレフィックスで間借り | **Lambda 専用バケットを新設**(`...-lambda-artifacts-<アカウントID>` / `slack-approval/`) | **保存要件が正反対**だった。テンプレートは CloudFormation が中身を写し取るので消えても困らない(30 日で削除)が、zip はスタックが `S3Key` で参照し続け、**消えるとロールバックが失敗する**。同居させると将来ライフサイクルを触ったときに**静かに壊れる** |
+| `pipeline.yml` の渡し方 | 直接渡す(40,131 バイトで上限内) | **`deploy --s3-bucket` で S3 経由** | `app.yml` と揃える。技術的な必要は無いが、上限まで残り 11 KB で**日本語コメントは 1 文字 3 バイト**。超えた日に `DeployBucketRequiredError` で足を止めない先回り |
 
 ### 引っかかりやすい罠を 2 つ、テンプレートに書き残した
 
@@ -406,10 +411,12 @@ done
    `Timeout` は 10 秒に設定しているが、これは Lambda 側の上限であって Slack の制限とは別。
    間に合わない場合は、**先に 200 を返してから `response_url` に POST する形**に組み替える
    (`response_url` は 30 分 / 5 回まで有効)。
-3. **`pipeline-destroy.yml` でスタックを消しても、`package` が S3 に上げた zip は残る。**
-   テンプレート置き場のバケットは手動管理の常駐リソース(→ ADR-0008)なので、
-   オブジェクトだけが取り残される。**テンプレート自体も同じ扱いなので運用の形は変わらない**が、
-   掃除するかどうかは未定。するならライフサイクルルール(`lambda/` プレフィックスに期限)が素直。
+3. ~~`package` が上げた zip の掃除~~ **決着済み。掃除しない。**
+   `pipeline-destroy.yml` でスタックを消しても zip は残るが、**それが正しい**。
+   ロールバックは古い `S3Key` を取りに行くので、消す仕掛けを入れると静かに壊れる。
+   専用バケットにはライフサイクルもバージョニングも設定せず、`pipeline-destroy.yml` からも触らない
+   (**stg と prod で共用しているので、片方の撤収がもう片方を壊す**)。
+   増えるのはコードを変えたときだけ(`package` は中身のハッシュで重複を飛ばす)なので、数 KB 単位。
 4. **`ReservedConcurrentExecutions: 5` が実運用の邪魔にならないか。**
    1 人で使う分には十分だが、**アカウント全体の同時実行数からこの 5 が予約で差し引かれる。**
    他に Lambda を置いていないので今は影響しない。
