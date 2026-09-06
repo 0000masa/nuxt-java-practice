@@ -126,7 +126,7 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 | 用途 | IAM ロール名 | GitHub Secrets 名 | 状態 |
 |---|---|---|---|
-| ~~ECR にイメージを push~~ | ~~`nuxt-java-practice-gha-ecr-push`~~ | ~~`AWS_ECR_PUSH_ROLE_ARN`~~ | **フェーズ16 で不要になった。** イメージを作るのは CodeBuild(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。ロールと Secret は消してよい |
+| ECR にイメージを push | `nuxt-java-practice-gha-ecr-push` | `AWS_ECR_PUSH_ROLE_ARN`(**Repository**) | **`main` では使わない。** イメージを作るのは CodeBuild(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。**凍結ブランチの `ecr-push.yml` が使うので消さない**(→ [ADR-0012](../adr/0012-deploy-method-per-branch.md)) |
 | CloudFormation を叩く | `nuxt-java-practice-gha-cfn-stg` | `AWS_CFN_DEPLOY_ROLE_ARN`(Environment) | 作成手順 → [cloudformation-operations.md](./cloudformation-operations.md) §2-2 |
 | DB タスクを Run Task する | `nuxt-java-practice-gha-dbtask-stg` | `AWS_DB_TASK_ROLE_ARN`(Environment) | 作成手順 → [cloudformation-operations.md](./cloudformation-operations.md) §2-3 |
 | CloudFormation がリソースを作る | `nuxt-java-practice-cfn-service-stg` | `AWS_CFN_SERVICE_ROLE_ARN`(Environment) | 作成手順 → [cloudformation-operations.md](./cloudformation-operations.md) §2-1 |
@@ -139,7 +139,7 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 **登録手順(値の集め方・画面での操作・確認)→ [GitHub に登録する Secrets(5 つ)](./github-secrets.md)。**
 
-**Secrets は Environment secrets に置く。** GitHub Free のプライベートリポジトリでも Environment と Environment secrets は使えるが、**protection rules(required reviewers・ブランチ制限)は使えない**。そのためブランチ制限は IAM の信頼ポリシー(`token.actions.githubusercontent.com:ref` 条件)で掛けている。
+**Secrets は Environment secrets に置く**(例外は上の `AWS_ECR_PUSH_ROLE_ARN` 1 つだけ。`ecr-push.yml` が `environment:` を宣言しないため)。GitHub Free のプライベートリポジトリでも Environment と Environment secrets は使えるが、**protection rules(required reviewers・ブランチ制限)は使えない**。そのためブランチ制限は IAM の信頼ポリシー(`token.actions.githubusercontent.com:ref` 条件)で掛けている。**許しているのは `main` と `github-actions-deploy` の 2 本**で、凍結ブランチをそのまま動かせるようにしてある。
 
 ### スタック構成
 
