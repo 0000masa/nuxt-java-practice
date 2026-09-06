@@ -519,7 +519,7 @@ aws configure sso
 > 押してしまっても `~/.aws/config` のセクション見出しを書き換えるだけでよく、**再ログインは不要**。SSO トークンは `~/.aws/sso/cache/` にセッション名を鍵として保存されており、プロファイル名とは無関係だから。
 >
 > ```ini
-> [profile AdministratorAccess-247064999676]   ← この行を
+> [profile AdministratorAccess-123456789012]   ← この行を
 > [profile masanori-sso]                        ← こう変える
 > ```
 >
