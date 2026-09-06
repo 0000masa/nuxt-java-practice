@@ -330,6 +330,18 @@ Resources:
               # こちらは taskdef.json を register するので 2 本とも渡す。
               # CodeBuild 側が execution-role だけなのは、あちらが register するのが
               # migrate 用(taskRoleArn を持たない)だけだから
+              # 【ecs.amazonaws.com も並べる】
+              # タスク定義に書くのは実行ロールとタスクロールで、どちらを引き受けるのも
+              # ecs-tasks.amazonaws.com なので、理屈の上ではそれだけで足りるはず。
+              # だが CodeDeployToECS アクションの「最小権限」として公式が載せている
+              # ポリシーは 2 つとも並べており、しかも本文は ecs-tasks のほうを
+              # "You can also add ecs-tasks.amazonaws.com to the list" と後付けで説明している
+              # (= 公式の基準は ecs.amazonaws.com のほう)。実機未検証の段階で
+              # 公式の最小構成から引き算する理由が無いので、両方書いておく。
+              # 渡すロールは 2 本に絞ってあるので、宛先が増えても持ち出せる範囲は広がらない。
+              #
+              # 上の PassTaskExecutionRole(CodeBuild 側)に足していないのは、あちらが
+              # register-task-definition を直接叩くだけで、この公式ポリシーの対象外だから。
               - Sid: PassTaskRoles
                 Effect: Allow
                 Action: iam:PassRole
@@ -339,6 +351,7 @@ Resources:
                 Condition:
                   StringEquals:
                     iam:PassedToService:
+                      - ecs.amazonaws.com
                       - ecs-tasks.amazonaws.com
 
   Pipeline:
@@ -421,6 +434,14 @@ Resources:
               OutputArtifacts:
                 - Name: BuildArtifact
               RunOrder: 1
+              # 【これが無いと buildspec の exported-variables を後続から参照できない】
+              # CodeBuild アクションは export された環境変数をすべて変数として産出するが、
+              # "If the namespace isn't specified, the variables produced by the action are
+              #  not available to be referenced in any downstream action configuration."
+              # 名前空間を付けて初めて #{BuildVariables.IMAGE_TAG} と書ける。
+              # 名前は任意(コンソールが自動生成するときは BuildVariables になる)。
+              # → docs/notes/aws-code-service/env-vars-and-logs.md §4-2
+              Namespace: BuildVariables
 
         # 【この承認は 2 つの役割を兼ねている】
         #   1. 本来の役割: Slack で承認が下りるまでデプロイしない
@@ -439,7 +460,14 @@ Resources:
               Configuration:
                 # 通知は NotificationRule 経由で Chatbot に届くので、
                 # ここに NotificationArn(SNS)は指定しない
-                CustomData: !Sub "${ProjectName} (${EnvName}) をデプロイします。承認するとこのイメージが本番のリスナーに切り替わります。"
+                #
+                # 【#{...} は CodePipeline の変数、${...} は !Sub】
+                # 展開する主体が違うので混在させられる。#{BuildVariables.IMAGE_TAG} は
+                # Build アクションの Namespace: BuildVariables と buildspec の
+                # exported-variables で決まる(片方でも欠けると解決されない)。
+                # イメージタグを出しておかないと「どのコミットを承認しようとしているのか」が
+                # 分からないまま押すことになる。→ docs/notes/aws-code-service/env-vars-and-logs.md §4-2
+                CustomData: !Sub "${ProjectName} (${EnvName}) をデプロイします。イメージ: #{BuildVariables.IMAGE_TAG} / push: #{BuildVariables.IMAGE_PUSHED}。承認するとこのイメージが本番のリスナーに切り替わります。"
               RunOrder: 1
 
         - Name: Deploy

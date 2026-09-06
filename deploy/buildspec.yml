@@ -27,7 +27,11 @@
 version: 0.2
 
 env:
-  # 承認の通知や後続アクションから参照できるようにしておく
+  # 承認の通知や後続アクションから参照できるようにしておく。
+  # 【ここに並べるだけでは参照できない】
+  # pipeline.yml の Build アクションに Namespace: BuildVariables が要る。
+  # 名前空間が無いと産出はされるが #{...} で解決されない(実行詳細では見られる)。
+  # → docs/notes/aws-code-service/env-vars-and-logs.md §4-2
   exported-variables:
     - IMAGE_TAG
     - IMAGE_URI
