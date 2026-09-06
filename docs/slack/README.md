@@ -294,5 +294,6 @@ curl -s -w '\nstatus=%{http_code}\n' \
 | Interactivity のトグルが On にならない | **上と同じ原因。** Slack は保存時に Request URL の疎通を見るので、403 が返ると受理しない。**Slack 側をいくら触っても直らない** |
 | ボタンを押しても何も起きない | **Interactivity の Request URL を登録したか**(→ §6-3)。スタックを建て直した後は URL が変わっている |
 | ボタンを押すと Slack にエラーが出る | `/aws/lambda/nuxt-java-practice-<env>-slack-interaction`。`401` なら署名検証で落ちている(`slack_signing_secret` の値違い)。3 秒を超えた場合は Slack 側にタイムアウトが出る |
+| ボタンは動くが `PutApprovalResult に失敗した: AccessDeniedException` | **CodePipeline の ARN は用途で階層が違う。** `GetPipelineState` はパイプライン単位、**`PutApprovalResult` は `<パイプライン>/<ステージ>/<アクション>` のアクション単位**で審査される。IAM にパイプラインの ARN だけを書くと一致しない(→ `pipeline.yml` の `InteractionFunctionRole`) |
 | 「この承認はすでに終わっています」と返る | 正常。コンソールで承認済みか、タイムアウト済みか、`SUPERSEDED` で実行が入れ替わっている |
 | `pipeline-apply` が SecureString で落ちる | §4 の 2 つを作ったか。`gha-cfn-stg` に `CheckSlackSecrets` を足したか(→ [運用手順 §2-2](../infrastructure/cloudformation-operations.md)) |

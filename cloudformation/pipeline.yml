@@ -685,15 +685,27 @@ Resources:
                   - logs:PutLogEvents
                 Resource: !Sub ${InteractionLogGroup.Arn}:*
               # 【承認できるのはこのロールだけ】
-              # GetPipelineState はトークンを取るため(押された時点で読む)。
-              # Chatbot 方式の GuardrailPolicies が持っていた 3 つのうち、
-              # 実際に使う 2 つだけに絞ってある
+              # Chatbot 方式の GuardrailPolicies が持っていた 3 つのうち、実際に使う 2 つ。
+              #
+              # 【2 つは ARN の粒度が違う。1 文にまとめると落ちる(実際に踏んだ)】
+              # CodePipeline の ARN は用途によって階層が変わる。
+              #   パイプライン   arn:aws:codepipeline:<region>:<account>:<pipeline>
+              #   アクション     arn:aws:codepipeline:<region>:<account>:<pipeline>/<stage>/<action>
+              # GetPipelineState はパイプライン単位だが、**PutApprovalResult は
+              # アクション単位**で審査される。パイプラインの ARN だけを書くと
+              # 「.../nuxt-java-practice-stg-app/Approve/Approve on ... is not authorized」
+              # になる。ステージ名とアクション名まで含めて初めて一致する。
+              - Sid: ReadPipelineState
+                Effect: Allow
+                Action: codepipeline:GetPipelineState
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
+              # /* にしているのはステージ名・アクション名を IAM に写さないため。
+              # 対象はこのパイプライン 1 本に固定されており、そもそも
+              # PutApprovalResult が意味を持つのは手動承認アクションだけなので広がらない
               - Sid: Approve
                 Effect: Allow
-                Action:
-                  - codepipeline:GetPipelineState
-                  - codepipeline:PutApprovalResult
-                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app
+                Action: codepipeline:PutApprovalResult
+                Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-app/*
               # kms:Decrypt を持たせない理由は notify 側と同じ(既定の aws/ssm キー)
               - Sid: ReadSigningSecret
                 Effect: Allow
