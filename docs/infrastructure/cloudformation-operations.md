@@ -13,7 +13,7 @@
   1. Route53 ホストゾーン       … 既に作成済み
   2. ECR リポジトリ             … フェーズ11 で作成済み
   3. OIDC プロバイダ            … フェーズ11 で作成済み
-  4. IAM ロール(ECR push 用)   … フェーズ11 で作成済み
+  4. IAM ロール(ECR push 用)   … 凍結ブランチ用に残す(main では使わない)
   5. IAM ロール 3 つ(今回)     … §2
   6. テンプレート置き場の S3     … §3
   7. SSM の SecureString 4 つ   … §4
@@ -26,10 +26,11 @@
 [変更を反映する]      §9
 [撤収する]            §10
 [監視・検知]          §11
-[詰まったとき]        §12
+[パイプライン]        §12
+[詰まったとき]        §13
 ```
 
-**ワークフローは 5 本あるが、AWS を叩くのは 3 本だけ。** `cfn-apply.yml`(CloudFormation)/ `db-task.yml`(ECS Run Task)/ `cfn-destroy.yml`(削除)が実際の操作を持ち、`cfn-deploy.yml`(構築)は **`workflow_call` で前の 2 本を呼ぶ順序だけ**を持っている(→ [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md))。`ecr-push.yml` はイメージの push 専用。
+**ワークフローは 6 本ある。** `app.yml` のスタックを触るのが 4 本で、AWS を叩くのは `cfn-apply.yml`(CloudFormation)/ `db-task.yml`(ECS Run Task)/ `cfn-destroy.yml`(削除)の 3 本だけ。`cfn-deploy.yml`(構築)は **`workflow_call` で前の 2 本を呼ぶ順序だけ**を持っている(→ [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md))。残る 2 本 `pipeline-apply.yml` / `pipeline-destroy.yml` はパイプラインの常駐スタック専用(→ §12)。
 
 ---
 
@@ -43,6 +44,7 @@
 | SSM の SecureString | 外部サービス由来の値(Google)と、人が決める値(app / migrate のパスワード)なので AWS では生成できない |
 | テンプレート置き場の S3 バケット | `app.yml` が 54,178 バイトあり、**リクエストに直接載せられる上限 51,200 バイトを超えている**。CloudFormation がテンプレートを読める場所は S3(か SSM ドキュメント)だけなので中継が必要(→ §3) |
 | Slack ワークスペースの認可とチャンネル | **認可はコンソールでしか行えない**(CloudFormation 不可)。チャンネルと `/invite` も Slack 側の操作。いずれも 1 回きりで、スタックを作り直しても消えない(→ [docs/slack/README.md](../slack/README.md)) |
+| CodeStar Connections(GitHub 接続) | CloudFormation で作れるが、作った直後は `PENDING` で、**コンソールで GitHub と握手するまで `AVAILABLE` にならない。** しかも `PENDING` のままでもスタック作成は成功する(緑なのに機能していない)。パイプラインのスタックは消すことがあるので、接続はその外に置いて握手を 1 回で済ませる(→ §12-1) |
 
 RDS のマスターパスワードは**手動管理ではない**。`ManageMasterUserPassword: true` により RDS が生成して Secrets Manager が保持し、DB を削除するとシークレットも一緒に消える。
 
@@ -163,7 +165,10 @@ aws iam create-role \
           "token.actions.githubusercontent.com:sub": "repo:0000masa@134136756/nuxt-java-practice@1303585339:environment:stg"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:ref": "refs/heads/main"
+          "token.actions.githubusercontent.com:ref": [
+            "refs/heads/main",
+            "refs/heads/github-actions-deploy"
+          ]
         }
       }
     }]
@@ -174,6 +179,10 @@ aws iam create-role \
 
 1. **オーナー ID とリポジトリ ID が入る。** `repo:0000masa@134136756/nuxt-java-practice@1303585339:...` の形。GitHub の「不変サブジェクトクレーム」で 2026-07-15 以降に作られたリポジトリに自動適用される(フェーズ11 で判明した仕様 → [github-actions-oidc.md](./github-actions-oidc.md) §8)
 2. **`environment:` を指定すると `sub` の末尾が `ref:...` ではなく `environment:...` に変わる。** そのため**ブランチ制限は `sub` ではなく別クレーム `ref` の条件**で掛ける。GitHub Free のプライベートリポジトリでは Environment の protection rules(ブランチ制限・required reviewers)が使えないので、AWS 側で縛る形になる
+
+**`ref` に 2 本並べているのは、凍結ブランチからも動かせるようにするため。** `github-actions-deploy` は GitHub Actions でデプロイする構成の「動く記録」なので(→ [ADR-0012](../adr/0012-deploy-method-per-branch.md))、確かめたくなったときに AssumeRole で落ちないようにしてある。条件値を複数書くと **OR** で評価される。値にワイルドカードが無いので `StringLike` は `StringEquals` と同じ働きになるが、書き換えの差分を小さくするため `StringLike` のままにしている。
+
+**ブランチ制限が兼ねていた歯止めが 1 つ外れる。** `refs/heads/main` だけだった間は「凍結ブランチから誤ってスタックを建てる」ことが AWS 側で止まっていた。両方許した以上、**両方の環境を同時に建てない**(スタック名も ECR リポジトリも共用)という運用ルールは人が守ることになる → `CLAUDE.md`。
 
 権限ポリシー:
 
@@ -215,6 +224,18 @@ aws iam put-role-policy \
           "arn:aws:s3:::nuxt-java-practice-stg-logs-archive",
           "arn:aws:s3:::nuxt-java-practice-stg-logs-archive/*"
         ]
+      },
+      {
+        "Sid": "ReadConnection",
+        "Effect": "Allow",
+        "Action": [
+          "codeconnections:GetConnection",
+          "codestar-connections:GetConnection"
+        ],
+        "Resource": [
+          "arn:aws:codeconnections:ap-northeast-1:${ACCOUNT_ID}:connection/*",
+          "arn:aws:codestar-connections:ap-northeast-1:${ACCOUNT_ID}:connection/*"
+        ]
       }
     ]
   }'
@@ -225,6 +246,10 @@ aws iam put-role-policy \
 `PutTemplate` はテンプレートを S3 に置くために要る(→ §3)。**CloudFormation サービスロール側は `s3:*` を持っているので追加不要**(置いたテンプレートを読むのは CloudFormation)。
 
 **`EmptyBuckets` にはバケットが 2 つ並ぶ。** 素の CloudFormation に `force_destroy` 相当が無いので、撤収ワークフローが `aws s3 rm --recursive` で空にしてから消している。**フェーズ14 でログアーカイブのバケットが増えたので、ここに ARN を足していないと撤収が必ず失敗する。**
+
+**`ReadConnection` はフェーズ16 で足した。** `pipeline-apply.yml` が反映の前に `get-connection` で接続が `AVAILABLE` か確かめるため(→ §12-3)。**このロールが CodeStar Connections に触るのはこの 1 回だけ**で、接続を使うのはパイプライン側のロール(`pipeline.yml` の `UseGitHubConnection`)。
+
+**アクションもリソースも 2 つの名前空間を並べているのは、AWS がサービスを改名した名残。** CodeStar Connections は CodeConnections に改名され、IAM のサービスプレフィックスも `codestar-connections` → `codeconnections` になった。**CLI のコマンド名は `aws codestar-connections ...` のままだが、権限は新しいほうの名前で審査される**(足りないときのエラーが `codeconnections:GetConnection is not authorized` になるのはそのため)。接続の ARN も作成時期でどちらかになるので(→ [github-secrets.md](./github-secrets.md) §2-3)、両方書いて綴りを気にしなくて済むようにしている。
 
 **`--description` に日本語は使えない**(`[	
 
@@ -253,7 +278,10 @@ aws iam create-role \
           "token.actions.githubusercontent.com:sub": "repo:0000masa@134136756/nuxt-java-practice@1303585339:environment:stg"
         },
         "StringLike": {
-          "token.actions.githubusercontent.com:ref": "refs/heads/main"
+          "token.actions.githubusercontent.com:ref": [
+            "refs/heads/main",
+            "refs/heads/github-actions-deploy"
+          ]
         }
       }
     }]
@@ -459,7 +487,7 @@ openssl rand -base64 24
 
 > **値の集め方・画面での登録手順・確認方法まで通しで書いたもの → [GitHub に登録する Secrets(5 つ)](./github-secrets.md)。** ここには「何を登録するか」だけを置く。
 
-**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 4 つ登録する。
+**Settings → Environments → New environment** で `stg` を作り、**Environment secrets** に 5 つ登録する。
 
 | Secret 名 | 値 | 使うワークフロー |
 |---|---|---|
@@ -467,12 +495,15 @@ openssl rand -base64 24
 | `AWS_CFN_SERVICE_ROLE_ARN` | `nuxt-java-practice-cfn-service-stg` の ARN | 同上(`--role-arn` に渡す) |
 | `AWS_DB_TASK_ROLE_ARN` | `nuxt-java-practice-gha-dbtask-stg` の ARN | `db-task` |
 | `BASIC_AUTH_CREDENTIAL` | `user:password` の形(コロン区切りの生の文字列) | `cfn-apply` |
+| `AWS_CODESTAR_CONNECTION_ARN` | 握手済みの CodeStar Connections の ARN(→ §12-1) | `pipeline-apply` |
 
 **Environment secrets にしているのがポイント。** prod を作るときは Environment `prod` に同じ名前で別の値を入れれば、ワークフローのコードは一切変えずに切り替わる。
 
 Basic 認証の値は `params/stg.json` には置かない。**base64 化はテンプレート側の `Fn::Base64` が行う**ので、ここには生の `user:password` を入れる。
 
-**この 4 つとは別に、Repository secret が 1 つある。** `ecr-push.yml` が使う `AWS_ECR_PUSH_ROLE_ARN` で、**あのワークフローだけ `environment:` を宣言していない**ため Environment secret では読めない。置き場を間違えると `ecr-push` だけが動かなくなる(→ [github-secrets.md](./github-secrets.md) §1・[github-actions-oidc.md](./github-actions-oidc.md) §6)。
+**Repository secret は 1 つだけ残っている。** `AWS_ECR_PUSH_ROLE_ARN`(`ecr-push.yml` 専用)は `main` では使わない — イメージを作るのは CodeBuild になった(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。**それでも消さないのは、凍結ブランチ `github-actions-deploy` を動かせる状態に保つため**(→ [ADR-0012](../adr/0012-deploy-method-per-branch.md)・[github-secrets.md](./github-secrets.md) §1)。`main` で登録するのは Environment secret の 5 つだけ。
+
+**`AWS_CODESTAR_CONNECTION_ARN` だけ毛色が違う。** ロールの ARN ではなく CodeStar Connections の ARN で、`pipeline.yml` の `ConnectionArn` パラメータにそのまま渡る値。**`params/pipeline-<env>.json` に平文で置かないのは、ARN が AWS アカウント ID を含むから**(このリポジトリは public。しかも params は `--parameter-overrides` に展開されるので Actions のログにも出る)。ロールの ARN を Secret にしているのと同じ理由 → [github-secrets.md](./github-secrets.md) §2-3。
 
 **アラートの通知先はここには無い。** Slack に流すようになり、必要なのはワークスペース ID とチャンネル ID の 3 つだけになった。**いずれも秘密ではないので `params` に平文で置く**(→ §6・[ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。フェーズ14 まであった `ALERT_EMAIL` は不要。
 
@@ -531,9 +562,18 @@ aws sesv2 get-account --query '{Production:ProductionAccessEnabled,Sending:Sendi
 
 ## 8. 環境を建てる
 
+> **先に §12 のパイプラインを建てておくこと。** イメージを作るのはパイプラインの
+> ビルドステージで、`ecr-push.yml` は廃止した(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。
+
 ```
-1. Actions → 「ECR へイメージを push」を実行
-   → ジョブサマリに出るイメージタグ(短縮 SHA)を控える
+1. パイプラインを起動してイメージを作る(→ §12-4)
+   AWS コンソール → CodePipeline → 「リリースの変更」
+   → Source と Build が通り、承認待ちで止まる。ここでは承認しない
+   → Build のログに出るイメージタグ(短縮 SHA)を控える
+
+   ※ この時点ではスタックがまだ無いので、buildspec は taskdef のレンダリングと
+     migrate 用の register を飛ばす。イメージだけが ECR にできる。
+     承認しない限り Deploy には進まないので失敗もしない
 
 2. Actions → 「CloudFormation スタックを作成/更新」を実行
    inputs: env=stg / image_tag=<控えたタグ> / dry_run=false
@@ -551,6 +591,9 @@ aws sesv2 get-account --query '{Production:ProductionAccessEnabled,Sending:Sendi
 
 4. ブラウザで https://stg.njp.mylabinfra.com を開く
    → Basic 認証のダイアログが出る。BASIC_AUTH_CREDENTIAL の値を入力する
+
+5. 手順 1 で承認待ちのまま置いてあるパイプラインを片付ける
+   → 同じイメージなので承認しても何も変わらない。却下しておいてよい
 ```
 
 **なぜ 2 段階なのか。** 必要な順序は `RDS → ユーザー作成 → マイグレーション → サービス起動` だが、CloudFormation には「タスクを流してからサービスを起動する」を表現する手段がない。しかも **ECS サービスは安定するまで最大 3 時間ポーリングされる**ので、起動できない状態で作るとスタックが 3 時間後に失敗する。`DesiredCount=0` なら即座に安定するので、その間に Run Task を回す。
@@ -598,25 +641,34 @@ Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
   5. Change Set を実行して完了を待つ
 ```
 
-**アプリのイメージを更新するのもこのワークフロー。** `image_tag` に `ecr-push.yml` のサマリに出たタグを入れる。空のままにすると**今デプロイされているタグを維持**したまま、テンプレートと `params` の変更だけが反映される(→ [ADR-0007](../adr/0007-app-deploy-inside-cloudformation.md))。
+**アプリのイメージを更新するのはこのワークフローではない。** 通常のリリースは CodePipeline の仕事で(→ §12)、`cfn-apply.yml` の `workflow_dispatch` には `image_tag` を宣言していない。ECS サービスが `CODE_DEPLOY` 制御になり `Service.TaskDefinition` が family 名の固定文字列になったので、ここでタグを渡しても**新しいリビジョンが register されるだけでデプロイはされない**(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。渡せると「タグを変えたのに反映されない」という混乱を生むので、口ごと塞いである。
+
+`image_tag` が残っているのは `workflow_call`(= `cfn-deploy.yml` から呼ばれるとき)だけ。CREATE では `UsePreviousValue` にできる前の値が無いので省略できないため。`web_desired_count` / `allow_missing_stack` / `allow_zero_desired_count` とまったく同じ扱いで、**人間が UI から渡す手段が無いことが安全弁になる。**
 
 ### 3 本の使い分け
 
-| やりたいこと | 使うワークフロー |
+| やりたいこと | 使うもの |
 |---|---|
 | 何も無い状態から環境を建てる | `cfn-deploy.yml`(構築) |
 | `app.yml` / `params` の変更を反映する | **`cfn-apply.yml`(反映)** |
-| 新しいイメージをデプロイする | **`cfn-apply.yml`** に `image_tag` を渡す |
+| **新しいイメージをデプロイする** | **CodePipeline**(→ §12) |
 | create-db-users / migrate をやり直す、任意 SQL | `db-task.yml` |
 | 環境を消す | `cfn-destroy.yml`(撤収) |
+| パイプラインを建てる / 消す | `pipeline-apply.yml` / `pipeline-destroy.yml`(→ §12) |
 
 ### 差分だけ見たいとき
 
 `dry_run=true` で実行すると Change Set を作って差分をサマリに出し、**実行せずに Change Set を削除**して終わる。決定15 のとおり、差分が意味を持つのは既存スタックを更新するときなので、この使い方はここでだけ効く。
 
-### CloudFormation の外から ECS を触らないこと
+### タスク定義は CloudFormation の外が持っている
 
-`aws ecs update-service` を手で叩いても、CloudFormation はドリフトを検知しないので**即座には戻らない**。しかし次にテンプレート側で ECS サービスかタスク定義に差分が出た瞬間、CloudFormation が記憶しているリビジョン(= 古い `ImageTag`)に巻き戻る。緊急で手で叩いたときは、**同じイメージタグを `image_tag` に入れて `cfn-apply.yml` を流し、記憶を合わせておく。**
+かつてここには「CloudFormation の外から ECS を触らないこと」と書いてあった。**`main` ブランチではその前提が逆になっている。**
+
+`Service.TaskDefinition` が family 名の固定文字列になったので、CloudFormation はどのリビジョンが動いているかを知らないし、知る必要もない。巻き戻りは起きない。代わりに **`app.yml` の `AppTaskDefinition` は初回構築でだけ使われる定義**になり、2 代目以降の正は `taskdef.json` に移った。
+
+**環境変数・Secrets・CPU/メモリを変えるときは、`app.yml` と `taskdef.json` の両方を直すこと。** 片方だけだと「構築直後の初回起動だけ古い定義で立ち上がってクラッシュする」という気づきにくい壊れ方をする(スタックは緑、パイプラインも緑、最初のタスクだけ落ちる)。migrate 側も同様に `taskdef-migrate.json` と対になっている。
+
+なお `aws ecs update-service` を手で叩くのは相変わらず避けること。CodeDeploy が管理しているタスクセットと食い違い、次のデプロイで何が起きるか読めなくなる。
 
 ---
 
@@ -630,7 +682,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 **このワークフローは stg 専用。** 本番のスタックを消すボタンは作らない。
 
-**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 4 つ / ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
+**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 4 つ / **CodeStar Connections** / **パイプラインのスタック**(別スタックなので `cfn-destroy` では消えない → §12)/ ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
 
 撤収し忘れると課金が続くもの: **NAT Gateway(約 $0.062/時)・RDS・ALB・WAF(Web ACL 月 $5 + ルール 月 $1 の時間割り)**。
 
@@ -678,12 +730,112 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 
 ---
 
-## 12. 詰まったときの見どころ
+## 12. デプロイパイプライン(CodePipeline / CodeBuild / CodeDeploy)
+
+> 方針 → [ADR-0013](../adr/0013-app-deploy-with-code-services.md)、設計 → [フェーズ16 の設計書](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)
+>
+> **`main` ブランチだけの話。** `github-actions-deploy` ブランチは GitHub Actions でデプロイする(→ [ADR-0012](../adr/0012-deploy-method-per-branch.md))。
+
+アプリのイメージ更新は CodePipeline が担う。`cloudformation/pipeline.yml` は **`app.yml` とは別の常駐スタック**で、アプリのスタックを撤収してもパイプラインは残る。
+
+| スタック | 中身 | ライフサイクル |
+|---|---|---|
+| `nuxt-java-practice-stg-pipeline` | CodePipeline / CodeBuild / アーティファクト S3 / IAM / 承認用 Chatbot 設定 | 常駐 |
+| `nuxt-java-practice-stg` | CodeDeploy の Application + DeploymentGroup / ECS / ALB / RDS | 作り捨て |
+
+`Export` / `ImportValue` は使っていない。パイプラインが必要とするのは `ApplicationName` と `DeploymentGroupName` という**文字列だけ**で、命名規則から予測できるため。おかげでアプリのスタックはいつでも撤収できる。
+
+### 12-1. CodeStar Connections を作る(1 回きり・常駐)
+
+**AWS CLI では握手まで完了できない**(コンソールの OAuth が要る)ので、ここだけコンソールで行う。
+
+```
+1. AWS コンソール → デベロッパー用ツール → 設定 → 接続 → 接続を作成
+2. プロバイダー: GitHub / 接続名: nuxt-java-practice
+3. 「GitHub に接続する」→ GitHub の認証 → 「新しいアプリをインストール」
+   → リポジトリは 0000masa/nuxt-java-practice だけを選ぶ(All repositories にしない)
+4. 「接続」を押す。ステータスが「利用可能」になれば完了
+```
+
+ARN を控える。CLI でも確認できる。
+
+```bash
+aws codestar-connections list-connections \
+  --query 'Connections[].[ConnectionName,ConnectionStatus,ConnectionArn]' --output table
+```
+
+**`AVAILABLE` 以外なら握手が済んでいない。** `pipeline-apply.yml` は流す前にこれを確かめて、`PENDING` なら「コンソールで握手してください」と言って落ちる。
+
+**ARN は `params` ではなく GitHub の Environment secret `AWS_CODESTAR_CONNECTION_ARN` に入れる**(→ [github-secrets.md](./github-secrets.md) §2-3)。`arn:aws:codeconnections:<リージョン>:<アカウントID>:connection/<uuid>` の形でアカウント ID を含むため。登録は次の 1 行で済む。
+
+```bash
+gh secret set AWS_CODESTAR_CONNECTION_ARN --env stg \
+  --body "$(aws codestar-connections list-connections \
+    --query 'Connections[?ConnectionName==`nuxt-java-practice`].ConnectionArn' --output text)"
+```
+
+### 12-2. Slack にチャンネルを 1 つ足す
+
+`#njp-deploy` を作り、`/invite @Amazon Q` する。チャンネル ID を控える。
+**ワークスペースの認可は済んでいる前提**(アラート用に済ませてある)。手順 → [docs/slack/README.md](../slack/README.md)
+
+### 12-3. `params/pipeline-stg.json` を埋めてスタックを建てる
+
+```
+SlackChannelIdDeploy … 12-2 で控えたチャンネル ID
+```
+
+**`ConnectionArn` はこのファイルに無い。** 12-1 の Secret から `pipeline-apply.yml` が `--parameter-overrides` で足す。未登録のまま流すと、スタックを作る前に「secret が空です」で落ちる。
+
+```
+Actions → 「パイプラインのスタックを反映」を実行
+  inputs: env=stg / dry_run=false
+```
+
+`REPLACE_ME_` が残っている、または接続の Secret が空・`PENDING` のときは流す前に落ちる。**設定が欠けたまま作ると、スタックは成功するのにパイプラインがソースを取れない**(ADR-0011 が嫌っていた「緑なのに機能していない」形)ので、そこで止める。
+
+**このスタックは `aws cloudformation deploy` で反映する。** `app.yml` を叩くのは `cfn-apply.yml` だけという [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md) の集約は維持されていて、範囲を「`app.yml` に対して」と読み替えている。あの集約が守りたかった Replacement ガードや `WebDesiredCount` の前提チェックは、RDS も ECS も無い `pipeline.yml` には意味を持たない。
+
+**作った直後にパイプラインが 1 回勝手に走る。** `CreatePipeline` トリガーによる初回実行は無効化できない(AWS の仕様)。承認待ちで止まるので放置してよく、むしろ初回構築ではこれを利用する(→ §8)。
+
+### 12-4. 普段のデプロイ
+
+```
+Source(GitHub)→ Build(CodeBuild)→ Approve(Slack)→ Deploy(CodeDeploy)
+```
+
+- **自動で走る条件**: `main` への push のうち、`backend/**` `frontend/**` `docker/**` `deploy/**` `.dockerignore` のいずれかが変わったとき(`deploy/` にビルド手順とタスク定義が入っている)
+- **手動で走らせる**: コンソールの「リリースの変更」、または `aws codepipeline start-pipeline-execution --name nuxt-java-practice-stg-app`
+- **`cloudformation/**` は含めていない。** テンプレートの反映は `cfn-apply.yml` の仕事なので、インフラを直しただけでイメージを作り直しても意味がない
+
+**Build が終わった時点で、migrate 用のタスク定義は新しいイメージになっている。** マイグレーションが要るリリースでは、承認する前に `db-task.yml`(migrate)を流す。順序は次のとおり。
+
+```
+Build 完了 → db-task.yml で migrate → Slack で承認 → CodeDeploy が切り替え
+```
+
+**承認は Slack から行える。** `#njp-deploy` に届いた通知に対して操作する。権限は `codepipeline:PutApprovalResult` と状態確認だけに絞ってあり、アラート用の 2 チャンネル(`AWSDenyAll`)は触っていない。
+
+**切替は即時(`ECSAllAtOnce`)、blue は待たずに終了する。** 段階的な移行(Canary / Linear)と CloudWatch アラーム連動は入れていない。入れるときは `app.yml` の `DeploymentConfigName` と `AutoRollbackConfiguration` を差し替えるだけで済む。
+
+### 12-5. パイプラインを消す
+
+```
+Actions → 「パイプラインのスタックを削除」を実行(confirm に destroy と入力)
+```
+
+**実務では用意しないもの。** 作って壊して覚えるために置いてある。進行中の実行があると止まる(承認待ちなら却下してから)。アーティファクトの S3 バケットを空にしてから `delete-stack` する。
+
+**CodeStar Connections は残る**(スタックの外にあるため)。建て直しても GitHub との握手はやり直さなくてよい。消えるのは実行履歴とアーティファクト。
+
+---
+
+## 13. 詰まったときの見どころ
 
 | 症状 | 見るところ |
 |---|---|
 | `db-task` だけ `Not authorized to perform sts:AssumeRoleWithWebIdentity` | Environment に `AWS_DB_TASK_ROLE_ARN` を登録したか(→ §2-3・§5)。信頼ポリシーは `gha-cfn-stg` と同じ形 |
-| `ecr-push` だけ `Credentials could not be loaded` | `AWS_ECR_PUSH_ROLE_ARN` を Environment secret に入れていないか。**あれだけ Repository secret**(→ [github-secrets.md](./github-secrets.md) §1) |
+| `ecr-push` だけ `Credentials could not be loaded`(凍結ブランチ) | `AWS_ECR_PUSH_ROLE_ARN` を **Repository** secret に入れたか。`ecr-push.yml` は `environment:` を宣言しないので Environment secret は読めない(→ [github-secrets.md](./github-secrets.md) §1) |
 | `run-task` が `AccessDeniedException` / `is not authorized to perform: iam:PassRole` | §2-3 のポリシーがタスク定義名・クラスタ名・ロール名と一致しているか。**リソースまで絞っているので、タスク定義を増やしたら IAM 側にも足す** |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 信頼ポリシーの `sub`。`environment:` を使うと末尾が `environment:stg` になる。実際のクレームを出す手順 → [github-actions-oidc.md](./github-actions-oidc.md) §8 |
 | スタックは成功したのにアプリからメールが送れない | **SES の検証待ち。** `AWS::SES::EmailIdentity` は検証完了を待たずに `CREATE_COMPLETE` になる(アラート通知とは無関係) |
@@ -700,7 +852,15 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 | 反映が `WebDesiredCount が 0 です` で止まった | `cfn-deploy.yml` が create-db-users / migrate で失敗して止まっている。先に `cfn-deploy.yml` を完走させる |
 | 反映が `状態が ROLLBACK_COMPLETE です` で止まった | 作成に失敗したスタックは更新できない。`cfn-destroy.yml` で削除してから建て直す |
 | 建てていないのにスタックが `REVIEW_IN_PROGRESS` で存在する | `dry_run=true` で初回の差分を見たときに残る、リソースを持たないスタック。次の構築でそのまま使われるので放置してよい(→ §8) |
-| デプロイしたはずのイメージが古いものに戻った | CloudFormation の外から `ecs update-service` していないか(→ §9 の最後) |
+| デプロイしたはずのイメージが古いものに戻った | CodeDeploy が自動ロールバックしていないか。パイプラインの Deploy ステージと CodeDeploy のデプロイ画面を見る(→ §12) |
+| `cfn-deploy` の 4 段目が `Unable to update task definition on services with a CODE_DEPLOY deployment controller` で落ちる | **未検証の一番危ない経路。** `WebDesiredCount` を 0 → 1 に上げる更新に CloudFormation が `taskDefinition` を混ぜてしまった場合に起きる。逃げ道は 4 段目を `aws ecs update-service --desired-count` に置き換えること(→ [設計書 §6 の 0 番](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)) |
+| 構築直後の初回タスクだけがクラッシュする | `app.yml` の `AppTaskDefinition` と `taskdef.json` がずれていないか。環境変数を片方にだけ足していると必ずこうなる(→ §9 の最後) |
+| migrate が古いコードのマイグレーションを流す | パイプラインの Build を通したか。`taskdef-migrate.json` から register するのは Build ステージで、`db-task.yml` は family の最新 ACTIVE を使う |
+| パイプラインの Deploy が「アプリケーションが見つからない」で失敗する | スタックがまだ無い。CodeDeploy の Application と DeploymentGroup は `app.yml` 側にある。初回はここまで進めず承認待ちで止めておく(→ §8 の手順 1) |
+| `pipeline-apply` が `codeconnections:GetConnection` で `AccessDeniedException` | `gha-cfn-stg` の `DeployStack` に `ReadConnection` を足したか(→ §2-2)。**CLI のコマンド名は `codestar-connections` のままだが、権限は改名後の `codeconnections` で審査される** |
+| パイプラインが push しても動かない | `Triggers` の `FilePaths` に一致しない変更ではないか。`cloudformation/**` は意図的に外してある。手動起動はコンソールの「リリースの変更」から |
+| Slack に承認の通知が来ない | `#njp-deploy` に `/invite @Amazon Q` したか(→ [docs/slack/README.md](../slack/README.md))。`SlackChannelIdDeploy` が `params/pipeline-stg.json` に入っているか |
+| Slack から承認しようとすると権限エラーになる | `GuardrailPolicies` はチャンネルロールと **AND** される。`codepipeline:PutApprovalResult` が両方に必要 |
 | 反映が `Parameter 'SlackWorkspaceId' must match pattern` などで止まった | `params` の `REPLACE_WITH_...` を置き換えたか(→ §6・[docs/slack/README.md](../slack/README.md)) |
 | `DELETE_FAILED` で `EmptyBuckets` の権限エラーが出る | `gha-cfn-stg` の `EmptyBuckets` にログアーカイブのバケット ARN を足したか(→ §2-2)。**フェーズ14 で増えた** |
 | アラームは `ALARM` になっているのに Slack に来ない | **`/invite @Amazon Q` を忘れていないか**(→ §11-1)。Chatbot コンソールの **テストメッセージを送信** で切り分ける。転送の失敗理由は `/aws/chatbot/...` に出る |
