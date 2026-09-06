@@ -48,6 +48,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 ├── frontend/    Nuxt 4 プロジェクト
 ├── backend/     Spring Boot プロジェクト
 ├── cloudformation/  CloudFormation テンプレート(このリポジトリの IaC)
+├── deploy/      CodeBuild / CodeDeploy が読むファイル(buildspec / appspec / taskdef)
 ├── terraform/   参考用にコピーした他リポジトリのコード(このリポジトリの IaC ではない → 下記)
 ├── docker/      Dockerfile 置き場(docker-compose.yml はリポジトリ直下)
 └── docs/        ドキュメント

@@ -126,7 +126,7 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 | 用途 | IAM ロール名 | GitHub Secrets 名 | 状態 |
 |---|---|---|---|
-| ECR にイメージを push | `nuxt-java-practice-gha-ecr-push` | `AWS_ECR_PUSH_ROLE_ARN`(リポジトリ) | 作成手順 → [github-actions-oidc.md](./github-actions-oidc.md) |
+| ~~ECR にイメージを push~~ | ~~`nuxt-java-practice-gha-ecr-push`~~ | ~~`AWS_ECR_PUSH_ROLE_ARN`~~ | **フェーズ16 で不要になった。** イメージを作るのは CodeBuild(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。ロールと Secret は消してよい |
 | CloudFormation を叩く | `nuxt-java-practice-gha-cfn-stg` | `AWS_CFN_DEPLOY_ROLE_ARN`(Environment) | 作成手順 → [cloudformation-operations.md](./cloudformation-operations.md) §2-2 |
 | DB タスクを Run Task する | `nuxt-java-practice-gha-dbtask-stg` | `AWS_DB_TASK_ROLE_ARN`(Environment) | 作成手順 → [cloudformation-operations.md](./cloudformation-operations.md) §2-3 |
 | CloudFormation がリソースを作る | `nuxt-java-practice-cfn-service-stg` | `AWS_CFN_SERVICE_ROLE_ARN`(Environment) | 作成手順 → [cloudformation-operations.md](./cloudformation-operations.md) §2-1 |
@@ -135,11 +135,15 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 **`db-task.yml` は別のロールを使う。** 任意 SQL を流せるワークフローに `cloudformation:*` を持つクレデンシャルを降ろさないため、Run Task に必要な 5 つの権限だけを持つロールを分けている。
 
+**Secret はもう 1 つある。ロールの ARN ではない。** `AWS_CODESTAR_CONNECTION_ARN`(パイプラインが GitHub からソースを取る CodeStar Connections の ARN)。**このリポジトリは public で、ARN にはアカウント ID が入る**ので、`params` に平文で置かず Environment secret にしている。
+
 **登録手順(値の集め方・画面での操作・確認)→ [GitHub に登録する Secrets(5 つ)](./github-secrets.md)。**
 
 **Secrets は Environment secrets に置く。** GitHub Free のプライベートリポジトリでも Environment と Environment secrets は使えるが、**protection rules(required reviewers・ブランチ制限)は使えない**。そのためブランチ制限は IAM の信頼ポリシー(`token.actions.githubusercontent.com:ref` 条件)で掛けている。
 
 ### スタック構成
+
+スタックは 2 つある。**`cloudformation/pipeline.yml`(常駐)** がデプロイパイプラインを持ち、**`cloudformation/app.yml`(作り捨て)** が環境そのものを持つ。2 つは `Export` / `ImportValue` ではなく命名規則で繋いであるので、アプリのスタックはいつでも撤収できる(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。以下は作り捨て側の話。
 
 **使い捨て部分は 1 スタックにまとめる。** VPC・サブネット・NAT GW・SG・ALB・ACM・ECS・RDS・S3・CloudFront・Route53 の A レコード・IAM ロールを 1 本のテンプレートに置く。
 
@@ -157,7 +161,8 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 ```
 [環境を建てるとき]
-1. ecr-push.yml を実行。ジョブサマリに出るイメージタグ(短縮 SHA)を控える
+1. CodePipeline を手動起動する。Build が通り承認待ちで止まるので、そこで承認せず
+   Build のログに出るイメージタグ(短縮 SHA)を控える(→ ADR-0013)
 2. cfn-deploy.yml を実行(env / image_tag / dry_run)。中で 5 段動く:
      deploy-zero    … cfn-apply.yml を呼んで DesiredCount=0 でスタック作成
      create-db-users … db-task.yml を呼んで app / migrate ユーザーを作る
@@ -167,24 +172,36 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 3. SES の検証が通るのを待つ(初回のみ)。スタックの成功とは無関係
 4. Basic 認証を通してブラウザで確認
 
-[変更を反映するとき(既に建っている環境に対して)]
-1. cfn-apply.yml を実行(env / image_tag / dry_run / allow_replacement)
+[インフラの変更を反映するとき(既に建っている環境に対して)]
+1. cfn-apply.yml を実行(env / dry_run / allow_replacement)
      Change Set を作る → 差分をジョブサマリに出す → 実行
-   image_tag を空にすると、今デプロイされているタグを維持したまま
-   テンプレートと params の変更だけが反映される
+   image_tag は workflow_dispatch には無い。アプリのデプロイはパイプラインの仕事
+
+[アプリをデプロイするとき]
+1. main に push する(backend/ frontend/ docker/ などを変えたとき)
+     Source → Build → Slack で承認 → CodeDeploy が blue/green を切り替える
+   マイグレーションが要るなら Build 完了後・承認前に db-task.yml(migrate)を流す
 
 [撤収するとき]
 1. cfn-destroy.yml を実行(stg 専用。confirm に destroy と入力)
      バケット 2 つ(画像 / ログアーカイブ)を空にする → delete-stack + wait
      BucketNotEmpty で失敗したら 1 回だけやり直す(Firehose が書き足すため)
-   ホストゾーン・ECR・IAM・SSM・テンプレート置き場は手動管理なので残る
+   ホストゾーン・ECR・IAM・SSM・テンプレート置き場・CodeStar Connections・
+   パイプラインのスタックは残る(別スタックなので cfn-destroy では消えない)
+
+[パイプラインを建てる / 消すとき]
+1. pipeline-apply.yml / pipeline-destroy.yml を実行(常駐スタックなので普段は触らない)
 ```
 
 **構築と反映を分けている。** `cfn-deploy.yml` の段取りは「何も無い状態から建てる」ための順序で、動いている環境に対して `DesiredCount` を 0 に落として上げ直すのはサービスの停止に等しい。既存環境への反映は `cfn-apply.yml` が担う(→ [ADR-0007](../adr/0007-app-deploy-inside-cloudformation.md))。
 
 **ただし CloudFormation を実際に叩くのは `cfn-apply.yml` だけ。** `cfn-deploy.yml` に aws コマンドは 1 つも無く、`workflow_call` で `cfn-apply.yml` と `db-task.yml` を呼ぶ**順序だけ**を持っている。「テンプレートを S3 経由で渡す」「params を jq で組み立てる」といった知識が 2 ファイルに重複していたのを 1 か所に寄せた。構築フローだけが `cfn-apply.yml` の guard(スタックが無い / `DesiredCount` が 0 なら弾く)を開けられ、その鍵は `workflow_call` にしか宣言されていないので Actions の UI からは触れない → [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md)。
 
-**アプリのイメージ更新も CloudFormation 経由で行う。** Terraform 時代のように GitHub Actions から `ecs update-service` を直接叩く経路は作らない。CloudFormation は実リソースを読み直さないので外での更新は即座には戻らないが、次にテンプレート側で ECS サービスかタスク定義に差分が出た瞬間に巻き戻るため。理由と検討した代替(ECS サービスから family だけ参照する方法)→ [ADR-0007](../adr/0007-app-deploy-inside-cloudformation.md)
+**アプリのイメージ更新は CloudFormation の外にある。** ECS サービスは `DeploymentController: CODE_DEPLOY` で、`Service.TaskDefinition` は family 名の固定文字列。2 代目以降のタスク定義は `taskdef.json` が正で、register するのは CodePipeline の Deploy アクションである。
+
+これは [ADR-0007](../adr/0007-app-deploy-inside-cloudformation.md) が「タスク定義の所有者が 2 つになる」として退けた形だが、**CodeDeploy を使う以上ほかに選択肢が無い**(CODE_DEPLOY 制御のサービスに対して ECS の `UpdateService` はタスク定義の更新を受け付けない)。引き受けた代償と規律 → [ADR-0013](../adr/0013-app-deploy-with-code-services.md)。
+
+**`github-actions-deploy` ブランチでは ADR-0007 のまま**(リリース = スタック更新、ECS ネイティブ Blue/Green)→ [ADR-0012](../adr/0012-deploy-method-per-branch.md)。
 
 **なぜ 2 段階デプロイなのか。** DB ユーザーを分離した(→ [ADR-0005](../adr/0005-separate-db-users-for-app-and-migration.md))ため、ユーザーを作る Run Task を回さないとアプリが起動できない。しかし CloudFormation には「タスクを流してからサービスを起動する」を表現する手段が無く、**ECS サービスは安定するまで最大 3 時間ポーリングされる**ので、起動できない状態で作るとスタックが失敗する。`DesiredCount=0` なら即座に安定するので、その間に Run Task を回す。
 

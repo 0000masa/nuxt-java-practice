@@ -6,8 +6,8 @@
 # COPY / ADD から参照できない。書き忘れて COPY したら入ってしまう、ではなく
 # 「そもそも送らない」ので参照しようがない、という関係になる。
 # これが実際に効くのは本番イメージのビルドで、CI では
-# .github/workflows/ecr-push.yml の「ビルドして push」ステップが context: . を
-# 渡している(= リポジトリ直下がコンテキスト)。
+# deploy/buildspec.yml の docker build がコンテキストに `.` を渡している
+# (= リポジトリ直下がコンテキスト)。
 #
 # 【効かない範囲】docker-compose.yml のバインドマウント(./backend:/app、
 # ./frontend:/app)には影響しない。あちらは実行時にホストのフォルダをそのまま
@@ -42,6 +42,8 @@ backend/bin
 # --- 実行に関係しないもの ---
 docs
 cloudformation
+# CodeBuild と CodeDeploy が読むだけで、イメージの中身とは関係しない
+deploy
 .devcontainer
 .vscode
 .claude
