@@ -79,9 +79,18 @@
   - **後片付け**: Chatbot のカスタムアクション 2 つ(`ShowApprovalToken` / `RejectDeploy`)は
     コンソールで作った手動リソースなので**手で消す**。`#njp-deploy` から Amazon Q Developer を
     退出させてもよい(アラート 2 チャンネルでは引き続き使う)
-  - **未確認**: CodeStarNotifications が SNS に流すメッセージの `detail` の形。
-    `notify` は生の内容をログに出したうえで汎用メッセージに落ちるようにしてあるので、
-    **初回の通知で `/aws/lambda/nuxt-java-practice-stg-slack-notify` を見て確かめること**
+  - **確定した(2026-09-07、実機のログで確認)**: CodeStarNotifications が SNS に流す `detail` の形。
+    設計時の「一番危ない未確認事項」だったが、**`notify` の判定はすべて当たっていた**
+    - `detail.type.category` = `Approval` / `detail.state` = `STARTED` で承認待ちを判定できる
+    - `detail.stage` / `detail.action` / `detail["execution-id"]` のキー名も想定どおり
+    - **`additionalAttributes.customData` に `CustomData` がそのまま入っていた。**
+      設計時は「フィールド名が実機未確認」として避けた経路だが、実在した
+      (ただし `GetPipelineExecution` はコミット SHA とメッセージが取れるので、今の形のままにする)
+    - **アクション単位の通知には `detail.type` が付き、実行単位の通知には付かない。**
+      2 種類の通知を見分けるのに使える
+    - 却下すると `detail["execution-result"]["external-execution-summary"]`(アクション単位)と
+      `additionalAttributes.failedActions[].additionalInformation`(実行単位)に、
+      `PutApprovalResult` に渡した `Rejected by @<誰> via Slack` が入る
   - **実機で踏んだこと**(2026-09-07。詳細 → [slack-block-kit-response.md](../notes/aws-code-service/slack-block-kit-response.md)):
     - **承認待ちが残っていると、次の実行では承認通知が飛ばない。** `Approve` ステージを
       前の実行が占有しているあいだ、新しい実行はその手前で待たされ、承認アクションが
@@ -94,7 +103,12 @@
       という形で出た。`response_url` に POST する形に直した
     - **却下すると実行は FAILED で終わる。これは正常。** 手動承認に「却下」という終了状態は
       無く、アクションが失敗 → ステージ失敗 → 実行 FAILED になる。Deploy に進まないことが本題。
-      ただし `:x:` の通知が 2 通飛ぶので、承認者には事故に見える(出し分けは未対応)
+      ただし素通しすると `:x:` が 2 通並んで事故に見えるので、**`notify` で出し分けるようにした**
+      (アクション単位を捨て、実行単位を「:no_entry: 却下により中止しました」として 1 通だけ出す)
+    - **コードを直しても、ワークフローを回すまで Lambda は入れ替わらない。**
+      push しただけの状態で押して「直っていない」と判断しかけた。
+      `pipeline-apply.yml` が `cloudformation package` で zip を上げ直して初めて反映される。
+      **`gh run list --workflow=pipeline-apply.yml --json headSha` で「どのコミットを配ったか」を見る**のが確実
   - **まだ通していない経路**: 承認(Approved)を押した先の `Deploy` ステージ。
     却下しか実機で確かめていない
 

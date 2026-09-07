@@ -44,19 +44,48 @@ export async function handler(event) {
       console.error("JSON として読めなかったので素通りする");
       continue;
     }
-    await post(await buildMessage(notification));
+    const message = await buildMessage(notification);
+    // 何も出さない通知がある(→ buildMessage)
+    if (message) await post(message);
   }
   return { ok: true };
 }
 
 // 承認待ちかどうかの判定。
 // detail.type.category が Approval で、状態が STARTED のとき。
-// CodeStarNotifications の detail の形は実機で確認すること(→ 設計書の未確認事項)
+// 【実機で確認済み(2026-09-07)】
+// アクション単位の通知(detailType: "CodePipeline Action Execution State Change")には
+// detail.type が付き、実行単位の通知には付かない。この差でも 2 つを見分けられる。
 function isApprovalRequest(detail) {
   return (
     detail?.type?.category === "Approval" &&
     String(detail?.state).toUpperCase() === "STARTED"
   );
+}
+
+// 【却下は「失敗」ではないのに FAILED で飛んでくる】
+// CodePipeline の手動承認に「却下」という終了状態は無く、却下するとアクションが失敗し、
+// ステージが失敗し、実行が FAILED になる。本物の失敗と区別できるのは summary の文字列だけ。
+// 実機で確認した形(2026-09-07):
+//   アクション単位: detail["execution-result"]["external-execution-summary"]
+//   実行単位:       additionalAttributes.failedActions[].additionalInformation
+// どちらにも PutApprovalResult に渡した summary("Rejected by @<誰> via Slack")が入る。
+function findRejection(notification, detail) {
+  if (String(detail?.state).toUpperCase() !== "FAILED") return null;
+
+  const isRejected = (s) => String(s ?? "").startsWith("Rejected by");
+
+  // アクション単位の通知(detail.type を持つのはこちらだけ)
+  if (detail.type) {
+    if (detail.type.category !== "Approval") return null;
+    const summary = detail["execution-result"]?.["external-execution-summary"];
+    return isRejected(summary) ? summary : null;
+  }
+
+  // 実行単位の通知。失敗したアクションに承認の却下が混ざっているか
+  const failed = notification.additionalAttributes?.failedActions ?? [];
+  return failed.find((a) => isRejected(a.additionalInformation))
+    ?.additionalInformation ?? null;
 }
 
 async function buildMessage(notification) {
@@ -71,6 +100,19 @@ async function buildMessage(notification) {
     const revision = await getRevision(pipeline, detail["execution-id"]);
     return approvalBlocks({ pipeline, detail, revision, consoleUrl });
   }
+
+  // 【却下 1 回で 3 回言わないようにする】
+  // 却下すると (1) 押した人のメッセージが interaction に差し替えられ、
+  // (2) アクション単位の FAILED、(3) 実行単位の FAILED が飛んでくる。
+  // 素通しすると :x: が 2 つ並び、承認者からは事故に見える。
+  // アクション単位のほうを捨て、実行単位の 1 通だけを「却下」として出す
+  // (コンソールから却下された場合は (1) が無いので、この 1 通が唯一の記録になる)。
+  const rejection = findRejection(notification, detail);
+  if (rejection) {
+    if (detail.type) return null;
+    return rejectionBlocks({ pipeline, rejection, consoleUrl });
+  }
+
   return resultBlocks({ notification, detail, pipeline, consoleUrl });
 }
 
@@ -151,6 +193,28 @@ function approvalBlocks({ pipeline, detail, revision, consoleUrl }) {
           },
         ],
       },
+      {
+        type: "context",
+        elements: [{ type: "mrkdwn", text: `<${consoleUrl}|コンソールで開く>` }],
+      },
+    ],
+  };
+}
+
+// 却下されて終わったとき。失敗と同じ :x: にしないための専用カード
+function rejectionBlocks({ pipeline, rejection, consoleUrl }) {
+  const lines = [
+    `:no_entry: *${pipeline}* — 却下により中止しました`,
+    // PutApprovalResult に渡した summary をそのまま出す。
+    // 「誰が却下したか」はこの文字列にしか残っていない
+    `> ${rejection}`,
+    "デプロイは行われていません。",
+  ];
+
+  return {
+    text: `${pipeline}: 却下により中止`,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
       {
         type: "context",
         elements: [{ type: "mrkdwn", text: `<${consoleUrl}|コンソールで開く>` }],

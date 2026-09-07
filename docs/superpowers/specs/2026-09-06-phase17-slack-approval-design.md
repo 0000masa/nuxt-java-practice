@@ -376,7 +376,7 @@ done
 
 | 項目 | 設計時 | 実装 | 理由 |
 | --- | --- | --- | --- |
-| `notify` の AWS 権限 | **ゼロ**(投稿するだけ) | **`codepipeline:GetPipelineExecution` を 1 つ持たせた** | 「どのコミットを承認しようとしているのか」をメッセージに出すため。`CustomData` を `additionalAttributes` から拾う案もあったが、**フィールド名が実機未確認**なうえ、実行を読めば**コミット SHA とコミットメッセージ**が取れて情報量も多い |
+| `notify` の AWS 権限 | **ゼロ**(投稿するだけ) | **`codepipeline:GetPipelineExecution` を 1 つ持たせた** | 「どのコミットを承認しようとしているのか」をメッセージに出すため。`CustomData` を `additionalAttributes` から拾う案もあったが、実行を読めば**コミット SHA とコミットメッセージ**が取れて情報量も多い。**なお `additionalAttributes.customData` は実在した**(2026-09-07 に確認。設計時は「フィールド名が実機未確認」として避けていた)。それでも今の形のままにする |
 | メッセージ差し替えの手段 | `response_url` に POST | **一度 HTTP 応答本文に `replace_original` を書いて失敗し、設計どおり `response_url` に戻した** | 「その場の応答でも置き換えられて 1 往復減る」と考えたが、それは attachments 時代の挙動だった。`blocks` では応答本文は読まれず、**承認は通るのに Slack のメッセージだけ変わらない**という形で踏んだ。1 往復増えるのは Block Kit では避けられない → `docs/notes/aws-code-service/slack-block-kit-response.md` |
 | 承認ボタンの確認ダイアログ | 設計になし | **承認にだけ `confirm` を付けた** | 押し間違いが本番デプロイに直結する。却下はやり直せるので付けない |
 | 押下時に承認が終わっていた場合 | 設計になし | **`findToken` が空なら「すでに終わっています」を返す** | コンソールで承認した場合とタイムアウトした場合、Slack のメッセージにボタンが残る(ADR-0014 の「結果 3」)。押されても壊れないようにした |
@@ -400,19 +400,26 @@ done
 
 実機で確かめて、この節を更新する。**0 番が一番危ない。**
 
-0. **`CodeStarNotifications` が SNS に流すメッセージの `detail` の正確な形。**
-   `notify/index.mjs` は `detail.type.category === "Approval"` かつ
-   `detail.state` が `STARTED` のときを承認待ちと判定しているが、**実機未確認。**
-   外れると**承認待ちの通知にボタンが付かず、結果カードとして流れる。**
-   `detail.stage` / `detail.action` / `detail["execution-id"]` のキー名も同様。
-   **生の `Sns.Message` を `console.log` に出したうえで汎用メッセージに落ちるようにしてある**ので、
-   **初回の通知で `/aws/lambda/<プロジェクト>-<env>-slack-notify` を見て確かめること。**
+0. ~~**`CodeStarNotifications` が SNS に流すメッセージの `detail` の正確な形。**~~
+   **→ 2026-09-07 に実機のログで確認。判定はすべて当たっていた。**
+   `detail.type.category === "Approval"` かつ `detail.state === "STARTED"` で承認待ちを判定でき、
+   `detail.stage` / `detail.action` / `detail["execution-id"]` のキー名も想定どおりだった。
+   あわせて分かったこと:
+   - **`additionalAttributes.customData` に `CustomData` がそのまま入っていた**(下の 5-2 参照)
+   - **アクション単位の通知には `detail.type` が付き、実行単位の通知には付かない。**
+     2 種類の通知を見分けるのに使える
+   - 却下すると `detail["execution-result"]["external-execution-summary"]`(アクション単位)/
+     `additionalAttributes.failedActions[].additionalInformation`(実行単位)に
+     `Rejected by @<誰> via Slack` が入る。**却下と本物の失敗を区別できるのはこの文字列だけ**
+     (`state` も `error-code: JobFailed` も同じ)
 1. **`artifactRevisions[0].revisionSummary` の形。**
    `CodeStarSourceConnection` では JSON 文字列(`CommitMessage` キー)で入ってくる前提で
    `parseRevisionSummary` を書いているが、実機未確認。
    **外れても素の文字列として扱うので落ちはしない**(見た目が崩れるだけ)。
    なお `get-pipeline-state` の出力ではこの形が確認できている。
-2. **Slack の 3 秒応答制限に間に合うか。**
+2. **Slack の 3 秒応答制限に間に合うか。**(**未確定。** `response_url` 方式に変えて
+   1 往復増えたので、むしろ条件は厳しくなった。実機では警告が出ていないが、
+   `interaction` の `Duration` はまだ測っていない)
    `interaction` は SSM(コールドスタート時のみ)→ `GetPipelineState` → `PutApprovalResult` →
    応答、と AWS API を 2〜3 本叩く。**間に合わないと Slack にエラー表示が出る。**
    `Timeout` は 10 秒に設定しているが、これは Lambda 側の上限であって Slack の制限とは別。

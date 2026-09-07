@@ -72,11 +72,31 @@ await fetch(payload.response_url, {
 return { statusCode: 200, body: "" };
 ```
 
-**元のメッセージが Incoming Webhook で投稿されたものでも差し替えられる。**
+**元のメッセージが Incoming Webhook で投稿されたものでも差し替えられる**(2026-09-07 に実機で確認)。
 `response_url` は「投稿の仕方」ではなく「押されたメッセージ」に紐づくため。
 `chat.update` を使う道もあるが、あちらは bot トークン(`chat:write`)が要る。
 このリポジトリは webhook URL だけで済ませる方針なので `response_url` が合う
 (→ 設計書の決定8)。
+
+> **切り分けで一度誤った推測をした。**
+> 直したあと最初に押したときも差し替わらなかったので「Incoming Webhook で投稿した
+> メッセージは差し替えられないのでは」と疑ったが、**原因は単に修正版がまだデプロイ
+> されていなかったこと**だった。`push` しただけでは Lambda は入れ替わらない。
+> `gh run list --workflow=pipeline-apply.yml --json createdAt,headSha` で
+> **「どのコミットを配ったか」**を見れば 1 分で分かる。
+
+## 3-2. 差し替わったかどうかは、時刻だけ見ても分からない
+
+**差し替えてもメッセージの投稿時刻(`ts`)は変わらない。** 実機ではこうなった。
+
+```
+09:10:11  承認依頼を投稿(Incoming Webhook)
+09:10:47  却下を押す → 同じメッセージが「却下しました」に差し替わる
+```
+
+Slack の表示はどちらも `[09:10]` のまま。**新しく生えたメッセージのように見える**が、
+承認依頼のほうが消えている(=差し替わった)ことが手がかりになる。
+「差し替わらず新規投稿された」と誤読しかけた。
 
 ## 4. 代償 — 3 秒ルールに近づく
 
@@ -112,7 +132,20 @@ return { statusCode: 200, body: "" };
 (`PutApprovalResult` の `summary`。Lambda 経由になって CloudTrail から追えなくなった
 ぶんの埋め合わせ → ADR-0014)。
 
-ただし通知としては **`pipeline-execution-failed` と `action-execution-failed` の
-2 通が `:x:` で飛ぶ**ので、承認者からは事故に見える。
-出し分けるなら `notify` 側で `detail.type.category === "Approval"` かつ FAILED を
-「却下により中止」として扱う(未対応)。
+ただし素通しすると、却下 1 回で **`action-execution-failed` と
+`pipeline-execution-failed` の 2 通が `:x:` で飛ぶ**(押した人のメッセージの差し替えと
+合わせて、同じことを 3 回言うことになる)。承認者からは事故に見えるので、
+**`notify` で出し分けるようにした。**
+
+**区別できるのは summary の文字列だけ。** 却下も本物の失敗も `state` は `FAILED` で、
+`error-code` も `JobFailed` で同じ。`PutApprovalResult` に渡した summary
+(`Rejected by @<誰> via Slack`)がどちらの通知にも載るので、それを見る。
+
+| 通知 | `detail.type` | 却下の印 |
+|---|---|---|
+| アクション単位 | **ある**(`category: Approval`) | `detail["execution-result"]["external-execution-summary"]` |
+| 実行単位 | **無い** | `additionalAttributes.failedActions[].additionalInformation` |
+
+**`detail.type` の有無で 2 種類の通知を見分けられる**のが実機で分かった収穫。
+`notify` は**アクション単位のほうを捨て、実行単位を 1 通だけ「却下により中止しました」**
+として出す(コンソールから却下された場合は差し替えが起きないので、この 1 通が唯一の記録になる)。
