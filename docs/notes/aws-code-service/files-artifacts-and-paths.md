@@ -24,7 +24,7 @@
 
 | 語 | このノートでの意味 |
 |---|---|
-| **アーティファクト** | ステージ間を S3 経由で渡る zip。**Docker イメージのことではない。** イメージは ECR に置かれ、アーティファクトには入らない |
+| **アーティファクト** | ステージ間を S3 経由で渡る zip。**Docker イメージのことではない。** イメージは ECR に置かれ、アーティファクトには入らない。`SourceArtifact` のような名前は zip に付けたあだ名で、**置き場のことではない**(→ §3-2) |
 | **ソースルート** | CodeBuild がソースを展開した先。環境変数 `CODEBUILD_SRC_DIR` が指す。**リポジトリ直下と同じとは限らない**(→ §4) |
 | **タスクセット(Task Set)** | CodeDeploy が green 側に作るタスクの束。ECS サービスの中に blue と green の 2 つが並ぶ |
 
@@ -37,18 +37,18 @@
 
 **「その名前じゃないと動かないのか」は 3 種類に分かれる。**
 
-| 名前 | 区分 | 変えるなら |
-|---|---|---|
-| `buildspec.yml` | **既定** | `AWS::CodeBuild::Project` の `Source.BuildSpec` |
-| `taskdef.json` | **既定** | Deploy アクションの `TaskDefinitionTemplatePath` |
-| `appspec.yaml` | **既定** | Deploy アクションの `AppSpecTemplatePath` |
-| `<TASK_DEFINITION>` | **固定** | **変えられない** |
-| `imageDetail.json` | **固定** | 変えられない(このリポジトリは使っていない → §6) |
-| `<IMAGE1_NAME>` | **任意** | `Image1ContainerName` に書いた名前がそのままプレースホルダ名になる |
-| `taskdef-migrate.json` | **任意** | AWS は関知しない。`buildspec.yml` が `file://` で読むだけ |
-| `SourceArtifact` / `BuildArtifact` | **任意** | テンプレート内で字面が揃っていればよい |
-| `Source` / `Build` / `Approve` / `Deploy`(ステージ名・アクション名) | **任意** | ただし `Triggers` の `SourceActionName` はソースアクション名と一致必須 |
-| `__DB_HOST__` などの二重アンダースコア | **任意** | このリポジトリの `buildspec.yml` が `sed` で置換しているだけ。AWS の機能ではない |
+| 名前 | 区分 | パスを書かないとどこが読まれるか | 変えるなら |
+|---|---|---|---|
+| `buildspec.yml` | **既定** | **ソースルート直下**の `./buildspec.yml` | `AWS::CodeBuild::Project` の `Source.BuildSpec` |
+| `taskdef.json` | **既定** | **`TaskDefinitionTemplateArtifact` に指定したアーティファクトのルート直下**の `./taskdef.json` | Deploy アクションの `TaskDefinitionTemplatePath` |
+| `appspec.yaml` | **既定** | **`AppSpecTemplateArtifact` に指定したアーティファクトのルート直下**の `./appspec.yaml` | Deploy アクションの `AppSpecTemplatePath` |
+| `<TASK_DEFINITION>` | **固定** | —(ファイルではなく `appspec.yaml` の中の文字列) | **変えられない** |
+| `imageDetail.json` | **固定** | ECR ソースアクションが出力したアーティファクトのルート直下 | 変えられない(このリポジトリは使っていない → §6) |
+| `<IMAGE1_NAME>` | **任意** | —(ファイルではなく `taskdef.json` の中の文字列) | `Image1ContainerName` に書いた名前がそのままプレースホルダ名になる |
+| `taskdef-migrate.json` | **任意** | **—(そもそも誰も探さない。既定という概念が無い)** | AWS は関知しない。`buildspec.yml` が `file://` で読むだけ |
+| `SourceArtifact` / `BuildArtifact` | **任意** | — | テンプレート内で字面が揃っていればよい |
+| `Source` / `Build` / `Approve` / `Deploy`(ステージ名・アクション名) | **任意** | — | ただし `Triggers` の `SourceActionName` はソースアクション名と一致必須 |
+| `__DB_HOST__` などの二重アンダースコア | **任意** | — | このリポジトリの `buildspec.yml` が `sed` で置換しているだけ。AWS の機能ではない |
 
 ### 1-1. 既定名は「規約」ではない
 
@@ -69,6 +69,25 @@
 > **AppSpecTemplatePath** / Required: No / The default file name is `appspec.yaml`.
 >
 > — [CodeDeployToECS アクションリファレンス](https://docs.aws.amazon.com/codepipeline/latest/userguide/action-reference-ECSbluegreen.html)
+
+**既定は「名前」ではなく「名前 + 場所」で決まっている。** 引用が
+`must be named buildspec.yml` と `placed in the root of your source directory` を
+セットで書いているとおりで、名前が合っていてもルート直下に無ければ既定では見つからない。
+**推定** 探すのはそのルート直下だけで、サブディレクトリを再帰的に見には行かない
+(「root に置け、さもなくば上書き指定しろ」という書き方からの読み)。
+
+| ファイル | パスを書かないと探される場所 | 「ルート」が何を指すか(→ §4) |
+|---|---|---|
+| `buildspec.yml` | `./buildspec.yml` | **ソースルート**(`CODEBUILD_SRC_DIR`)。リポジトリ直下とは限らない(→ §4-1) |
+| `taskdef.json` | `./taskdef.json` | **`TaskDefinitionTemplateArtifact` に指定したアーティファクトを展開したルート**(→ §4-3) |
+| `appspec.yaml` | `./appspec.yaml` | **`AppSpecTemplateArtifact` に指定したアーティファクトを展開したルート**(→ §4-3) |
+
+**3 つとも字面は「ルート直下」だが、基準が違うので指す先も違う。**
+`taskdef.json` / `appspec.yaml` の既定はソースの中ではなく、
+そのアクションに渡したアーティファクトの中を見る。
+**推定** このリポジトリは `BuildArtifact` を渡しているので、
+仮にパスを省いたら「`buildspec.yml` の `artifacts.files` が
+`taskdef.json` を階層無しで詰めた場合だけ当たる」ことになる(→ §5-2)。
 
 **このリポジトリでは** 4 ファイルを `deploy/` にまとめたので、既定から外れた分を全部明示している。
 `pipeline.yml` の `BuildProject` の `Source.BuildSpec` と、`Pipeline` の Deploy アクションの
@@ -104,10 +123,21 @@
 >
 > — [AppSpec file reference](https://docs.aws.amazon.com/codedeploy/latest/userguide/reference-appspec-file.html)
 
+**仕様** ここでの `appspec.yml` は §1 の表で言う「既定」ではなく「固定」。
+`must be named` と `Otherwise, deployments fail` がそう書いている。
+**EC2/オンプレでは名前を変える手段そのものが無い。**
+CodePipeline の `AppSpecTemplatePath` は `CodeDeployToECS` アクションのキーであって(→ §1-4)、
+EC2 向けの `CodeDeploy` プロバイダーにはこのキーが無い。
+縛られているのは 3 つ全部で、**名前(`appspec`)・拡張子(`.yml`)・置き場(ルート直下)**。
+`appspec.yaml` と書けば別名なので「AppSpec ファイルが無い」扱いになり、デプロイが落ちる。
+
 **推定** ECS 用の節にはこの規定が無く、代わりに CodePipeline 側が `AppSpecTemplatePath` を
 持っている。したがって ECS では名前も場所も自由で、このリポジトリのように
-`deploy/appspec.yaml` に置ける。**拡張子が `.yaml` なのも問題にならない**
-(EC2 のときだけ `.yml` と書かれている)。
+`deploy/appspec.yaml` に置ける。**拡張子が `.yaml` なのも問題にならない。**
+
+**リファレンスに `.yml` と出てくるのは EC2/オンプレの節だけ**で、そこでの `.yml` は
+「そう書かないと動かない」意味の `.yml`。ECS の話に持ち込む理由は無い
+(逆に言えば、EC2 のつもりで `appspec.yaml` と書いたら落ちる、という向きの注意でもある)。
 
 ### 1-4. `Configuration` のキー名はプロバイダーが決める語彙
 
@@ -289,7 +319,84 @@ docker build --platform linux/amd64 -f docker/app/Dockerfile -t "$IMAGE_URI" .
 > + **Number of Artifacts:** `0`
 > + **Description:** Output artifacts do not apply for this action type.
 
-### 3-2. BuildArtifact に入るのは 2 ファイルだけ
+### 3-2. アーティファクト名は「置き場」ではない — 置き場は 1 つ
+
+**`SourceArtifact` と `BuildArtifact` が別々の S3 に入っているように読めるが、バケットは 1 つ。**
+`ArtifactStore` に書いたバケットがそれで、どちらもその中のオブジェクトでしかない。
+
+**仕様** 公式は「パイプラインを作るときに選んだ **その** バケット」と単数で書いている。
+
+> Actions use input and output artifacts that are **stored in the Amazon S3 artifact bucket you chose
+> when you created the pipeline**. CodePipeline zips and transfers the files for input or output
+> artifacts as appropriate for the action type in the stage.
+>
+> — [Input and output artifacts](https://docs.aws.amazon.com/codepipeline/latest/userguide/welcome-introducing-artifacts.html)
+
+**仕様** 増えるのはリージョンをまたぐときだけ。
+
+> you must have **one artifact bucket per Region** where you plan to execute an action
+
+その場合は `ArtifactStore`(単数)ではなく `ArtifactStores`(リージョンごとの複数形)を書く。
+このリポジトリは単一リージョンなので `ArtifactStore` 1 つで足りている。
+
+**名前は zip に付けたあだ名にすぎない。** `OutputArtifacts` の `Name` が名前を付け、
+後続アクションが `InputArtifacts` に同じ名前を書くと、CodePipeline が実体の S3 キーを
+解決して渡す。**キーの形を人間が知らなくてよい**のはこの仕組みのため。
+
+**仕様** 名前で繋ぐことは明記がある。
+
+> **Every output artifact in the pipeline must have a unique name.** Every input artifact for an action
+> must match the output artifact of an action earlier in the pipeline, whether that action is
+> immediately before the action in a stage or runs in a stage several stages earlier.
+
+名前そのものが AWS の語彙ではない(何でもよい)話は §5-1。
+
+**推定** バケットの中はパイプラインごとのフォルダに分かれ、その下がアーティファクトごとの
+フォルダになる。
+
+```
+ArtifactBucket
+└── <パイプライン名>/
+    ├── <Source の出力>/xxxxxxx.zip   GitHub のコードをそのまま固めたもの
+    └── <Build の出力>/yyyyyyy.zip    taskdef.json + appspec.yaml
+```
+
+**仕様** フォルダ名はアーティファクト名そのものにはならない。公式が「切り詰める」と断っている
+(引用中の `bucket names` は、実際にはバケット内のフォルダ名のこと)。
+
+> CodePipeline **truncates artifact names**, which can cause some bucket names to appear similar.
+> Even though the artifact name appears to be truncated, CodePipeline maps to the artifact bucket
+> in a way that is not affected by artifacts with truncated names. The pipeline can function normally.
+
+**未検証** 何文字で切られるかは書かれていない。上のツリーで `<Source の出力>` と伏せているのは
+そのため。実機で見る(→ §7)。
+
+**「GitHub のコードの置き場」と「ステージ間の受け渡し場所」は同じもの。**
+§3-1 のフロー図に 2 回出てくる「S3」は、どちらもこの 1 つのバケットを指している。
+Source が GitHub のコードを固めて置く先が、そのまま受け渡し場所になっている。
+前者は後者の 1 例(Source ステージの出力)でしかなく、別の置き場があるわけではない。
+`BuildProject` の `Source.Type: CODEPIPELINE` が取りに行く先もここ(→ §4-1)。
+
+**裏付けは IAM に出ている。** `CodeBuildServiceRole` の `Artifacts` ステートメントは、
+`s3:GetObject`(SourceArtifact を読む)と `s3:PutObject`(BuildArtifact を書く)を
+**同じ 1 つのバケットに対して**持っている。置き場が 2 つなら 2 つ書く必要がある
+(→ [roles.md](roles.md) §3-2)。
+
+**混同しやすい S3 バケットが他に 2 つある。**
+
+| バケット | 作るのは | 使われるのは |
+|---|---|---|
+| `<ProjectName>-<EnvName>-pipeline-artifacts` | `pipeline.yml` の `ArtifactBucket` | **パイプラインが回るとき** |
+| `nuxt-java-practice-lambda-artifacts-<アカウントID>` | 手動(常駐リソース) | スタックを反映するとき |
+| `nuxt-java-practice-cfn-templates-<アカウントID>` | 手動(常駐リソース) | スタックを反映するとき |
+
+下 2 つは `pipeline-apply.yml` が `aws cloudformation package` と `deploy` で経由する置き場で、
+**パイプラインの実行では 1 度も使われない**。この 2 つを分けている理由(保存要件が正反対で、
+同居させるとライフサイクルを 1 つ触っただけで静かに壊れる)は
+[ADR-0014](../../adr/0014-slack-approval-with-lambda.md) と
+[運用手順](../../infrastructure/cloudformation-operations.md) §3。
+
+### 3-3. BuildArtifact に入るのは 2 ファイルだけ
 
 `deploy/buildspec.yml` の末尾はこうなっている。
 
@@ -307,7 +414,7 @@ BuildArtifact に入らない。Deploy アクションが読めるのはこの 2
 その URI が `deploy/taskdef.json` の `image` に文字列として書き込まれた状態で運ばれる。
 S3 を通るのは「タスク定義の下書き」と「デプロイ手順書」だけで、数 KB しかない。
 
-### 3-3. なぜ Deploy が SourceArtifact ではなく BuildArtifact を読むのか
+### 3-4. なぜ Deploy が SourceArtifact ではなく BuildArtifact を読むのか
 
 **AWS の公式サンプルは両方 `SourceArtifact` にしている。**
 
@@ -412,6 +519,8 @@ render deploy/taskdef.json                    # ./taskdef.json ではない
 
 `MyZip` でも `foo` でも、パイプライン内で揃っていれば動く。
 
+そして名前は**置き場ではない**。実体は 1 つのバケットの中に並んでいる(→ §3-2)。
+
 ### 5-2. 2・3 番が成立している理由 — `base-directory` を書いていないこと
 
 **仕様** `artifacts` の `files` は「元のビルド場所、または `base-directory` を設定していればそこ」からの相対で、
@@ -473,6 +582,8 @@ ECR ソースアクション → imageDetail.json を生成
 ## 7. 実機で確かめること
 
 - [ ] `artifacts.files` が本当に `deploy/` 付きで梱包されるか(§5-2 の推定)
+- [ ] アーティファクトの S3 キーがどんな形になるか(§3-2 のツリーは推定。
+      アーティファクト名が何文字で切り詰められるかは公式に記載が無い)
 - [ ] `deploy/buildspec.yml` に置いてもカレントディレクトリがソースルートのままか(§4-2)
 - [ ] 字面がずれたときの Deploy アクションのエラー文言
 - [ ] `CODEBUILD_RESOLVED_SOURCE_VERSION` に完全な commit SHA が入るか

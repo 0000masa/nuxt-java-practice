@@ -102,6 +102,37 @@ Resources:
   # ==========================================================================
   # アーティファクト置き場
   # ==========================================================================
+  # 【SourceArtifact / BuildArtifact は「バケット」ではなく「名前」】
+  # このバケットは下の Pipeline の ArtifactStore そのもので、ステージ間で受け渡す
+  # zip はすべてここに入る。置き場は 1 つしかない。
+  #
+  #   ArtifactBucket
+  #   └── <パイプライン名>/
+  #       ├── <Source の出力>/xxxxxxx.zip  GitHub のコードをそのまま固めたもの
+  #       └── <Build の出力>/yyyyyyy.zip   taskdef.json + appspec.yaml
+  #
+  # フォルダ名がアーティファクト名そのものにならないことは公式が断っている
+  # ("CodePipeline truncates artifact names")。何文字で切られるかは書かれていないので
+  # ここでは伏せてある(実機で確かめる)。
+  #
+  # OutputArtifacts の Name: SourceArtifact が付けているのは、この zip に対する
+  # パイプライン内でのあだ名にすぎない。後続アクションが InputArtifacts に同じ名前を
+  # 書くと、CodePipeline が実体の S3 キーを解決して渡す。名前で繋ぐ仕組みなので、
+  # キーの形を人間が知る必要がない。
+  #
+  # 【「GitHub のコードの置き場」と「ステージ間の受け渡し場所」は同じもの】
+  # 前者は後者の 1 例(Source ステージの出力)でしかない。BuildProject の
+  # Source: Type: CODEPIPELINE が取りに行く先もこのバケット。下の CodeBuildServiceRole の
+  # Artifacts が GetObject(SourceArtifact を読む)と PutObject(BuildArtifact を書く)を
+  # **同じバケットに対して**持っているのが、1 つで完結していることの裏付け。
+  #
+  # 【スタックを作るときに経由する S3 とは別物】
+  #   ...-stg-pipeline-artifacts          このバケット。パイプラインが回るときだけ使う
+  #   ...-lambda-artifacts-<アカウントID>  package が上げる Lambda の zip(手動管理の常駐)
+  #   ...-cfn-templates-<アカウントID>     S3 経由で渡すテンプレート(手動管理の常駐)
+  # 下 2 つは pipeline-apply.yml(スタックの反映)側の話で、パイプラインの実行では
+  # 使われない。分けている理由 → .github/workflows/pipeline-apply.yml のコメント
+  #
   # pipeline-destroy.yml は delete-stack の前にこれを空にする。空でないバケットが
   # あると 15 分待たされた末に DELETE_FAILED になる(cfn-destroy.yml と同じ理由)。
   ArtifactBucket:
