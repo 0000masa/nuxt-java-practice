@@ -55,7 +55,7 @@
 
   { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "T0BT8V342DB" },
   { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "C0BTLRRUHQ9" },
-  { "ParameterKey": "SlackChannelIdRedis",             "ParameterValue": "__REDIS_CHANNEL__" },
+  { "ParameterKey": "SlackChannelIdRedis",             "ParameterValue": "C0C18N5QTNH" },
   { "ParameterKey": "SlackChannelIdRds",               "ParameterValue": "C0BUD9W1Y3S" },
 
   { "ParameterKey": "LogRetentionDays",                "ParameterValue": "7" },
