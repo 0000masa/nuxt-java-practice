@@ -1,10 +1,37 @@
 # テストの実行方法と方針
 
-バックエンドのテストは **backend コンテナの中で実行**し、DB は開発 DB(`app`)ではなく**テスト専用の database `app_test`** を使う。
+バックエンドのテストは **backend コンテナの中で実行**し、
+DB は開発 DB(`app`)ではなく**テスト専用の database `app_test`**、
+セッションの Redis は開発用ではなく**テスト専用コンテナ `redis-test`** を使う。
 
 - ホストに JDK を置かない方針なので、実行は常に `docker compose exec backend` 経由
-- **本物の MySQL 8 を使う**(インメモリ DB には差し替えない)
-- ただし開発 DB とは database を分けているので、**テストが開発中のデータを壊すことはない**
+- **本物の MySQL 8 / Redis 7 を使う**(インメモリ DB には差し替えない)
+- ただし開発用とは分けているので、**テストが開発中のデータを壊すことはない**
+
+分離は `build.gradle` の `test` タスクが環境変数を差し替えることで効かせている。
+
+```groovy
+tasks.named('test') {
+    environment 'DB_NAME', 'app_test'      // MySQL は同じコンテナで database を分ける
+    environment 'REDIS_HOST', 'redis-test' // Redis はコンテナごと分ける
+}
+```
+
+### なぜ MySQL と Redis で分離の方式が違うのか
+
+**意図的に非対称にしている。**
+
+Redis にも論理データベース番号(0〜15)があるので、`app` / `app_test` と同じく
+「同じコンテナの中で番号を分ける」形にもできた。それを採らなかったのは、
+**Redis の論理データベースはアクセス制御が分かれず、仕切りとして弱い**ため。
+`FLUSHALL` を打てば全部消えるし、番号の指定を 1 つ間違えれば開発中のセッションに混ざる。
+
+コンテナを 1 つ増やすコストが、compose に 8 行書くだけで済むことも後押しした。
+MySQL は同じことをすると**データボリュームとヘルスチェックまで二重になる**ので、
+database を分けるほうが安い。**コストの釣り合う場所が違っただけ**である。
+
+なお `redis-test` には **永続化を付けていない**(volume なし)。
+テスト間でセッションが残る必要はなく、残ると原因の分かりにくい相互依存を生むため。
 
 テストの仕組みそのもの(`@SpringBootTest` / `@WebMvcTest` / `@DataJpaTest` の違い、Flyway との関係)は学習メモ → [docs/notes/java/spring/testing-and-test-database.md](../notes/java/spring/testing-and-test-database.md)
 
@@ -27,6 +54,11 @@ docker compose exec mysql mysql -uroot -proot -e "
 docker compose exec mysql mysql -uroot -proot -e "SHOW DATABASES;"
 # app / app_test の両方が並んでいれば OK
 ```
+
+> **Redis 側には初回セットアップが要らない。** `docker compose up -d` で `redis-test` が
+> 立ち上がればそれで終わりで、`app_test` のような手動作成は不要である。
+> Redis には「あらかじめ作っておく入れ物」という概念が無く、キーは書いた瞬間に生まれるため。
+> **スキーマを持つ DB と持たないストアの違い**がここに出ている。
 
 **空の database を作るだけでよい。テーブルは作らなくてよい。** テスト実行時に Flyway が `db/migration` を流してテーブル 6 つとカテゴリー 10 件(V2 のシード)を自動で用意する。
 

@@ -58,13 +58,18 @@ CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook �
 
 **承認は Slack から AWS を操作する双方向の経路**で、そこが Chatbot では成立しなかった。承認トークンが通知変数に無く 1 クリックで完結せず、押しても `AccessDenied` になる既製ボタンが消せず、カスタムアクションは全通知に付いてしまう。**承認者はインフラ担当ではなくアプリ開発担当**なので、「押していいものが一目で分かる」ことを優先して自作に切り替えた。踏んだ内容の記録 → [chatbot-approval-attempt.md](../notes/aws-code-service/chatbot-approval-attempt.md)。
 
-## 2. Slack にチャンネルを 3 つ作る
+## 2. Slack にチャンネルを 4 つ作る
 
-ワークスペース「自分用」に **public チャンネル**を 3 つ作る。
+ワークスペース「自分用」に **public チャンネル**を 4 つ作る。
 
 - `njp-alerts-ecs`
 - `njp-alerts-rds`
+- `njp-alerts-redis` — ElastiCache(セッションストア)の検知(フェーズ18 で追加)
 - `njp-deploy` — デプロイの承認と通知(フェーズ16 で追加)
+
+**RDS に相乗りさせず Redis を別チャンネルにした理由。** 鳴ったときに見る場所と打つ手が違うため。
+RDS はクエリとストレージ、Redis はセッション数とメモリで、
+同じ「データストアが苦しい」でも対処が重ならない(→ [ADR-0015](../adr/0015-session-store-on-redis.md))。
 
 **private でも動くが public にしている。** 1 人のワークスペースで private にする実利が無く、private にすると「アプリを招待し忘れて無音」という経路が 1 つ増えるため。
 
@@ -87,7 +92,7 @@ CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook �
 
 ## 4. 各チャンネルにアプリを招待する
 
-**アラート用の 2 つ(`#njp-alerts-ecs` / `#njp-alerts-rds`)で**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
+**アラート用の 3 つ(`#njp-alerts-ecs` / `#njp-alerts-rds` / `#njp-alerts-redis`)で**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
 
 `/invite @Amazon Q` とテキストで打ち切る形は勧めない。アプリ名に空白が入るうえ、メンションが候補から確定されていないと**ただの人の招待コマンドとして解釈されて弾かれる**。上の UI から選ぶほうが確実。
 
@@ -95,7 +100,7 @@ CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook �
 
 **`#njp-deploy` には Amazon Q Developer は要らない。** 承認は自作 App が担う(→ §6-2)。フェーズ16 で招待していたなら退出させてよい(残っていても害はない)。
 
-## 5. チャンネル ID を 3 つ控える
+## 5. チャンネル ID を 4 つ控える
 
 Slack の左ペインでチャンネル名を右クリック → **リンクをコピー**。URL の末尾がチャンネル ID。
 
@@ -111,10 +116,15 @@ https://自分用.slack.com/archives/C0123ABCDEF
 `cloudformation/params/stg.json` と `prod.json`(アラート用)。
 
 ```json
-{ "ParameterKey": "SlackWorkspaceId",  "ParameterValue": "T0123ABCDEF" },
-{ "ParameterKey": "SlackChannelIdEcs", "ParameterValue": "C0123ABCDEF" },
-{ "ParameterKey": "SlackChannelIdRds", "ParameterValue": "C0456GHIJKL" },
+{ "ParameterKey": "SlackWorkspaceId",    "ParameterValue": "T0123ABCDEF" },
+{ "ParameterKey": "SlackChannelIdEcs",   "ParameterValue": "C0123ABCDEF" },
+{ "ParameterKey": "SlackChannelIdRds",   "ParameterValue": "C0456GHIJKL" },
+{ "ParameterKey": "SlackChannelIdRedis", "ParameterValue": "C0789MNOPQR" },
 ```
+
+**`SlackChannelIdRedis` は `__REDIS_CHANNEL__` というプレースホルダのままコミットしてある。**
+チャンネルを作るまで本物の ID が存在しないため。埋めずに構築すると次節のとおり
+`AllowedPattern` で止まる(意図的)。
 
 **`pipeline-stg.json` に Slack の ID は書かない。** 承認用の Lambda は webhook URL に投稿するだけで、ワークスペースもチャンネルも知らない。控えた `#njp-deploy` のチャンネル ID は §6-2 の Slack App 側で使う。
 
