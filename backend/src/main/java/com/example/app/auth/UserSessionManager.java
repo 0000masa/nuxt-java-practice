@@ -10,18 +10,23 @@ import org.springframework.stereotype.Component;
  * 特定ユーザーのログインセッションを消す役。
  *
  * <p>パスワードを変えたときに「別の端末で開かれているセッション」を無効化するために使う。
- * これができるのはセッションをサーバー側(MySQL)に持っているからで、
+ * これができるのはセッションをサーバー側に持っているからで、
  * JWT 方式なら発行済みトークンを失効させる仕組みを自分で作る必要があった
  * (→ docs/adr/0002-session-cookie-over-jwt.md)。
  *
- * <p>検索キーは SPRING_SESSION.PRINCIPAL_NAME で、値は Spring Security から見た
- * ログイン識別子 = <b>メールアドレス</b>。この列には V3 で index が張られている。
+ * <p>検索キーは Spring Security から見たログイン識別子 = <b>メールアドレス</b>。
+ * 保存先は Redis で、principal 名ごとの Set が索引になっている
+ * (キー名は {@code spring:session:index:...PRINCIPAL_NAME_INDEX_NAME:<email>})。
+ * <b>このクラスは保存先を知らない。</b>{@code FindByIndexNameSessionRepository} という
+ * 抽象にだけ依存しているので、MySQL から Redis に移した際もコードは 1 行も変えていない
+ * (→ docs/adr/0015-session-store-on-redis.md、docs/notes/redis/session-management.md)。
  */
 @Component
 class UserSessionManager {
 
-	// 型引数が <? extends Session> なのは、実装(JdbcIndexedSessionRepository)が扱う
+	// 型引数が <? extends Session> なのは、実装(RedisIndexedSessionRepository)が扱う
 	// セッションの具体型をこちらが知る必要がないため。deleteById は型引数を使わないので支障はない。
+	// 具体型に触らないことが、保存先の差し替えを 1 行で済ませている理由でもある。
 	private final FindByIndexNameSessionRepository<? extends Session> sessionRepository;
 
 	UserSessionManager(FindByIndexNameSessionRepository<? extends Session> sessionRepository) {

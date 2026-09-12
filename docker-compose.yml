@@ -25,6 +25,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy # MySQL が応答できるようになってから起動する
+      redis:
+        condition: service_healthy # Spring Session(indexed)は起動時にキースペース通知を購読しに行くので、待たないと起動に失敗する
 
   mysql:
     image: mysql:8
@@ -43,6 +45,52 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # セッションの保存先(→ docs/adr/0015)。本番は ElastiCache。
+  # 公式イメージに GUI は入っていないので、GUI は下の redisinsight が別コンテナで担当する。
+  redis:
+    image: redis:7 # ElastiCache の Redis OSS が 7.1 で止まっているのでメジャーを揃える(→ docs/notes/redis/elasticache.md)
+    command: >
+      redis-server
+      --appendonly yes
+      --notify-keyspace-events Egx
+    # --appendonly yes: 追記型ログで永続化する。down してもログイン状態とキーが残る
+    # --notify-keyspace-events Egx: 期限切れ・削除をイベントで通知する。
+    #   これが無いと、TTL で消えたセッションの ID が principal 索引(SET)に残り続ける。
+    #   TTL はキー単位で、SET の要素ごとには張れないため(→ docs/notes/redis/session-management.md)
+    ports:
+      - "6379:6379" # ホストの redis-cli や GUI から直接繋げるように公開
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # テスト専用の Redis。gradlew test は build.gradle の REDIS_HOST でこちらに向く。
+  # 開発用と分けるのは、@SpringBootTest がログインを実際に通すため、
+  # 同じ Redis を使うと GUI で観察中のキーにテスト由来のセッションが混ざるから。
+  # 永続化しない(volume なし)が、通知の設定は本番・開発と揃える。
+  redis-test:
+    image: redis:7
+    command: redis-server --notify-keyspace-events Egx
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Redis の中身をブラウザで見る GUI。開発専用で、本番に対応するものは無い。
+  # 接続先は初回にブラウザから登録する(Host: redis / Port: 6379)→ docs/notes/redis/session-management.md
+  redisinsight:
+    image: redis/redisinsight:latest
+    ports:
+      - "5540:5540" # ブラウザで http://localhost:5540
+    volumes:
+      - redisinsight-data:/data
+    depends_on:
+      - redis
 
   minio:
     image: minio/minio
@@ -79,4 +127,6 @@ services:
 volumes:
   mysql-data:
   minio-data:
+  redis-data: # Redis の AOF。redis-test には付けない(テストのデータは残さない)
+  redisinsight-data: # GUI に登録した接続先の設定
   gradle-cache:

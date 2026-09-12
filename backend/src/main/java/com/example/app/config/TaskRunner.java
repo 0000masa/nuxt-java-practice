@@ -16,12 +16,20 @@ import org.springframework.stereotype.Component;
  * 設計 → docs/superpowers/specs/2026-08-19-phase13-cloudformation-design.md の決定11
  *
  * <p><b>なぜ {@code spring.main.web-application-type=none} を使わないのか。</b>
- * それだと Spring Session JDBC の自動設定が動かず(セッションは Web スコープの機能)、
+ * それだと Spring Session の自動設定が動かず(セッションは Web スコープの機能)、
  * {@code FindByIndexNameSessionRepository} を要求する
  * {@link com.example.app.auth.UserSessionManager} が解決できずに<b>起動そのものが失敗する</b>
  * (実測で確認)。そのため Web サーバーは普通に立て、起動しきったところで終了させる。
  * Run Task はプライベートサブネットで動き ALB に登録されないので、
  * 8080 番が一瞬開くことに実害はない。
+ *
+ * <p><b>この制約の帰結として、このタスクにも Redis の接続情報が要る。</b>
+ * セッションの保存先を Redis に移した結果(→ docs/adr/0015-session-store-on-redis.md)、
+ * 上のとおり Spring Session が必ず初期化されるうえ、
+ * {@code repository-type: indexed} は起動時にキースペース通知を購読しに行くため、
+ * Lettuce の遅延接続では済まずその場で Redis に接続する。
+ * ECS のタスク定義(app.yml の MigrateTaskDefinition と deploy/taskdef-migrate.json)に
+ * REDIS_* を渡し忘れると、マイグレーションが起動できずデプロイがここで止まる。
  *
  * <p>{@code migrate} で何もしないのは、<b>Flyway がコンテキストの初期化中に走り終えている</b>ため。
  * ここに到達した時点でマイグレーションは適用済みで、あとは終了させるだけでよい。
