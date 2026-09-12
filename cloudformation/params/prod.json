@@ -27,6 +27,11 @@
   { "ParameterKey": "DbAppUsername",                   "ParameterValue": "app" },
   { "ParameterKey": "DbMigrateUsername",               "ParameterValue": "migrate" },
 
+  { "ParameterKey": "RedisNodeType",                    "ParameterValue": "cache.t4g.small" },
+  { "ParameterKey": "RedisEngineVersion",               "ParameterValue": "7.1" },
+  { "ParameterKey": "RedisNumCacheClusters",            "ParameterValue": "2" },
+  { "ParameterKey": "RedisMemoryUsageThresholdPercent", "ParameterValue": "75" },
+
   { "ParameterKey": "WebCpu",                          "ParameterValue": "1024" },
   { "ParameterKey": "WebMemory",                       "ParameterValue": "2048" },
   { "ParameterKey": "WebDesiredCount",                 "ParameterValue": "2" },
@@ -50,6 +55,7 @@
 
   { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "T0BT8V342DB" },
   { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "C0BTLRRUHQ9" },
+  { "ParameterKey": "SlackChannelIdRedis",             "ParameterValue": "__REDIS_CHANNEL__" },
   { "ParameterKey": "SlackChannelIdRds",               "ParameterValue": "C0BUD9W1Y3S" },
 
   { "ParameterKey": "LogRetentionDays",                "ParameterValue": "30" },

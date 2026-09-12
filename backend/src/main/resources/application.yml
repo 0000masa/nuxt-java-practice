@@ -21,11 +21,39 @@ spring:
     hibernate:
       ddl-auto: validate # スキーマは Flyway(db/migration)が管理。エンティティとの不一致は起動時エラーで検出する
     open-in-view: false # ビュー描画中の遅延ロードを禁止し、DB アクセスを Service 層に閉じる
+  data:
+    redis:
+      # セッションの保存先(→ docs/adr/0015)。開発は docker-compose の redis、本番は ElastiCache。
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # 開発の Redis は認証なしなので空。本番は SSM SecureString から AuthToken が入る。
+      # 空文字を渡すと AUTH コマンドを送らない(= 認証なし)挙動になる。
+      password: ${REDIS_PASSWORD:}
+      ssl:
+        # 本番は ElastiCache の TransitEncryptionEnabled: true に合わせて true。
+        # 開発の redis コンテナは平文なので false。
+        enabled: ${REDIS_SSL:false}
   session:
-    timeout: 1d # 未操作でセッションが切れるまでの時間。切れる挙動を試したいときは DELETE FROM SPRING_SESSION で作れる
-    jdbc:
-      initialize-schema: never # セッションテーブルは Flyway(V3)が作る。既定の embedded だと MySQL では何も作られず、無いまま動かして落ちる
-      # cleanup-cron の既定は毎分実行(0 * * * * *)。期限切れセッションの掃除は Spring Session に任せる
+    # 未操作でセッションが切れるまでの時間。Redis のキーに TTL として設定される。
+    # 切れる挙動を試したいときは docker compose exec redis redis-cli で
+    # DEL 'spring:session:sessions:<id>' するか、FLUSHALL で全部消す
+    timeout: 1d
+    # キーが spring.session.data.redis なのは Boot 4 から。
+    # 記事でよく見る spring.session.redis.* は 4.0.0 で deprecated(level: error)になっており、
+    # 書いても黙って無視される。無視された結果どうなるかは下のとおり(実測で踏んだ)。
+    data:
+      redis:
+        # 既定の RedisSessionRepository は FindByIndexNameSessionRepository を実装していないため、
+        # findByPrincipalName を使う UserSessionManager の DI が解決できず起動に失敗する。
+        #   Parameter 0 of constructor in com.example.app.auth.UserSessionManager
+        #   required a bean of type 'org.springframework.session.FindByIndexNameSessionRepository'
+        # indexed にすると RedisIndexedSessionRepository になり、principal 名の索引が作られる
+        # (→ docs/adr/0015、docs/notes/redis/session-management.md)。
+        repository-type: indexed
+      # 期限切れセッションの掃除は Redis の TTL とキースペース通知に任せる。
+      # ただし TTL はキー単位なので、principal 索引(SET)に残ったセッション ID は
+      # 通知を受けて SREM する必要がある。そのため Redis 側に
+      # notify-keyspace-events Egx の設定が要る(docker-compose.yml / ElastiCache のパラメータグループ)
   security:
     oauth2:
       client:
