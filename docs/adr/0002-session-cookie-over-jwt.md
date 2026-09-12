@@ -3,6 +3,11 @@
 日付: 2026-08-05
 ステータス: accepted
 
+> **※ セッションの保存先は [ADR-0015](0015-session-store-on-redis.md) で MySQL から Redis(ElastiCache)に変更した。**
+> この ADR は supersede されていない。JWT を発行しない・`formLogin()` に乗る・CSRF が必須になる、
+> という判断はすべて今も有効で、変わったのは保存先だけである。
+> 以下の本文は **2026-08-05 時点の決定の記録**として、タイトルを含めそのまま残している。
+
 ## 決定
 
 認証状態は **サーバー側のセッション**で保持し、ブラウザには **セッション ID だけを入れた Cookie** を渡す。セッションの実体は **MySQL**(`spring-session-jdbc` の `SPRING_SESSION` / `SPRING_SESSION_ATTRIBUTES`)に置く。**JWT は発行しない。**

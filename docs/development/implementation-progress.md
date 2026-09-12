@@ -25,6 +25,8 @@
 | 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 作業中 |
 | 15 | 通知先の Slack 化 | アラートの宛先をメールから Slack へ。Amazon Q Developer in chat applications(旧 AWS Chatbot)で SNS トピック 2 本を 2 チャンネルに転送。**設計 → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)**、方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) | 作業中 |
 | 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 作業中 |
+| 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 作業中 |
+| 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -36,6 +38,29 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ18 に着手した(ローカルは実機確認済み・AWS 未検証)**(2026-09-12):
+  - **決めたこと 17 項目は[設計書](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)に、なぜ Redis にしたかは [ADR-0015](../adr/0015-session-store-on-redis.md) に。**
+    ADR-0002 は supersede していない(JWT を発行しない判断はそのまま有効で、変わったのは保存先だけ)
+  - **アプリのコードは 1 行も変えていない。** `UserSessionManager` が `FindByIndexNameSessionRepository`
+    にしか依存していなかったため、ADR-0002 が「差し替えられるようにしておく」と書いたとおりに効いた
+  - **設計時の想定が 1 つ外れた。** 「ECS タスク定義 3 つ全部に Redis が要る」と書いたが、
+    `DbOpsTaskDefinition` は Spring Boot ではなく `mysql:8` を動かすだけなので**不要**だった。正しくは
+    `AppTaskDefinition` と `MigrateTaskDefinition` の **2 つ**
+  - **実機で踏んだ罠**: Spring Boot 4 では `spring.session.redis.*` が `level: error` で deprecated になっており
+    **書いても無視される**(正しくは `spring.session.data.redis.*`)。無視された結果
+    既定の `RedisSessionRepository` が選ばれ、`UserSessionManager` の DI が解決できず起動に失敗した。
+    接続側の `spring.data.redis.*` は Boot 3 から変わっていないので、**片方だけ直して詰まりやすい**
+  - **実機で確認できたこと**: ログインで 4 種類のキーができること / セッション本体と影のキーの
+    TTL 差がちょうど 300 秒であること / 影のキーだけ切らすと principal 索引が自動で掃除されること
+    (本体を先に消すと掃除されない) / 3 端末ログインからのパスワード変更で索引が 3 → 1 になり
+    他端末が `user: null` になること / テスト 46 本すべて成功し `redis-test` 側にだけキーが入ること
+  - **AWS 側は未検証。** `cfn-deploy` を回していないので、`{{resolve:ssm-secure}}` が
+    `AuthToken` で解決されるか、`notify-keyspace-events` が ElastiCache のパラメータグループで
+    設定できるかは実機で確かめる必要がある(設計書 §3-9 / §6)
+  - **残っている手作業**: Slack に `#njp-alerts-redis` を作って ID を `params/*.json` の
+    `SlackChannelIdRedis`(いまは `__REDIS_CHANNEL__`)に書き写す / SSM に
+    `redis_auth_token`(SecureString)を作る。どちらもやるまで構築は通らない
 
 - **フェーズ17 を実装した(一部実機検証済み)**(2026-09-06 / 実機確認 2026-09-07):
   - **やったこと**: デプロイ承認を **Chatbot から自作 Slack App + Lambda に移した**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))
