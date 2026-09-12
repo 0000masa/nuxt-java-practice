@@ -16,7 +16,7 @@
   4. IAM ロール(ECR push 用)   … 凍結ブランチ用に残す(main では使わない)
   5. IAM ロール 3 つ(今回)     … §2
   6. S3 バケット 2 つ            … §3
-  7. SSM の SecureString 6 つ   … §4
+  7. SSM の SecureString 7 つ   … §4
   8. GitHub の Secrets 5 つ     … §5(手順 → github-secrets.md)
   9. Slack と AWS を接続        … docs/slack/README.md
  10. params/stg.json を埋める   … §6
@@ -41,7 +41,7 @@
 | Route53 ホストゾーン | 作り直すと NS レコードが変わり、X-Server 側の再設定と DNS 伝播待ちが発生する |
 | ECR リポジトリ | スタックより先に存在していないと push もデプロイもできない |
 | OIDC プロバイダ・IAM ロール | スタックに入れると循環依存になる(→ [github-actions-oidc.md](./github-actions-oidc.md))。GitHub Actions が引き受けるロールは、それが操作する対象の外に置く |
-| SSM の SecureString | 外部サービス由来の値(Google)と、人が決める値(app / migrate のパスワード)なので AWS では生成できない |
+| SSM の SecureString | 外部サービス由来の値(Google / Slack)と、人が決める値(app / migrate のパスワード、ElastiCache の AUTH トークン)なので AWS では生成できない |
 | テンプレート置き場の S3 バケット | `app.yml` が 54,178 バイトあり、**リクエストに直接載せられる上限 51,200 バイトを超えている**。CloudFormation がテンプレートを読める場所は S3(か SSM ドキュメント)だけなので中継が必要(→ §3) |
 | Slack ワークスペースの認可とチャンネル | **認可はコンソールでしか行えない**(CloudFormation 不可)。チャンネルと `/invite` も Slack 側の操作。いずれも 1 回きりで、スタックを作り直しても消えない(→ [docs/slack/README.md](../slack/README.md)) |
 | CodeStar Connections(GitHub 接続) | CloudFormation で作れるが、作った直後は `PENDING` で、**コンソールで GitHub と握手するまで `AVAILABLE` にならない。** しかも `PENDING` のままでもスタック作成は成功する(緑なのに機能していない)。パイプラインのスタックは消すことがあるので、接続はその外に置いて握手を 1 回で済ませる(→ §12-1) |
@@ -374,7 +374,7 @@ aws iam put-role-policy \
 
 | タスク定義 | 実行ロール | 何を読めるか |
 |---|---|---|
-| `...-db-migrate` | `...-task-execution-role`(アプリと共有) | SSM の SecureString 4 つ |
+| `...-db-migrate` | `...-task-execution-role`(アプリと共有) | SSM の SecureString 5 つ(パスに対するワイルドカード許可なので、`redis_auth_token` が増えても IAM の変更は要らなかった) |
 | `...-db-ops` | `...-db-ops-execution-role`(専用) | DB のパスワード 2 つ + **RDS のマスターシークレット** |
 
 **実行ロールを分けているのが最小権限の実体。** 共有ロールにマスターシークレットを入れると、アプリのタスク定義からもマスターの値を注入できてしまい、「マスターに触るのは `db-ops` だけ」が成立しない(→ [ADR-0005](../adr/0005-separate-db-users-for-app-and-migration.md))。
@@ -511,9 +511,9 @@ s3://nuxt-java-practice-lambda-artifacts-<アカウントID>/
 
 `pipeline-destroy.yml` が空にするのは `...-pipeline-artifacts`(スタック内のアーティファクト置き場)だけ。
 
-## 4. SSM に SecureString を 6 つ作る
+## 4. SSM に SecureString を 7 つ作る
 
-**ライフサイクルが 2 種類ある。** 前半 4 つはアプリのスタック(作り捨て)が使い、後半 2 つはパイプラインのスタック(常駐)が使う。**置き場は同じパスで揃えている。**
+**ライフサイクルが 2 種類ある。** 前半 5 つはアプリのスタック(作り捨て)が使い、後半 2 つはパイプラインのスタック(常駐)が使う。**置き場は同じパスで揃えている。**
 
 ```bash
 P=/nuxt-java-practice/stg
@@ -529,6 +529,11 @@ aws ssm put-parameter --type SecureString --name "$P/migrate_db_password" --valu
 aws ssm put-parameter --type SecureString --name "$P/google_client_id"     --value '<Google のクライアント ID>'
 aws ssm put-parameter --type SecureString --name "$P/google_client_secret" --value '<Google のクライアントシークレット>'
 
+# セッションストア(ElastiCache の AUTH トークン → docs/adr/0015)。
+# 注意: DB パスワードより文字種の制限がきつい。英数字だけにすること(詳細 → §4-2)。
+# app.yml が {{resolve:ssm-secure}} で直接読み、ECS のタスク定義にも同じ値が注入される。
+aws ssm put-parameter --type SecureString --name "$P/redis_auth_token" --value '<英数字 32 文字>'
+
 # --- パイプライン用(pipeline.yml の Lambda が読む。フェーズ17 で追加 → ADR-0014) ---
 # 値の取り方は docs/slack/README.md。どちらも Slack App の画面から控える
 aws ssm put-parameter --type SecureString --name "$P/slack_webhook_url"     --value '<Incoming Webhook の URL>'
@@ -536,6 +541,11 @@ aws ssm put-parameter --type SecureString --name "$P/slack_signing_secret"  --va
 ```
 
 RDS のマスターパスワードはここに置かない(RDS が Secrets Manager に作る)。
+
+**`redis_auth_token` だけ作り忘れ方が違う。** 他の 6 つは ECS のタスク定義が実行時に注入するので、
+無くても**スタックの作成自体は成功**してしまう。`redis_auth_token` は `app.yml` が
+`{{resolve:ssm-secure:...}}` でテンプレート解決の時点で読むため、**無ければスタック作成がその場で失敗する。**
+気づくのが早いぶん親切な壊れ方で、パイプライン用の 2 つのような事前チェック(→ §12-3)は要らない。
 
 **webhook URL を SecureString にしているのは、URL そのものが資格情報だから。** 知っている人は誰でもそのチャンネルに投稿できる。`slack_signing_secret` は逆で、**これが漏れると公開エンドポイントへのリクエストを偽装できる**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))。
 
@@ -572,7 +582,71 @@ LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
 openssl rand -base64 24
 ```
 
+> **base64 が使えるのは「DB パスワードなら」という話。** ここで見ているのは `'` と `\` だけなので
+> base64 で問題ないが、**`redis_auth_token` にそのまま流用すると 3 回に 2 回は弾かれる**
+> (ElastiCache は `/` と `+` を許さない → §4-2)。
+
 **RDS のマスターパスワードのルールはこれとは別物**(8〜41 文字、印字可能 ASCII から `/` `"` `@` と空白を除く)。ただし生成するのは RDS なので、人が満たしにいくことはない。
+
+### 4-2. Redis の AUTH トークンに使えない文字
+
+**DB パスワードより制限がきつい。** §4-1 の感覚のまま作ると通らない。
+
+| | 制限 |
+|---|---|
+| 長さ | **16〜128 文字** |
+| 文字種 | 印字可能 ASCII のうち、**許される記号は `!` `&` `#` `$` `^` `<` `>` `-` の 8 つだけ** |
+
+> 古い版のドキュメントでは「印字可能 ASCII から `/` `"` `@` を除く」という緩い書き方になっている。
+> **どちらの版でも英数字だけなら確実に通る**ので、記号は使わないのが安全。
+
+#### `openssl rand -base64 24` は使えない
+
+§4-1 が勧めている base64 は、**ここでは使ってはいけない。**
+base64 の出力アルファベットは `A-Za-z0-9+/` で、**`+` と `/` はどちらの版でも禁止**だからである。
+
+24 バイトは 3 の倍数なので `=` パディングは付かないが、32 文字それぞれが 1/64 の確率で
+`+` か `/` になる。**理論値で約 64%、手元で 1000 回試したところ 678 回(約 68%)が禁止文字を含んだ。**
+
+```bash
+$ for i in $(seq 1000); do openssl rand -base64 24; done | grep -c '[+/]'
+678
+```
+
+**厄介なのは、確率なので「たまに通ってしまう」こと。** 3 回に 1 回は禁止文字を含まない値が出るので、
+一度うまくいくと「これでいい」と思い込む。そして作り直した日に落ちる。
+**「昨日は通ったのに今日は落ちる」**という、原因に辿り着きにくい壊れ方になる。
+
+#### 使うのはこちら
+
+```bash
+LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32; echo
+```
+
+英数字のみ 32 文字なので、**上記のどちらの版の制限にも収まる**。長さも 16〜128 の範囲内。
+
+#### DB パスワードとの対比
+
+同じ「SSM に置く人が決める値」でも、**満たすべき条件が違う**。
+
+| | DB パスワード(`app` / `migrate`) | Redis の AUTH トークン |
+|---|---|---|
+| 制限の出どころ | **db-ops タスク**(SQL リテラルに直接埋め込む) | **ElastiCache 本体** |
+| 長さ | 実質制限なし | **16〜128 文字** |
+| NG な文字 | `'` と `\` の 2 つだけ | 英数字と 8 記号**以外すべて** |
+| `openssl rand -base64 24` | **使える** | **使えない** |
+| 英数字 32 文字(`tr -dc 'A-Za-z0-9'`) | 使える | 使える |
+
+**迷ったら英数字 32 文字。** §4 の 7 つのうち**自分で値を決めるのは 3 つ**
+(`app_db_password` / `migrate_db_password` / `redis_auth_token`)で、
+残る 4 つは Google と Slack から控えてくる値なので、作り方を選べるのはこの 3 つだけ。
+**3 つとも英数字 32 文字にすれば、どの制限にも引っかからない。**
+
+#### 後から変えるとき
+
+作成後に `AuthToken` を変更する場合は、CloudFormation 側に `AuthTokenUpdateStrategy`
+(`SET` / `ROTATE` / `DELETE`)の指定が要る。**いまのテンプレートには書いていない**ので、
+ローテーションを始めるときに足す(→ [フェーズ18 設計書](../superpowers/specs/2026-09-12-phase18-redis-session-design.md) §6)。
 
 ---
 
@@ -775,7 +849,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 **このワークフローは stg 専用。** 本番のスタックを消すボタンは作らない。
 
-**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 6 つ / **S3 バケット 2 つ**(テンプレート置き場・Lambda 成果物置き場 → §3)/ **CodeStar Connections** / **パイプラインのスタック**(別スタックなので `cfn-destroy` では消えない → §12)/ ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
+**残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 7 つ / **S3 バケット 2 つ**(テンプレート置き場・Lambda 成果物置き場 → §3)/ **CodeStar Connections** / **パイプラインのスタック**(別スタックなので `cfn-destroy` では消えない → §12)/ ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
 
 撤収し忘れると課金が続くもの: **NAT Gateway(約 $0.062/時)・RDS・ALB・WAF(Web ACL 月 $5 + ルール 月 $1 の時間割り)**。
 

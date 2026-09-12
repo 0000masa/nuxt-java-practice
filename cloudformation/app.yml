@@ -931,7 +931,16 @@ Resources:
       TransitEncryptionEnabled: true
       # {{resolve:ssm-secure}} は対応プロパティが限られているが(→ BasicAuthCredential のコメント)、
       # ElastiCache の AuthToken はその対応リストに入っている。
-      # SSM の SecureString は手動で 1 つ作る(値の作り方 → docs/infrastructure/)。
+      #
+      # SSM の SecureString は手動で 1 つ作る
+      # (手順 → docs/infrastructure/cloudformation-operations.md §4、文字種の制限 → 同 §4-2)。
+      #
+      # 【値は英数字だけにすること】AuthToken に許される記号は ! & # $ ^ < > - の 8 つだけで、
+      # DB パスワードより制限がきつい。とくに openssl rand -base64 は出力に + と / が混ざるため
+      # 3 回に 2 回は弾かれる。しかも確率なのでたまに通ってしまい、作り直した日に落ちる。
+      #
+      # ここは他の機密と違い、ECS の実行時ではなく「テンプレート解決の時点」で読まれる。
+      # そのためパラメータが無ければスタックの作成がその場で失敗する(作り忘れに早く気づける)。
       AuthToken: !Sub "{{resolve:ssm-secure:${SsmParameterPath}redis_auth_token}}"
       # 自動バックアップは取らない。セッションは失われてもログインし直せばよく、
       # 撤収前提の環境でスナップショットだけ残ると課金が続く(RDS の DeletionPolicy と同じ考え方)。
