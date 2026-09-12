@@ -168,6 +168,13 @@ RDS よりも事故ったときの被害が直接的なので、ここは掛け�
     AuthToken: !Sub "{{resolve:ssm-secure:${SsmParameterPath}redis_auth_token}}"
 ```
 
+- **`AtRestEncryptionEnabled`** — **ディスクに書かれたデータ**を KMS で暗号化する。
+  Redis はインメモリだが、スナップショット・レプリカ同期の一時ファイル・スワップはディスクに出る。
+  **後から有効化できない**ので、スナップショットを取らない構成(9 節)でも付けておく
+- **`TransitEncryptionEnabled`** — **ネットワークを流れるデータ**を TLS で包む。
+  クライアント ↔ ノード間とノード間レプリケーションの両方が対象。
+  アプリ側も TLS で喋る必要があるので `REDIS_SSL` と対になっている
+
 `AuthToken` は `TransitEncryptionEnabled: true` が前提(平文で AUTH を送っては意味がない)。
 
 ### `{{resolve:ssm-secure}}` が使える珍しい場所
@@ -236,6 +243,12 @@ spring:
 ```
 
 **クラスターモード無効なので `PrimaryEndPoint`。** 有効にすると `ConfigurationEndPoint` になる。
+前者は**現在のプライマリを指す DNS 名**で、フェイルオーバーすると向き先が自動で張り替わる。
+後者は接続先ではなく**構成を問い合わせる入口**で、クライアントが `CLUSTER SLOTS` を打って
+全ノードを把握する必要がある(4 節の「複雑さが増す」の中身)。
+
+同じ `!GetAtt` をアプリ・マイグレーション・`Outputs` の 3 箇所で使っているので、切り替えるならまとめて直す。
+綴りは `Endpoint` ではなく **`EndPoint`**(RDS 側は `Endpoint` で不統一。間違えるとデプロイまで気づかない)。
 
 SG は ECS タスク 3 つで共通なので、**Redis 側の ingress ルールは 1 本で足りる。**
 
