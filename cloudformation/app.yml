@@ -170,6 +170,33 @@ Parameters:
     Default: migrate
     Description: DDL を持つユーザー。db-migrate タスクだけが使う
 
+  # --- ElastiCache(セッションストア)--- → docs/adr/0015
+  RedisNodeType:
+    Type: String
+    Description: >-
+      セッション 1 件がおよそ 2KB(実測)なので cache.t4g.micro(0.5GiB)でも
+      十万件規模まで入る。足りなくなるより先に別の理由で困る
+  RedisEngineVersion:
+    Type: String
+    Default: "7.1"
+    Description: >-
+      ElastiCache の Redis OSS はライセンス変更以降 7.1 が最後で、8 系は提供されない
+      (AWS は Valkey に移行した)。開発環境の redis:7 とメジャーを揃えている
+  RedisNumCacheClusters:
+    Type: Number
+    MinValue: 1
+    MaxValue: 6
+    Description: >-
+      プライマリを含むノード数。1 ならレプリカ無し(自動フェイルオーバー不可)。
+      2 以上にすると Multi-AZ と自動フェイルオーバーが使えるが料金もその分かかる
+  RedisMemoryUsageThresholdPercent:
+    Type: Number
+    MinValue: 1
+    MaxValue: 100
+    Description: >-
+      DatabaseMemoryUsagePercentage のしきい値。maxmemory-policy が noeviction なので、
+      100% に達した時点で書き込みが拒否されてログインが 500 になる。手前で気づくための値
+
   # --- ECS ---
   WebCpu:
     Type: String
@@ -276,6 +303,11 @@ Parameters:
     AllowedPattern: ^[A-Za-z0-9]+$
     Description: RDS の検知を流す Slack チャンネルの ID(#njp-alerts-rds)
 
+  SlackChannelIdRedis:
+    Type: String
+    AllowedPattern: ^[A-Za-z0-9]+$
+    Description: ElastiCache の検知を流す Slack チャンネルの ID(#njp-alerts-redis)
+
   # 以下 4 つは AWS 公式の推奨アラーム(Best Practice Recommended Alarms)ベース。
   # インスタンスクラスとストレージ容量に連動するので環境ごとに渡す。
   # CloudFormation に算術の組み込み関数が無いため、計算済みの値を params に書く。
@@ -329,6 +361,10 @@ Conditions:
   BasicAuthEnabled: !Equals [!Ref EnableBasicAuth, "true"]
 
   EnhancedMonitoringEnabled: !Not [!Equals [!Ref DbMonitoringInterval, 0]]
+
+  # レプリカが 1 台も無い状態で AutomaticFailoverEnabled / MultiAZEnabled を true にすると
+  # 「フェイルオーバー先が無い」として作成が失敗する。ノード数から自動で決める。
+  RedisHasReplica: !Not [!Equals [!Ref RedisNumCacheClusters, 1]]
 
   # base も weight も 0 なら FARGATE の要素を出さない(stg = Spot 100%)。
   # Fn::If はリストの要素としても使えて、AWS::NoValue を返すと要素ごと消える(→ 学習メモ §8-3)
@@ -593,6 +629,23 @@ Resources:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-rds-sg
 
+  # ECS タスクは 3 つとも同じ SG を使うので、ここ 1 本で app / db-migrate の両方を許可できる
+  # (db-ops は MySQL クライアントのイメージで Redis を使わないが、SG は共通)。
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${ProjectName}-${EnvName} ElastiCache
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref EcsSecurityGroup
+          Description: From ECS tasks only (service / db-migrate)
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-redis-sg
+
   # ===========================================================================
   # 証明書と DNS
   # ===========================================================================
@@ -798,6 +851,97 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-db
+
+  # ===========================================================================
+  # ElastiCache(セッションストア)
+  # ===========================================================================
+  # 決定 → docs/adr/0015、設計 → specs/2026-09-12-phase18-redis-session-design.md
+  # 仕組みの解説 → docs/notes/redis/elasticache.md
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      CacheSubnetGroupName: !Sub ${ProjectName}-${EnvName}-redis-subnet-group
+      Description: !Sub ${ProjectName}-${EnvName}
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetC
+
+  # 【このパラメータグループの存在が Serverless を却下した理由】
+  # ElastiCache Serverless はパラメータグループを持てないので、下の 2 つを設定できない。
+  RedisParameterGroup:
+    Type: AWS::ElastiCache::ParameterGroup
+    Properties:
+      CacheParameterGroupFamily: redis7
+      Description: !Sub ${ProjectName}-${EnvName} session store
+      Properties:
+        # キースペース通知。E=キーイベント / g=汎用コマンド(DEL など) / x=期限切れ。
+        # 既定は空(無効)。
+        #
+        # これが無いと、TTL で消えたセッションの ID が principal 索引(Set)に残り続ける。
+        # Redis の TTL はキー単位で、Set の要素ごとには張れないため、
+        # 索引の掃除は「期限切れ通知を受け取って SREM する」しかない。
+        # 機能は壊れないが索引が単調増加する。
+        # → docs/notes/redis/session-management.md §7
+        notify-keyspace-events: Egx
+        # 【ElastiCache の既定は volatile-lru で、それはこの用途では危険】
+        # volatile-lru は「TTL 付きのキーを古い順に捨てる」設定。
+        # Spring Session のセッション本体(Hash)と影のキーには TTL が付いているので、
+        # メモリが逼迫すると、それらが静かに消え、
+        # ユーザーは身に覚えのないログアウトをする。ログにも出ない。
+        # しかも principal 索引(Set)には TTL が無く追い出されないため、
+        # 索引にだけセッション ID が残る(実体を失った ID を指したままになる)。
+        #
+        # それが既定なのは Redis をキャッシュとして使う前提だから(消えても再計算すればよい)。
+        # セッションは再計算できないので前提が違う。noeviction なら書き込みを拒否して
+        # エラーになる。派手に壊れるが、壊れたことが分かる。
+        maxmemory-policy: noeviction
+
+  # 【CacheCluster ではなく ReplicationGroup を使う理由】
+  # AtRestEncryptionEnabled / TransitEncryptionEnabled / AuthToken は
+  # ReplicationGroup 専用のプロパティで、CacheCluster には無い。
+  # ノード 1 台でも ReplicationGroup で書いておけば、暗号化を掛けられるうえ、
+  # レプリカを足すのも NumCacheClusters を増やすだけで済む。
+  RedisReplicationGroup:
+    Type: AWS::ElastiCache::ReplicationGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      ReplicationGroupId: !Sub ${ProjectName}-${EnvName}-redis
+      ReplicationGroupDescription: !Sub ${ProjectName}-${EnvName} session store
+      Engine: redis
+      EngineVersion: !Ref RedisEngineVersion
+      CacheNodeType: !Ref RedisNodeType
+      # クラスターモード無効(シャード 1 つ)。NumCacheClusters がプライマリ+レプリカの合計。
+      # クラスターモードを有効にすると論理データベース番号が使えなくなり、
+      # Spring Session も RedisClusterConnection 前提の設定が要る。この規模では不要。
+      NumCacheClusters: !Ref RedisNumCacheClusters
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      CacheParameterGroupName: !Ref RedisParameterGroup
+      SecurityGroupIds:
+        - !Ref RedisSecurityGroup
+      Port: 6379
+      # ノードが 1 台のときに true にすると作成が失敗する(フェイルオーバー先が無いため)。
+      # params でノード数を増やしたら、この 2 つも自動的に true になる。
+      AutomaticFailoverEnabled: !If [RedisHasReplica, true, false]
+      MultiAZEnabled: !If [RedisHasReplica, true, false]
+      AtRestEncryptionEnabled: true
+      # 【AuthToken は TransitEncryptionEnabled: true が前提】
+      # ElastiCache は既定で認証が一切なく、SG さえ通れば誰でも KEYS * が打てる。
+      # 入っているのはセッション ID そのものなので、読めた人はそのまま成りすませる。
+      TransitEncryptionEnabled: true
+      # {{resolve:ssm-secure}} は対応プロパティが限られているが(→ BasicAuthCredential のコメント)、
+      # ElastiCache の AuthToken はその対応リストに入っている。
+      # SSM の SecureString は手動で 1 つ作る(値の作り方 → docs/infrastructure/)。
+      AuthToken: !Sub "{{resolve:ssm-secure:${SsmParameterPath}redis_auth_token}}"
+      # 自動バックアップは取らない。セッションは失われてもログインし直せばよく、
+      # 撤収前提の環境でスナップショットだけ残ると課金が続く(RDS の DeletionPolicy と同じ考え方)。
+      SnapshotRetentionLimit: 0
+      AutoMinorVersionUpgrade: true
+      # UTC。JST では月曜 01:00-02:00(RDS のメンテナンスウィンドウとずらす)
+      PreferredMaintenanceWindow: sun:16:00-sun:17:00
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-redis
 
   # ===========================================================================
   # 画像用の S3 と CloudFront
@@ -1254,6 +1398,15 @@ Resources:
               Value: !Ref ImageBucket
             - Name: IMAGE_CDN_DOMAIN
               Value: !GetAtt ImageDistribution.DomainName
+            # セッションの保存先(→ docs/adr/0015)。クラスターモード無効なので
+            # PrimaryEndPoint を使う(有効なら ConfigurationEndPoint になる)
+            - Name: REDIS_HOST
+              Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+            - Name: REDIS_PORT
+              Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+            # TransitEncryptionEnabled: true に対応する。開発の redis コンテナは平文なので false
+            - Name: REDIS_SSL
+              Value: "true"
           Secrets:
             # DB_USER は app なので、パスワードも app ユーザーのもの(SSM の SecureString)。
             # RDS のマスターパスワードはこのタスクには渡らない(→ docs/adr/0005)
@@ -1263,6 +1416,9 @@ Resources:
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_id
             - Name: GOOGLE_CLIENT_SECRET
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}google_client_secret
+            # ElastiCache の AuthToken。テンプレートの AuthToken と同じ SSM パラメータを指す
+            - Name: REDIS_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}redis_auth_token
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -1313,6 +1469,18 @@ Resources:
             # Web を立てるが ALB には登録されないので、ポートは何番でもよい
             - Name: SERVER_PORT
               Value: "8080"
+            # 【マイグレーションのタスクにも Redis が要る】
+            # このタスクは Web アプリケーションとして起動する(TaskRunner の javadoc のとおり
+            # spring.main.web-application-type=none は使えない)ので Spring Session が必ず初期化される。
+            # さらに repository-type: indexed は起動時にキースペース通知を購読しに行くため、
+            # Lettuce の遅延接続では済まず、その場で Redis に繋ぐ。
+            # 渡し忘れるとマイグレーションが起動できず、デプロイがここで止まる。
+            - Name: REDIS_HOST
+              Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+            - Name: REDIS_PORT
+              Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+            - Name: REDIS_SSL
+              Value: "true"
           Secrets:
             # migrate のパスワードだけでは起動しきらないので app のパスワードも渡す。
             # spring.flyway.user を設定すると Spring は Flyway 用に別の非プール DataSource を
@@ -1326,6 +1494,8 @@ Resources:
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
             - Name: FLYWAY_DB_PASSWORD
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}migrate_db_password
+            - Name: REDIS_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}redis_auth_token
             # Google の資格情報は渡さない。このタスクは HTTP を受けないので、
             # application.yml のダミー既定値(dummy-client-id / dummy-client-secret)で
             # ClientRegistration が組み立てられて起動できる。
@@ -1704,6 +1874,15 @@ Resources:
       TopicName: !Sub ${ProjectName}-${EnvName}-rds-alerts
       DisplayName: !Sub ${ProjectName}-${EnvName} RDS
 
+  # ElastiCache(セッションストア)のメトリクスアラーム 2 本をこの 1 本に集約する。
+  # RDS に相乗りさせず別チャンネルにしたのは、見るべき対処が違うため
+  # (RDS はクエリやストレージ、Redis はセッション数とメモリ)。
+  RedisAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvName}-redis-alerts
+      DisplayName: !Sub ${ProjectName}-${EnvName} Redis
+
   # トピックポリシーは付けない。CloudWatch アラームと RDS イベント購読は
   # 同一アカウント内なら既定のトピックポリシーで publish できる。
 
@@ -1782,6 +1961,20 @@ Resources:
       SlackChannelId: !Ref SlackChannelIdRds
       SnsTopicArns:
         - !Ref RdsAlertsTopic
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      GuardrailPolicies:
+        - arn:aws:iam::aws:policy/AWSDenyAll
+      UserRoleRequired: false
+      LoggingLevel: ERROR
+
+  RedisAlertsSlackChannel:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ${ProjectName}-${EnvName}-redis-alerts
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelIdRedis
+      SnsTopicArns:
+        - !Ref RedisAlertsTopic
       IamRoleArn: !GetAtt ChatbotRole.Arn
       GuardrailPolicies:
         - arn:aws:iam::aws:policy/AWSDenyAll
@@ -1914,6 +2107,62 @@ Resources:
         - !Ref RdsAlertsTopic
       OKActions:
         - !Ref RdsAlertsTopic
+
+  # --- A': ElastiCache メトリクスアラーム 2 本 ----------------------------
+  # ノード 1 台なので CacheClusterId は <ReplicationGroupId>-001 になる。
+  # ReplicationGroup の戻り値にノード ID は含まれないので、命名規則から組み立てる。
+  # ノードを増やしたら -002 以降も見る必要がある(このテンプレートは 1 台前提)。
+  #
+  # maxmemory-policy: noeviction の帰結として、メモリが 100% に達した時点で
+  # 書き込みが拒否され、ログインと lastAccessedTime の更新が 500 になる。
+  # 「静かに消える」代わりに「派手に止まる」を選んでいるので、手前で気づく仕掛けが要る。
+  RedisMemoryHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-redis-memory-high
+      AlarmDescription: ElastiCache DatabaseMemoryUsagePercentage is high (noeviction will start rejecting writes)
+      Namespace: AWS/ElastiCache
+      MetricName: DatabaseMemoryUsagePercentage
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Sub ${ProjectName}-${EnvName}-redis-001
+      Statistic: Average
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RedisMemoryUsageThresholdPercent
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RedisAlertsTopic
+      OKActions:
+        - !Ref RedisAlertsTopic
+
+  # 【これは「異常値」ではなく「設定ミス」の検知】
+  # maxmemory-policy: noeviction なら Evictions は常に 0 でなければならない。
+  # 1 でも出たらパラメータグループが効いていないということで、
+  # 裏を返せばセッションが黙って捨てられている。しきい値をパラメータ化しないのはこのため。
+  RedisEvictionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-redis-evictions
+      AlarmDescription: ElastiCache evicted a key - maxmemory-policy is not noeviction (sessions are being dropped silently)
+      Namespace: AWS/ElastiCache
+      MetricName: Evictions
+      Dimensions:
+        - Name: CacheClusterId
+          Value: !Sub ${ProjectName}-${EnvName}-redis-001
+      Statistic: Sum
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: 0
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RedisAlertsTopic
+      OKActions:
+        - !Ref RedisAlertsTopic
 
   RdsConnectionsHighAlarm:
     Type: AWS::CloudWatch::Alarm
@@ -2261,6 +2510,16 @@ Outputs:
   DbPort:
     Description: taskdef のプレースホルダに差し込む DB のポート
     Value: !GetAtt Database.Endpoint.Port
+
+  # buildspec.yml が taskdef.json / taskdef-migrate.json の REDIS_HOST / REDIS_PORT に差し込む。
+  # クラスターモード無効なので PrimaryEndPoint(有効なら ConfigurationEndPoint)。
+  RedisEndpoint:
+    Description: taskdef のプレースホルダに差し込む ElastiCache のエンドポイント
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+
+  RedisPort:
+    Description: taskdef のプレースホルダに差し込む ElastiCache のポート
+    Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
 
   DbMasterSecretArn:
     Description: RDS が作ったマスターパスワードのシークレット(手元から DB に入るときに読む)
