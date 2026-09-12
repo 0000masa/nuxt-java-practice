@@ -27,6 +27,7 @@ flowchart LR
             App[Spring Boot コンテナ<br/>静的ファイル + /api]
         end
         RDS[(RDS<br/>MySQL)]
+        EC[(ElastiCache<br/>Redis / セッション)]
         S3[(S3<br/>画像保存)]
         CF[CloudFront<br/>画像配信]
         SES[SES<br/>メール送信]
@@ -39,6 +40,7 @@ flowchart LR
     ACM -.証明書.- ALB
     ALB -->|HTTP| App
     App --> RDS
+    App -->|セッション| EC
     App -->|画像アップロード| S3
     App -->|メール送信| SES
     User -->|画像取得 HTTPS| CF
@@ -56,14 +58,15 @@ flowchart LR
 | ECS (Fargate) | Spring Boot コンテナの実行基盤。サーバー管理不要の Fargate 起動タイプを使う |
 | ECR | Docker イメージのレジストリ。GitHub Actions からビルド & push |
 | RDS (MySQL) | アプリケーションデータの永続化 |
+| ElastiCache (Redis OSS) | ログインセッションの保存先。ノード 1 台のレプリケーショングループで、暗号化と AUTH トークンを掛ける。→ [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/elasticache.md](../notes/redis/elasticache.md) |
 | S3 | ユーザーアップロード画像の保存(フロントエンド配信には使わない) |
 | CloudFront | S3 上の画像の CDN 配信 |
 | SES | メール送信。独自ドメインで DKIM 認証する。**アプリは SMTP ではなく API 経路で送る**(SMTP 認証は IAM ユーザーの長期クレデンシャルが必要になるため) |
 | WAF | 検証環境の Basic 認証。ALB に関連付ける。ALB の `fixed-response` は `WWW-Authenticate` を付けられないので WAF でしか実現できない(→ [ADR-0006](../adr/0006-basic-auth-with-waf.md)) |
 | Secrets Manager | RDS のマスターパスワード。RDS が生成・保持し、DB を削除すると一緒に消える |
-| SSM Parameter Store | `app` / `migrate` の DB パスワードと Google の資格情報(手動作成・常駐) |
-| CloudWatch | ログの保管、アラーム 7 本(RDS のメトリクス 4 / RDS のログ 2 / ECS のタスク数不足 1)、RDS ログのメトリクスフィルタ 2 |
-| SNS | アラームと RDS イベント購読の通知先。トピック 2 本。**宛先は Slack**(Amazon Q Developer in chat applications がトピック 1 本を 1 チャンネルに転送する)。→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) |
+| SSM Parameter Store | `app` / `migrate` の DB パスワード、Google の資格情報、**ElastiCache の AUTH トークン**(手動作成・常駐) |
+| CloudWatch | ログの保管、アラーム 9 本(RDS のメトリクス 4 / RDS のログ 2 / ECS のタスク数不足 1 / **ElastiCache のメトリクス 2**)、RDS ログのメトリクスフィルタ 2 |
+| SNS | アラームと RDS イベント購読の通知先。トピック 3 本(ECS / RDS / **Redis**)。**宛先は Slack**(Amazon Q Developer in chat applications がトピック 1 本を 1 チャンネルに転送する)。→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) |
 | Data Firehose | ECS のログを S3 に長期アーカイブする配信ストリーム。**ただしスタックと一緒に消えるので保全機能としては動いていない**(同上) |
 
 ## ドメインと管理範囲
@@ -79,7 +82,7 @@ CloudFormation で管理するもの / しないものを、ライフサイク�
 | **IAM の OIDC プロバイダ + GitHub Actions 用ロール** | **手動** | ECR に push するロールをスタックに入れると**循環依存**になる。push にはロールが要る → ロールを作るスタックは ECS がイメージを引けず ROLLBACK → 作られかけたロールごと消える、で永久に push できない。作成手順 → [github-actions-oidc.md](./github-actions-oidc.md) |
 | ACM 証明書 | CloudFormation | ホストゾーンが Route53 にあるため DNS 検証はすぐ通る。撤収のたびに作り直しても実用上の問題は出ない |
 | Route53 の A レコード(ALB 向け) | CloudFormation | ゾーンは手動管理のまま、**中身のレコードだけ**をスタックが出し入れする |
-| 上記以外すべて | CloudFormation | VPC / サブネット / NAT GW / SG / ALB / ECS / RDS / S3 / CloudFront / IAM ロール |
+| 上記以外すべて | CloudFormation | VPC / サブネット / NAT GW / SG / ALB / ECS / RDS / ElastiCache / S3 / CloudFront / IAM ロール |
 
 手動管理のホストゾーン ID と ECR リポジトリ URI は、スタックの `Parameters` として渡す。
 
@@ -88,7 +91,7 @@ CloudFormation で管理するもの / しないものを、ライフサイク�
 ## リクエストの流れ
 
 1. **ページ表示**: ユーザー → Route53 → ALB(TLS 終端)→ ECS の Spring Boot → `static/` 内の SSG 済み HTML/JS/CSS を返す
-2. **API 呼び出し**: ブラウザの JS → `https://ドメイン/api/**` → ALB → Spring Boot の REST API → RDS
+2. **API 呼び出し**: ブラウザの JS → `https://ドメイン/api/**` → ALB → Spring Boot の REST API → RDS(データ)/ ElastiCache(ログイン状態)
 3. **画像アップロード**: ブラウザ → `/api` → Spring Boot → S3 に保存
 4. **画像表示**: ブラウザ → CloudFront(画像用 URL)→ S3
 5. **メール送信**: Spring Boot → SES
@@ -145,7 +148,7 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 スタックは 2 つある。**`cloudformation/pipeline.yml`(常駐)** がデプロイパイプラインを持ち、**`cloudformation/app.yml`(作り捨て)** が環境そのものを持つ。2 つは `Export` / `ImportValue` ではなく命名規則で繋いであるので、アプリのスタックはいつでも撤収できる(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。以下は作り捨て側の話。
 
-**使い捨て部分は 1 スタックにまとめる。** VPC・サブネット・NAT GW・SG・ALB・ACM・ECS・RDS・S3・CloudFront・Route53 の A レコード・IAM ロールを 1 本のテンプレートに置く。
+**使い捨て部分は 1 スタックにまとめる。** VPC・サブネット・NAT GW・SG・ALB・ACM・ECS・RDS・ElastiCache・S3・CloudFront・Route53 の A レコード・IAM ロールを 1 本のテンプレートに置く。
 
 分割しない理由:
 
@@ -225,7 +228,7 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 ### コストに関する注意
 
-- 撤収し忘れると ALB・RDS・NAT Gateway 等で課金が続くため、検証後は必ずスタックを削除する
+- 撤収し忘れると ALB・RDS・ElastiCache・NAT Gateway 等で課金が続くため、検証後は必ずスタックを削除する
 - Route53 のホストゾーンとドメイン代は環境の有無にかかわらず発生する(手動管理で常駐するため)
 - ACM の証明書は発行済みで放置しても無料
 - 監視・検知層はほぼ無料枠に収まる。CloudWatch アラームは 10 本まで無料(このスタックは 7 本)、カスタムメトリクス 2 本と Firehose の取り込み量は数時間ぶんなら誤差。**Container Insights(`enhanced`)だけは取り込み量に応じて課金される**ので、費用が気になるときは `params` を `enabled` に落とす(`disabled` は選べない。ECS タスク数不足のアラームが動かなくなるため)

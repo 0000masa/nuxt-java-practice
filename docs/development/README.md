@@ -12,6 +12,8 @@ flowchart LR
         Nuxt[nuxt<br/>Node.js devサーバー<br/>:3000]
         App[backend<br/>Spring Boot<br/>:8080]
         DB[(mysql<br/>MySQL 8<br/>:3306)]
+        Redis[(redis<br/>セッション<br/>:6379)]
+        Insight[redisinsight<br/>GUI :5540]
         Minio[(minio<br/>S3互換<br/>:9000 / UI :9001)]
         Mail[mailpit<br/>SMTP :1025<br/>UI :8025]
     end
@@ -19,11 +21,16 @@ flowchart LR
     Browser -->|http://localhost:3000| Nuxt
     Nuxt -->|/api をプロキシ| App
     App --> DB
+    App -->|セッション| Redis
     App -->|画像保存 S3 API| Minio
     App -->|SMTP| Mail
+    Insight --> Redis
+    Browser -.Redis GUI :5540.-> Insight
     Browser -.MinIO管理画面 :9001.-> Minio
     Browser -.メール確認 :8025.-> Mail
 ```
+
+> テスト専用の `redis-test` は上図に含めていない(アプリからは使われず、`gradlew test` だけが繋ぐ)。
 
 ## コンテナ一覧
 
@@ -32,6 +39,9 @@ flowchart LR
 | nuxt | Node 22(docker/ の Dockerfile) | 3000 | Nuxt dev サーバー(HMR 付き) | Spring Boot の static/ 配信に置き換え |
 | backend | Java 21(docker/ の Dockerfile) | 8080 | REST API | ECS Fargate |
 | mysql | mysql:8 | 3306 | データベース | RDS (MySQL) |
+| redis | redis:7 | 6379 | セッションの保存先(→ [ADR-0015](../adr/0015-session-store-on-redis.md)) | ElastiCache (Redis OSS 7.1) |
+| redis-test | redis:7 | - | `gradlew test` 専用の Redis。永続化しない | - |
+| redisinsight | redis/redisinsight | 5540 | Redis の中身をブラウザで見る GUI。**公式の redis イメージに GUI は入っていない**ので別コンテナ | - |
 | minio | minio/minio | 9000 (API) / 9001 (管理UI) | S3 互換の画像保存 | S3 + CloudFront |
 | minio-init | minio/mc | - | 起動時に `images` バケットを自動作成して終了する一発ジョブ(`--ignore-existing` で冪等) | - |
 | mailpit | axllent/mailpit | 1025 (SMTP) / 8025 (Web UI) | メールの受信・確認 | SES |
@@ -40,7 +50,9 @@ Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docke
 
 ### 永続化と環境変数
 
-- MySQL(`mysql-data`)、MinIO(`minio-data`)、Gradle キャッシュ(`gradle-cache`)は named volume で永続化。`docker compose down` してもデータは残る
+- MySQL(`mysql-data`)、MinIO(`minio-data`)、Redis(`redis-data`)、RedisInsight の設定(`redisinsight-data`)、Gradle キャッシュ(`gradle-cache`)は named volume で永続化。`docker compose down` してもデータは残る
+  - **Redis は AOF(`--appendonly yes`)で永続化している。** 本番の ElastiCache は逆にスナップショットを取らない設定なので、**ローカルのほうが手厚い**。開発中に毎回ログインし直さずに済むことを優先した(→ [ADR-0015](../adr/0015-session-store-on-redis.md))。「落ちたら消える」を体験したいときは `docker compose exec redis redis-cli FLUSHALL`
+  - `redis-test` には volume を付けない(テストのデータは残さない)
 - 環境変数は**リポジトリ直下の `.env` で一元管理**する(`.env` は gitignore、テンプレートの `.env.example` をコミット)。1枚のファイルを二役で使う:
   - **backend**: `env_file: .env` で全変数を丸ごと注入。**変数が増えても `.env` に追記するだけ**で compose の変更は不要
   - **mysql / minio / minio-init**: 公式イメージが決めた変数名(`MYSQL_USER` など)しか受け取れないため、compose 内の `${...}` 展開で必要な値だけマッピング(compose はリポジトリ直下の `.env` を自動で読む)
@@ -64,6 +76,26 @@ Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docke
 | 入口 | Nuxt dev サーバー (:3000) | ALB → Spring Boot |
 | フロント配信 | Nuxt dev サーバー(HMR) | Spring Boot の static/(SSG 済み) |
 | /api の到達方法 | Nuxt dev プロキシ経由 | 同一オリジンなのでそのまま Spring Boot へ |
+
+## Redis / RedisInsight の使い方
+
+ログインするとセッションが Redis に書かれる。中身は GUI でも CLI でも見られる。
+
+```bash
+docker compose exec redis redis-cli --scan     # 全キー(KEYS * は使わない)
+docker compose exec redis redis-cli FLUSHALL   # 全消し = 全員ログアウト
+```
+
+GUI は `http://localhost:5540`。**初回だけ接続先の登録が要る**(GUI は別コンテナなので、
+どの Redis を見ればよいかを知らない状態で起動する)。
+
+| 項目 | 値 |
+| --- | --- |
+| Host | `redis`(compose のサービス名。`localhost` ではない) |
+| Port | `6379` |
+| Username / Password | 空のまま(ローカルは認証なし) |
+
+キーの構造と読み方 → [docs/notes/redis/session-management.md](../notes/redis/session-management.md)
 
 ## MinIO / Mailpit の使い方
 
