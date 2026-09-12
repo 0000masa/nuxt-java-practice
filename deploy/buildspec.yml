@@ -176,6 +176,8 @@ phases:
             -e "s|__MAIL_FROM__|no-reply@${SES_IDENTITY}|g" \
             -e "s|__S3_BUCKET__|$(out ImageBucketName)|g" \
             -e "s|__IMAGE_CDN_DOMAIN__|$(out ImageCdnDomain)|g" \
+            -e "s|__REDIS_HOST__|$(out RedisEndpoint)|g" \
+            -e "s|__REDIS_PORT__|$(out RedisPort)|g" \
             -e "s|__SSM_ARN_PREFIX__|arn:aws:ssm:${AWS_DEFAULT_REGION}:${ACCOUNT_ID}:parameter${SSM_PATH}|g" \
             -e "s|__LOG_GROUP__|/ecs/${PROJECT_NAME}-${ENV_NAME}|g" \
             -e "s|__AWS_REGION__|${AWS_DEFAULT_REGION}|g" \

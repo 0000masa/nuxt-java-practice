@@ -18,11 +18,15 @@
         { "name": "DB_USER", "value": "__DB_APP_USER__" },
         { "name": "FLYWAY_ENABLED", "value": "true" },
         { "name": "FLYWAY_DB_USER", "value": "__DB_MIGRATE_USER__" },
-        { "name": "SERVER_PORT", "value": "8080" }
+        { "name": "SERVER_PORT", "value": "8080" },
+        { "name": "REDIS_HOST", "value": "__REDIS_HOST__" },
+        { "name": "REDIS_PORT", "value": "__REDIS_PORT__" },
+        { "name": "REDIS_SSL", "value": "true" }
       ],
       "secrets": [
         { "name": "DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__app_db_password" },
-        { "name": "FLYWAY_DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__migrate_db_password" }
+        { "name": "FLYWAY_DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__migrate_db_password" },
+        { "name": "REDIS_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__redis_auth_token" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

@@ -27,12 +27,16 @@
         { "name": "MAIL_TRANSPORT", "value": "ses" },
         { "name": "MAIL_FROM", "value": "__MAIL_FROM__" },
         { "name": "S3_BUCKET", "value": "__S3_BUCKET__" },
-        { "name": "IMAGE_CDN_DOMAIN", "value": "__IMAGE_CDN_DOMAIN__" }
+        { "name": "IMAGE_CDN_DOMAIN", "value": "__IMAGE_CDN_DOMAIN__" },
+        { "name": "REDIS_HOST", "value": "__REDIS_HOST__" },
+        { "name": "REDIS_PORT", "value": "__REDIS_PORT__" },
+        { "name": "REDIS_SSL", "value": "true" }
       ],
       "secrets": [
         { "name": "DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__app_db_password" },
         { "name": "GOOGLE_CLIENT_ID", "valueFrom": "__SSM_ARN_PREFIX__google_client_id" },
-        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "__SSM_ARN_PREFIX__google_client_secret" }
+        { "name": "GOOGLE_CLIENT_SECRET", "valueFrom": "__SSM_ARN_PREFIX__google_client_secret" },
+        { "name": "REDIS_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__redis_auth_token" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
