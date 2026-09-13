@@ -1,7 +1,7 @@
 # フェーズ18: セッションストアを Redis(ElastiCache)に移す
 
 日付: 2026-09-12
-ステータス: 実装済み(ローカルは実機確認済み / AWS 未検証)
+ステータス: 完了(ローカル 2026-09-12 / AWS 2026-09-13 に実機確認)
 
 方針 → [ADR-0015](../../adr/0015-session-store-on-redis.md)(保存先を Redis に移す)。
 [ADR-0002](../../adr/0002-session-cookie-over-jwt.md)(セッション Cookie 方式)は **supersede しない**。
@@ -352,17 +352,19 @@ Redis / ElastiCache / セッションストアは一般的な技術用語なの�
 
 ## 6. 実測で覆りうる項目
 
-**AWS 側はスタックを建てていないので、以下はすべて未検証。**
+**2026-09-13 に `cfn-deploy` で stg を建てて動作を確認した。** 構築が通ったことで閉じた項目には打ち消し線を引き、
+残りは確認の記録が無いまま残っている。
 
 - ~~**3-9** — `notify-keyspace-events` が ElastiCache のパラメータグループで変更可能かどうか~~
   → **変更できた**(2026-09-13)。ただし ElastiCache は `CONFIG` を拒否するので、
   `configure-action: none` が別途必要だった(→ 3-9)
-- **`{{resolve:ssm-secure}}` が `AuthToken` で解決されるか。**
-  対応プロパティの一覧に入っているという理解で書いたが、初回構築で確かめる。
-  解決されなければ `NoEcho: true` のパラメータ経由(`BasicAuthCredential` と同じ形)に落とす
+- ~~**`{{resolve:ssm-secure}}` が `AuthToken` で解決されるか。**~~
+  → **解決された**(2026-09-13)。解決できなければスタック作成の時点で失敗するので、構築の成功がそのまま証拠
 - **アラームの次元。** `CacheClusterId` が `<ReplicationGroupId>-001` になるという命名規則前提で書いている
-- `TransitEncryptionEnabled: true` にしたときの Lettuce 側の設定(`spring.data.redis.ssl.enabled` だけで足りるか、
-  証明書の検証設定が要るか)
+- ~~`TransitEncryptionEnabled: true` にしたときの Lettuce 側の設定(`spring.data.redis.ssl.enabled` だけで足りるか、
+  証明書の検証設定が要るか)~~
+  → **`ssl.enabled: true` だけで足りた**(2026-09-13)。`indexed` は起動時に接続するので、
+  db-migrate タスクとサービスが起動したことが TLS + AUTH で繋がった証拠になる
 - `AuthToken` を後から変更する場合の挙動(`AuthTokenUpdateStrategy` が要るか)
 - `cache.t4g.micro` で `DatabaseMemoryUsagePercentage` のしきい値を何 % に置くのが妥当か
   (`reserved-memory-percent` の既定 25% を踏まえる必要がある)

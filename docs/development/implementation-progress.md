@@ -21,12 +21,12 @@
 | 10 | index 実験 | 検索ラボで実験用 index(複合・FULLTEXT)の before/after を検証し、結果を `docs/notes/` に記録 | 未着手 |
 | 11 | 本番イメージ | `nuxt generate` の出力を Spring Boot の `static/` に同梱するマルチステージ Dockerfile、SPA フォールバック、**ECR へ push する GitHub Actions(OIDC AssumeRole)**。IAM は手動作成(循環依存のため)。**手順 → [github-actions-oidc.md](../infrastructure/github-actions-oidc.md)** | 完了 |
 | 12 | AWS 運用 | `db-task.yml`(ECS Run Task で create-db-users/migrate/任意SQL)、SES/S3 の本番設定。**フェーズ13 に取り込んで実施済み**(DB ユーザー分離により必須化したため)。残っているのは seed の実行(フェーズ9 待ち) | 完了 |
-| 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 作業中 |
-| 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 作業中 |
-| 15 | 通知先の Slack 化 | アラートの宛先をメールから Slack へ。Amazon Q Developer in chat applications(旧 AWS Chatbot)で SNS トピック 2 本を 2 チャンネルに転送。**設計 → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)**、方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) | 作業中 |
-| 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 作業中 |
-| 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 作業中 |
-| 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 作業中 |
+| 13 | インフラコード | CloudFormation テンプレート(素の YAML)+ パラメータファイル + ワークフロー 3 本 + アプリ側の対応。**設計 → [2026-08-19-phase13-cloudformation-design.md](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)**、手順書 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) | 完了 |
+| 14 | 監視・検知層 | CloudWatch アラーム(RDS メトリクス 4 / RDS ログ 2 / ECS タスク数不足 1)+ RDS イベント購読 + SNS 2 トピック + ログの S3 アーカイブ(Firehose)。**設計 → [2026-08-28-phase14-monitoring-design.md](../superpowers/specs/2026-08-28-phase14-monitoring-design.md)**、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) | 完了 |
+| 15 | 通知先の Slack 化 | アラートの宛先をメールから Slack へ。Amazon Q Developer in chat applications(旧 AWS Chatbot)で SNS トピック 2 本を 2 チャンネルに転送。**設計 → [2026-08-28-phase15-slack-notification-design.md](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)**、方針 → [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) | 完了 |
+| 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 完了 |
+| 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 完了 |
+| 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 完了 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -38,6 +38,24 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ13〜18 を完了にした**(2026-09-13):
+  - **確認できたこと**: `cfn-deploy.yml` の 5 段階(deploy-zero → create-db-users → migrate → deploy-service → summary)が
+    ElastiCache 入りのテンプレートで最後まで通り、アプリが正しく動いた / **CodePipeline も正しく動いた**
+  - **これで閉じたフェーズ18 の未検証事項**(構築が通ったこと自体が証拠になるもの):
+    - `{{resolve:ssm-secure}}` が `AuthToken` で解決された。解決できなければスタック作成の時点で失敗するため
+    - TLS + AUTH で ElastiCache に繋がった。`indexed` は起動時に購読のため接続するので、
+      db-migrate タスクとサービスが起動した = `spring.data.redis.ssl.enabled: true` と `password` だけで足りた
+    - `configure-action: none` を足した後の再デプロイ(同日の初回で `CONFIG` を拒否されて落ちた件の修正確認)
+  - **「完了」の範囲**: 各設計書の「実測で覆りうる項目」を 1 件ずつ潰したわけではない。
+    **確認の記録が無いまま残っているもの**も書き残す:
+    - 2026-08-29 のメモから引き継ぎ: SES のメール送信 / `FARGATE_SPOT` の中断 /
+      Blue/Green の重み入れ替えがリスナールール側だけで成立するか / Basic 認証を通した状態での Google ログイン /
+      SES の DKIM トークンが作り直しで変わるか
+    - フェーズ16・17 の設計書 §6 に挙げた実測項目
+    - フェーズ18: Redis アラームの次元(`CacheClusterId=<ReplicationGroupId>-001`)で実際にデータが取れているか /
+      `Evictions` が 0 のままか / `AuthToken` を変えるときの `AuthTokenUpdateStrategy`(テンプレートに未記載)
+  - 設計書のステータス行(フェーズ13・16・17・18)を「完了」に更新した
 
 - **フェーズ18 に着手した(ローカルは実機確認済み・AWS 未検証)**(2026-09-12):
   - **決めたこと 17 項目は[設計書](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)に、なぜ Redis にしたかは [ADR-0015](../adr/0015-session-store-on-redis.md) に。**

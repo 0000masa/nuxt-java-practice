@@ -1,7 +1,7 @@
 # フェーズ16: CodePipeline / CodeBuild / CodeDeploy によるデプロイ
 
 日付: 2026-09-05
-ステータス: 実装済み(実機未検証)
+ステータス: 完了(実機確認 2026-09-13)
 
 方針 → [ADR-0012](../../adr/0012-deploy-method-per-branch.md)(ブランチ分割)、
 [ADR-0013](../../adr/0013-app-deploy-with-code-services.md)(Code 系への移行)

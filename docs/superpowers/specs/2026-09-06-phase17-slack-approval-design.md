@@ -1,7 +1,7 @@
 # フェーズ17: デプロイ承認を自作 Slack App + Lambda に移す
 
 日付: 2026-09-06
-ステータス: 実装済み(実機未検証)
+ステータス: 完了(実機確認 2026-09-13)
 
 方針 → [ADR-0014](../../adr/0014-slack-approval-with-lambda.md)(自作 Slack App + Lambda への移行)。
 [ADR-0011](../../adr/0011-slack-notification-with-chatbot.md)(アラートは Chatbot)と
