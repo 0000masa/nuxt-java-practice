@@ -60,7 +60,12 @@
     設定できるかは実機で確かめる必要がある(設計書 §3-9 / §6)
   - **残っている手作業**: Slack に `#njp-alerts-redis` を作って ID を `params/*.json` の
     `SlackChannelIdRedis`(いまは `__REDIS_CHANNEL__`)に書き写す / SSM に
-    `redis_auth_token`(SecureString)を作る。どちらもやるまで構築は通らない
+    `redis_auth_token`(SecureString)を作る。どちらもやるまで構築は通らない。
+    手順 → [cloudformation-operations.md](../infrastructure/cloudformation-operations.md) §4
+  - **手順書側の穴を 1 つ塞いだ**(2026-09-12 追記): §4 が「SecureString を 6 つ」のままで
+    `redis_auth_token` が無かった。あわせて **§4-1 が勧めていた `openssl rand -base64 24` は
+    ElastiCache の AUTH トークンには使えない**ことが分かった(`+` と `/` が禁止文字で、
+    1000 回試して 678 回が該当)。**英数字 32 文字**で作ること。§4-2 に切り出した
 
 - **フェーズ17 を実装した(一部実機検証済み)**(2026-09-06 / 実機確認 2026-09-07):
   - **やったこと**: デプロイ承認を **Chatbot から自作 Slack App + Lambda に移した**(→ [ADR-0014](../adr/0014-slack-approval-with-lambda.md))
