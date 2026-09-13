@@ -25,8 +25,14 @@ public class AppUserDetailsService implements UserDetailsService {
 		this.userRepository = userRepository;
 	}
 
+	// 【readOnly = true を付けない。付け忘れではない】
+	// readOnly のトランザクションは Aurora の Reader に接続する(→ config/DataSourceConfig)。
+	// Reader は Writer より少し遅れて追いつくので、メール確認やパスワードリセットの直後にログインすると、
+	// 確認済みフラグや新しいパスワードがまだ見えず「未確認」「パスワード違い」で弾かれうる。
+	// ここはログイン 1 回につき 1 行引くだけで Writer の負荷にならないので、遅れの無い Writer で読む
+	// → docs/adr/0016-aurora-provisioned-with-read-write-split.md
 	@Override
-	@Transactional(readOnly = true)
+	@Transactional
 	public UserDetails loadUserByUsername(String email) throws UsernameNotFoundException {
 		User user = userRepository.findByEmail(email)
 				.orElseThrow(() -> new UsernameNotFoundException("メールアドレスが未登録: " + email));

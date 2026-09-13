@@ -46,8 +46,14 @@ public class AuthService {
 	 *
 	 * <p>principal に表示名を持たせず毎回 DB から読むのは、プロフィール編集(フェーズ7)後に
 	 * セッション内の値が古くならないようにするため。
+	 *
+	 * <p><b>readOnly = true を付けない(付け忘れではない)。</b>readOnly のトランザクションは Aurora の Reader に
+	 * 接続するが、Reader は Writer より少し遅れて追いつく。初めての Google ログインは
+	 * 「ユーザーを INSERT → リダイレクト → この API」がほぼ連続して起きるので、Reader だとユーザーが見えず
+	 * 未ログイン扱いになりうる。呼ばれるのはページを開いたときとログイン直後だけで、1 行引くだけなので
+	 * 遅れの無い Writer で読む(→ docs/adr/0016-aurora-provisioned-with-read-write-split.md)。
 	 */
-	@Transactional(readOnly = true)
+	@Transactional
 	public MeResponse getCurrentUser(Long userId) {
 		if (userId == null) {
 			return MeResponse.anonymous();
