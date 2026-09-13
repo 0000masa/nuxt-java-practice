@@ -50,10 +50,19 @@ spring:
         # indexed にすると RedisIndexedSessionRepository になり、principal 名の索引が作られる
         # (→ docs/adr/0015、docs/notes/redis/session-management.md)。
         repository-type: indexed
-      # 期限切れセッションの掃除は Redis の TTL とキースペース通知に任せる。
-      # ただし TTL はキー単位なので、principal 索引(SET)に残ったセッション ID は
-      # 通知を受けて SREM する必要がある。そのため Redis 側に
-      # notify-keyspace-events Egx の設定が要る(docker-compose.yml / ElastiCache のパラメータグループ)
+        # 期限切れセッションの掃除は Redis の TTL とキースペース通知に任せる。
+        # ただし TTL はキー単位なので、principal 索引(SET)に残ったセッション ID は
+        # 通知を受けて SREM する必要がある。そのため Redis 側に
+        # notify-keyspace-events Egx の設定が要る(docker-compose.yml / ElastiCache のパラメータグループ)。
+        #
+        # 既定の notify-keyspace-events は、起動時にアプリが CONFIG GET / CONFIG SET で
+        # その設定を自分で入れにいく。ElastiCache は CONFIG コマンドを受け付けないので、
+        # 既定のままだと起動に失敗する(AWS で踏んだ。ローカルの素の Redis では通るので気づけない)。
+        #   ERR unknown command 'CONFIG', with args beginning with: 'GET' 'notify-keyspace-events'
+        # 設定は Redis 側に持たせてあるので、アプリからは触らない。
+        # 代わりに Redis 側の設定が外れても起動は成功し、索引の掃除だけが黙って止まる点に注意
+        # (→ docs/notes/redis/session-management.md §12)。
+        configure-action: none
   security:
     oauth2:
       client:

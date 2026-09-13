@@ -121,12 +121,26 @@ TTL 付きキーを古い順に捨てる設定。**Spring Session のキーは�
 
 → 既定のままだと、メモリ逼迫時にセッションが静かに消える。**`noeviction` を明示する。**
 
-### 3-9. `notify-keyspace-events` は ElastiCache のパラメータグループで変更できる(要検証)
+### 3-9. `notify-keyspace-events` は ElastiCache のパラメータグループで変更できる(検証済み)
 
 過去に ElastiCache 側で制限されていた時期があったパラメータのため、
 **実装時に AWS の「Redis のパラメータ」一覧に当てて裏を取る。**
 もし変更不可だった場合、3-5 の判断(Serverless を却下する根拠のひとつ)が揺らぐ。
 ただし料金の根拠は残るので、**ノード指定型という結論自体は変わらない。**
+
+**検証結果(2026-09-13、初回の `cfn-deploy`):** パラメータグループに `notify-keyspace-events: Egx` を
+入れたまま ElastiCache の作成は通った。**変更できる。** ただし想定していなかった問題を 1 つ踏んだ。
+
+- **ElastiCache は `CONFIG` コマンドを受け付けない。** Spring Session の `indexed` は既定
+  (`configure-action: notify-keyspace-events`)で、起動時に `CONFIG GET` / `CONFIG SET` を使って
+  `notify-keyspace-events` を**アプリ自身が入れにいく**。そのため db-migrate タスクの起動で落ちた
+  ```
+  ERR unknown command 'CONFIG', with args beginning with: 'GET' 'notify-keyspace-events'
+  ```
+- ローカルの `redis` / `redis-test` は素の Redis で `CONFIG` が通るため、**ローカルとテストでは再現しない**
+- 対策として `spring.session.data.redis.configure-action: none` を**全環境**に設定した。
+  どの環境でも Redis 側で設定済み(ElastiCache はパラメータグループ、ローカルは `command`)なので、
+  アプリからは触らない。**代償として、Redis 側の設定が外れても起動は成功し、索引の掃除だけが黙って止まる**
 
 ## 4. 決定
 
@@ -340,7 +354,9 @@ Redis / ElastiCache / セッションストアは一般的な技術用語なの�
 
 **AWS 側はスタックを建てていないので、以下はすべて未検証。**
 
-- **3-9** — `notify-keyspace-events` が ElastiCache のパラメータグループで変更可能かどうか
+- ~~**3-9** — `notify-keyspace-events` が ElastiCache のパラメータグループで変更可能かどうか~~
+  → **変更できた**(2026-09-13)。ただし ElastiCache は `CONFIG` を拒否するので、
+  `configure-action: none` が別途必要だった(→ 3-9)
 - **`{{resolve:ssm-secure}}` が `AuthToken` で解決されるか。**
   対応プロパティの一覧に入っているという理解で書いたが、初回構築で確かめる。
   解決されなければ `NoEcho: true` のパラメータ経由(`BasicAuthCredential` と同じ形)に落とす

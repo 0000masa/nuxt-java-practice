@@ -89,7 +89,10 @@ Spring Boot 3.0 以降、Spring Session Redis の既定実装は `RedisSessionRe
 - **`notify-keyspace-events: Egx` が必須になる。** Redis の TTL はキー単位で、
   SET の要素ごとには張れない。セッション本体が期限切れで消えても、
   principal 索引の SET に入ったセッション ID は残る。これを `SREM` するのが期限切れ通知の役目。
-  無効でも機能は壊れないが、**タイムアウトしたセッションの ID が索引に溜まり続ける**
+  無効でも機能は壊れないが、**タイムアウトしたセッションの ID が索引に溜まり続ける**。
+  **設定は Redis 側に持たせ、アプリからは入れない**(`spring.session.data.redis.configure-action: none`)。
+  ElastiCache は `CONFIG` コマンドを受け付けず、Spring Session の既定(起動時に `CONFIG SET`)では
+  起動に失敗するため(2026-09-13 に AWS で確認)
 - **`maxmemory-policy` は `noeviction` を明示する。** ElastiCache の既定 `volatile-lru` は
   TTL 付きキーを古い順に捨てる設定で、Spring Session のキーは全部 TTL 付きである。
   既定のままだと、メモリ逼迫時に**セッションが静かに消えてユーザーが身に覚えのないログアウトをする**。

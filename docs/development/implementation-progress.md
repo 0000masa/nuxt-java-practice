@@ -58,6 +58,14 @@
   - **AWS 側は未検証。** `cfn-deploy` を回していないので、`{{resolve:ssm-secure}}` が
     `AuthToken` で解決されるか、`notify-keyspace-events` が ElastiCache のパラメータグループで
     設定できるかは実機で確かめる必要がある(設計書 §3-9 / §6)
+  - **初回の `cfn-deploy` で db-migrate タスクが起動に失敗した**(2026-09-13 追記):
+    `ERR unknown command 'CONFIG', with args beginning with: 'GET' 'notify-keyspace-events'`。
+    **ElastiCache は `CONFIG` コマンドを受け付けない**のに、Spring Session の既定
+    (`configure-action: notify-keyspace-events`)は起動時に `CONFIG GET` / `SET` で設定を入れにいくため。
+    ローカルの素の Redis では通るので、テストが全部通っていても気づけなかった。
+    `application.yml` に `spring.session.data.redis.configure-action: none` を足した(設定は Redis 側に持たせてある)。
+    ElastiCache の作成自体は通ったので、**§3-9(パラメータグループで設定できるか)は検証済み**になった。
+    修正後の再デプロイはまだ
   - **残っている手作業**: Slack に `#njp-alerts-redis` を作って ID を `params/*.json` の
     `SlackChannelIdRedis`(いまは `__REDIS_CHANNEL__`)に書き写す / SSM に
     `redis_auth_token`(SecureString)を作る。どちらもやるまで構築は通らない。

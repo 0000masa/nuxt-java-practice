@@ -125,6 +125,13 @@ RedisParameterGroup:
 (→ [session-management.md](session-management.md) §7)。
 **Serverless を却下した直接の理由**でもある。
 
+**この値はパラメータグループでしか変えられない。** ElastiCache は `CONFIG` コマンドを受け付けないので
+([制限されているコマンドの一覧](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html#RestrictedCommandsRedis)。
+`bgsave` / `debug` / `shutdown` なども同じ扱い)、
+`redis-cli` から `CONFIG SET` することも、**アプリが起動時に入れにいくこともできない**。
+Spring Session の既定はまさにそれをやるため、`configure-action: none` にしないと起動に失敗する
+(初回の `cfn-deploy` で db-migrate タスクが落ちた → [session-management.md](session-management.md) §12)。
+
 ### `maxmemory-policy: noeviction`
 
 **ElastiCache の既定は `volatile-lru`** で、これは「TTL 付きのキーを古い順に捨てる」設定。
