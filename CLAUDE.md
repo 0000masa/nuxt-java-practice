@@ -51,11 +51,11 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 
 - フロントエンド: Nuxt 4(**SSG モード** `nuxt generate`)、Node 22 LTS、npm
 - バックエンド: Java 21、Spring Boot 4.x、Gradle
-- DB: MySQL 8(本番は RDS)
+- DB: MySQL 8(本番は Aurora MySQL 8.4 のプロビジョンド。読み取り専用トランザクションは Reader に送る → `docs/adr/0016-aurora-provisioned-with-read-write-split.md`)
 - 画像保存: MinIO(開発)/ S3 + CloudFront(本番)
 - メール送信: Mailpit(開発)/ SES(本番)
 - インフラ: **CloudFormation(素の YAML。CDK は使わない)** + GitHub Actions(OIDC 認証、workflow_dispatch でスタック作成/削除)
-- AWS: 独自ドメイン(Route53 + ACM)、ALB → ECS Fargate → RDS、ECR
+- AWS: 独自ドメイン(Route53 + ACM)、ALB → ECS Fargate → Aurora MySQL、ECR
 
 ## フォルダ構成
 

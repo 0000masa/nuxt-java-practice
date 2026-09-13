@@ -56,8 +56,8 @@ on:
         description: Change Set を作って差分を見るだけで実行しない
         type: boolean
         default: false
-      allow_replacement:
-        description: リソースの作り直しを許可する(Replacement が True と Conditional の両方)。RDS が作り直されると中のデータは消える
+      allow_destructive_changes:
+        description: リソースの作り直し(Replacement が True / Conditional)と削除(Action が Remove)を許可する。DB クラスタが作り直し・削除されると中のデータは消える
         type: boolean
         default: false
 
@@ -75,7 +75,7 @@ on:
       dry_run:
         type: boolean
         default: false
-      allow_replacement:
+      allow_destructive_changes:
         type: boolean
         default: false
       # params の WebDesiredCount を上書きする。空なら params の値をそのまま使う
@@ -278,8 +278,8 @@ jobs:
 
           echo "empty=false" >> "$GITHUB_OUTPUT"
 
-      # 差分をサマリに残し、そのうえで作り直し(Replacement)が含まれていないか判定する。
-      # RDS が作り直されると新しい空のインスタンスになり、中のデータは失われる。
+      # 差分をサマリに残し、そのうえで作り直し(Replacement)と削除(Remove)が含まれていないか判定する。
+      # DB クラスタが作り直されると新しい空のクラスタになり、消されると中のデータごと無くなる。
       - name: 差分を確認する
         if: steps.cs.outputs.empty == 'false'
         env:
@@ -336,6 +336,19 @@ jobs:
           replaced=$(ids True)
           maybe=$(ids Conditional)
 
+          # 【Remove(削除)も全リソースを対象に止める】(→ フェーズ19 設計書の決定14)
+          # リソースの種類は同じ論理 ID のまま変えられないので、種類を変える更新(例: DBInstance → DBCluster)や
+          # 論理 ID の付け替えは「旧リソースの Remove + 新リソースの Add」として出る。Replacement は付かない。
+          # Replacement だけを見ていると、DB が中身ごと消える更新を素通りさせてしまう。
+          #
+          # 「データを持つ種類だけ止める」許可リストにしないのは、書き忘れた種類が素通りするため。
+          # 除外が要らないのは、このリポジトリに日常的に起きる Remove が無いから
+          # (Condition で消えるリソースはどれも環境ごとに固定したパラメータで決まる。
+          #  構築フローの 4 段目の WebDesiredCount 0 → N は Add の向き)。
+          # 日常的な Remove が生まれたら、TaskDefinition と同じく理由を書いて外すこと。
+          removed=$(echo "$detail" | jq -r \
+            '[.Changes[].ResourceChange | select(.Action == "Remove") | .LogicalResourceId] | join(" ")')
+
           # 外したものは黙って消さずにサマリへ残す。「止まらなかった」ことが見えるようにする
           exempt_ids=$(echo "$detail" | jq -r --arg exempt "$EXEMPT_TYPE" \
             '[.Changes[].ResourceChange
@@ -348,30 +361,32 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-          if [ -n "${replaced}${maybe}" ] && [ "${{ inputs.allow_replacement }}" != "true" ]; then
+          if [ -n "${replaced}${maybe}${removed}" ] && [ "${{ inputs.allow_destructive_changes }}" != "true" ]; then
             {
               echo ""
-              echo "### 作り直し(Replacement)の可能性があるため実行しませんでした"
+              echo "### 作り直し(Replacement)または削除(Remove)が含まれるため実行しませんでした"
               echo ""
               [ -n "$replaced" ] && echo "- 作り直しになる(\`True\`): \`$replaced\`"
               [ -n "$maybe" ] && echo "- 作り直しになるかもしれない(\`Conditional\`): \`$maybe\`"
+              [ -n "$removed" ] && echo "- 削除される(\`Remove\`): \`$removed\`"
               echo ""
-              echo "**作り直しはデータを失う操作です。** とくに \`Database\` が含まれている場合、"
-              echo "新しい空の RDS に置き換わります(DeletionPolicy が Snapshot なのでスナップショットは残る)。"
+              echo "**作り直しと削除はデータを失う操作です。** とくに DB クラスタ(\`AWS::RDS::DBCluster\`)が含まれている場合、"
+              echo "作り直しなら新しい空のクラスタに置き換わり、削除なら中のデータごと無くなります。"
+              echo "論理 ID を変えた場合も、旧リソースの削除 + 新リソースの追加として出ます。"
               echo ""
               echo "\`Conditional\` は実行時の値に依存するため、実行してみるまで作り直しになるか分かりません。"
               echo ""
-              echo "意図した変更であれば allow_replacement=true で再実行してください(True と Conditional の両方が開きます)。"
+              echo "意図した変更であれば allow_destructive_changes=true で再実行してください(True / Conditional / Remove のすべてが開きます)。"
               echo ""
               echo "**cfn-deploy.yml から呼ばれている場合、この口はありません。**"
-              echo "allow_replacement は cfn-apply.yml の workflow_dispatch にしか無く、意図的に渡していません"
+              echo "allow_destructive_changes は cfn-apply.yml の workflow_dispatch にしか無く、意図的に渡していません"
               echo "(毎回の解除が手順化してガードが形骸化するため)。次のどちらかで進めてください。"
               echo ""
-              echo "- 環境が建ち切っている(WebDesiredCount >= 1)なら、cfn-apply.yml を直接 allow_replacement=true で実行する"
+              echo "- 環境が建ち切っている(WebDesiredCount >= 1)なら、cfn-apply.yml を直接 allow_destructive_changes=true で実行する"
               echo "- 建てている途中(WebDesiredCount=0)なら、cfn-destroy.yml で撤収してから建て直す(作り捨て前提の環境なので、これが正しい)"
             } >> "$GITHUB_STEP_SUMMARY"
             aws cloudformation delete-change-set --stack-name "$stack" --change-set-name "$name"
-            echo "::error::作り直しの可能性があります(True: ${replaced:-なし} / Conditional: ${maybe:-なし})。allow_replacement=false のため停止しました"
+            echo "::error::作り直しまたは削除が含まれます(True: ${replaced:-なし} / Conditional: ${maybe:-なし} / Remove: ${removed:-なし})。allow_destructive_changes=false のため停止しました"
             exit 1
           fi
 

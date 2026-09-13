@@ -842,7 +842,7 @@ Resources:
       # だが Resource は createOnly(Update requires: Replacement)で、Pipeline は
       # Stages や Triggers を直すたびに更新対象に入る。更新対象への GetAtt は
       # Change Set で解決されない(Evaluation: Dynamic)ため、このルールに
-      # Replacement: Conditional が付き、そのたびに allow_replacement=true が要る。
+      # Replacement: Conditional が付き、そのたびに allow_destructive_changes=true が要る。
       # パイプライン名は固定文字列なので、同じものを直接書いて静的に確定させる。
       # → app.yml の ScalableTarget / CodeDeployDeploymentGroup と同じ理由。
       # 下の Targets が !Ref のままなのは、あちらが更新可能なプロパティだから。
