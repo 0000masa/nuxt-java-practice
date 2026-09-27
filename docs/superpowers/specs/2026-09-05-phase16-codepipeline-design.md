@@ -42,7 +42,7 @@ ECS の `UpdateService` API は、CODE_DEPLOY 制御のサービスに対して
 出典: [UpdateService](https://docs.aws.amazon.com/AmazonECS/latest/APIReference/API_UpdateService.html) /
 [aws-cdk#23564](https://github.com/aws/aws-cdk/issues/23564) / [aws-cdk#36012](https://github.com/aws/aws-cdk/issues/36012)
 
-### 3-2. CodeDeploy はリスナーの既定アクションしか切り替えられない
+### 3-2. CodeDeploy はリスナーの既定アクションしか切り替えられない(→ 末尾の訂正を参照。誤り)
 
 `TrafficRoute.ListenerArns` の定義は「**The Amazon Resource Name (ARN) of one listener.**」で、
 **リスナールール ARN は取れない。** AWS 自身が両者の差を明記している。
@@ -52,10 +52,17 @@ ECS の `UpdateService` API は、CODE_DEPLOY 制御のサービスに対して
 > single listener with advanced request routing based on host name, HTTP headers, path, method, query string or source IP.
 
 → 現行の「既定は 403 fixed-response / ホスト名一致のルール(priority 100)だけが blue/green へ forward」構成は成立しない。
-残したまま繋ぐと**デプロイは成功するのにトラフィックが一切切り替わらない**(ルールが既定より先に評価されるため)。
+残したまま繋ぐと**デプロイは成功するのにトラフィックが一切切り替わらない**(ルールが既定より先に評価されるため)。 → 訂正を参照
 
 出典: [TrafficRoute](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-properties-codedeploy-deploymentgroup-trafficroute.html) /
 [移行ブログ](https://aws.amazon.com/blogs/containers/migrating-from-aws-codedeploy-to-amazon-ecs-for-blue-green-deployments)
+
+> **訂正(2026-09-28)**: この節は**誤り。** 「確定した事実」ではなかった。`ListenerArns` がリスナー ARN しか取らないのは正しいが、
+> それは「どのリスナーを見るか」の指定にすぎない。CodeDeploy はそのリスナーの中で、ターゲットグループを forward 先にしている場所を書き換える。
+> 既定アクションなら `ModifyListener`、リスナールールなら `ModifyRule` を呼ぶ(別の環境の CloudTrail で確認。このリポジトリでは未確認)。
+> 引用した移行ブログの一文も、リスナーを本番用・テスト用・サービスごとに分ける必要があるかという粒度の話だった。
+> 公式ユーザーガイドは、書き換える場所について何も書いていない。手順に載っている構成が既定アクションだけ、というだけである。
+> **構成は変えない。** 理由は [ADR-0013](../../adr/0013-app-deploy-with-code-services.md) §3 の訂正にまとめた
 
 ### 3-3. `CodeDeployToECS` アクションは `taskdef.json` を必須で要求する
 
@@ -285,6 +292,10 @@ CloudWatch アラーム連動(`DEPLOYMENT_STOP_ON_ALARM`)は**意図的に見送
 
 `app.yml` の ALB のところに**この判断の理由をコメントとして書き残す。**
 
+> **訂正(2026-09-28)**: この決定の出発点だった 3-2 は誤りだった。403 + ホスト名ルールの構成でも、CodeDeploy はルール側を切り替えられる。
+> それでも決定は変えない。①公式ユーザーガイドが示している構成(既定アクションで forward)に揃え、書かれていない挙動に頼らない。
+> ②上の「ホスト名防御は失っても実害が無い」は、3-2 の誤りと関係なく成り立つ
+
 ### 決定16 キャッシュは `LOCAL_DOCKER_LAYER_CACHE`
 
 ```yaml
@@ -456,3 +467,5 @@ CDK の `EcsDeploymentGroup` もこのリソースをそのまま合成する。
 9. **`docker build`(buildx なし)で `LOCAL_DOCKER_LAYER_CACHE` が実際に効くか**
 10. **`exported-variables`(`IMAGE_TAG` など)が CodeBuild のフェーズ跨ぎで期待どおり拾われるか。**
    フェーズごとにシェルが分かれるため、`/tmp/build.env` を経由して各フェーズで export し直している
+11. **(2026-09-28 追加)CodeDeploy がリスナールール側の forward を書き換えるか。** 3-2 の訂正の裏付けを、このリポジトリの環境で取る。
+   構成は変えないので、確かめるなら一時的にルールを足して試すことになる。そのときは CloudTrail に `ModifyRule` が残るかを見る

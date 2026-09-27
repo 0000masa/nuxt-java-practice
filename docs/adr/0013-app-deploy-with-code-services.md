@@ -9,6 +9,9 @@
 **デプロイ承認の実現手段は [ADR-0014](./0014-slack-approval-with-lambda.md) で変更した**(下記「結果として生じること」6 の
 「Slack 承認は Chatbot で行う」「Lambda は増えない」は覆っている。Code 系に移すという決定そのものは有効)
 
+**「結果として生じること」3 の前提「CodeDeploy はリスナーの既定アクションしか切り替えられない」は誤りだった**(2026-09-28 訂正。
+ALB の構成は変えない。理由は 3 の末尾の訂正を参照)
+
 ## 決定
 
 `main` ブランチで、**アプリのイメージ更新を CodePipeline + CodeBuild + CodeDeploy で行う。**
@@ -98,7 +101,7 @@ ADR-0007 の理由 2(スタック出力への依存)が想定していたほど�
 
 **CodeDeploy はリスナーの既定アクションしか切り替えられない**(リスナールール ARN は取れない)。
 現行の「既定は 403 / ホスト名一致のルールだけが forward」構成は、残したまま繋ぐと
-**デプロイは成功するのにトラフィックが切り替わらない**という壊れ方をする。
+**デプロイは成功するのにトラフィックが切り替わらない**という壊れ方をする。(→ 下の訂正を参照。この 2 文は誤り)
 
 そこで既定アクションを `forward → TargetGroupBlue` に変え、`ProductionListenerRule` を削除する。
 失われる防御は**再現しない**。ALB のルール条件に否定形が無く、`*.elb.amazonaws.com` を弾く肯定形は書けても
@@ -107,6 +110,26 @@ IP 直アクセスを拾えないため。完全にやるなら WAF の `NotStat
 手段もオリジンカスタムヘッダー検証やマネージドプレフィックスリスト)。**このリポジトリに前段の CloudFront は無い。**
 
 判断の理由は `app.yml` の ALB のところにコメントとして残す。
+
+> **訂正(2026-09-28)**: 冒頭の「既定アクションしか切り替えられない」「ルールを残すとトラフィックが切り替わらない」は**誤り。**
+> CodeDeploy は、デプロイグループに渡したターゲットグループを forward 先にしているところを本番リスナーの中から探して書き換える。
+> 既定アクションにあれば `ModifyListener`、リスナールールにあれば `ModifyRule` を呼ぶ。
+> 既定を 403 にしてルールで forward する構成でも、CloudTrail に CodeDeploy の `ModifyRule` が残り、ルール側が切り替わるのを別の環境で確認している。
+> Terraform で CodeDeploy の Blue/Green を組むときに `aws_lb_listener_rule` へ `ignore_changes = [action]` を付けるのも同じ理由
+> ([terraform-provider-aws#24811](https://github.com/hashicorp/terraform-provider-aws/issues/24811))。**このリポジトリの環境ではまだ確かめていない。**
+>
+> **誤読の中身。** `TrafficRoute.ListenerArns` がリスナー ARN しか受け取らないのは正しい。しかしそれは「どのリスナーを見るか」の指定で、
+> 「リスナーの中のどこを書き換えるか」の制約ではない。移行ブログの「CodeDeploy requires separate listeners ... ECS blue/green operates
+> at the listener rule level」も、**本番用・テスト用・サービスごとにリスナーを分ける必要があるか**という粒度の話だった。
+> 公式ユーザーガイドは切り替えを「production listener から target group 2 へ」とリスナー単位でしか書いておらず、書き換える場所には触れていない。
+> 手順として載っている構成は既定アクション(`--default-actions Type=forward`)だけである
+> ([Before you begin](https://docs.aws.amazon.com/codedeploy/latest/userguide/deployment-steps-ecs.html) /
+> [ロードバランサーの準備](https://docs.aws.amazon.com/codedeploy/latest/userguide/deployment-groups-create-load-balancer-for-ecs.html))。
+> **「書かれていない」を「できない」と読んだのが誤りだった。**
+>
+> **構成は変えない(既定アクション forward のまま)。** 理由は 2 つ。
+> 1. 公式ユーザーガイドが示している構成は既定アクションで forward するものだけ。ルールを書き換える動きは公式には書かれておらず、それに頼らない
+> 2. 「ホスト名以外は 403」を失っても実害が無い、という上の議論は前提の誤りと関係なく成り立つ。403 構成に戻す動機がもともと弱い
 
 ### 4. 常駐の手動リソースが 1 つ増える
 

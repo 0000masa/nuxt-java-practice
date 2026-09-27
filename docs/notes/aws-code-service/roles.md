@@ -155,7 +155,7 @@ ManagedPolicyArns:
   - arn:aws:iam::aws:policy/AWSCodeDeployRoleForECS
 ```
 
-タスクセットの作成、ALB リスナーの既定アクションの書き換え、blue の終了を、このロールでやる。
+タスクセットの作成、ALB リスナーの向き先の書き換え(このリポジトリでは既定アクション。ルールに置いていればルール)、blue の終了を、このロールでやる。
 
 **ネイティブ Blue/Green から替わった点。** 以前は ECS 自身がリスナールールの重みを
 書き換えていたので、`AmazonECSInfrastructureRolePolicyForLoadBalancers` を

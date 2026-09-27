@@ -254,13 +254,13 @@
     **設計** → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)(決定 20 件)
   - **`main` = Code 系 / `github-actions-deploy` = 凍結。** `app.yml` に `Fn::If` の分岐を持ち込まずに済ませるため、
     切り替えをパラメータではなくブランチで表現した。CLAUDE.md にブランチの役割を追記済み
-  - **設計を左右した一次情報(すべて確認済み)**:
+  - **設計を左右した一次情報(すべて確認済み。ただし 2 件目は 2026-09-28 に誤りと判明)**:
     - **CODE_DEPLOY 制御のサービスはタスク定義を CloudFormation から更新できない。** `UpdateService` が受け付けるのは
       desired count / deployment configuration / grace period / 配置制約 / タグだけ。
       → `Service.TaskDefinition` を family 名の固定文字列にするしかなく、これは **ADR-0007 が退けた選択肢そのもの**
-    - **CodeDeploy はリスナーの既定アクションしか切り替えられない**(リスナールール ARN は取れない)。
-      AWS 自身が「ECS blue/green operates at the listener rule level」と両者の差を明記している。
-      → 現行の「既定 403 + ホスト名ルール」構成は、残したまま繋ぐと**デプロイは成功するのにトラフィックが切り替わらない**
+    - ~~**CodeDeploy はリスナーの既定アクションしか切り替えられない**(リスナールール ARN は取れない)。~~
+      **2026-09-28 訂正: 誤りだった。「確認済み」ではない。** CodeDeploy はリスナールール側の forward も書き換える(`ModifyRule`)。
+      構成(既定アクション forward)は変えない → [ADR-0013](../adr/0013-app-deploy-with-code-services.md) §3 の訂正
     - **`CodeDeployToECS` の `TaskDefinitionTemplateArtifact` は Required: Yes。** register するのは CodeBuild ではなく Deploy アクション
     - **パイプライン作成時の初回実行は無効化できない。** → 手動承認ステージがそのまま安全弁になり、ブートストラップの門も兼ねる
     - **`Triggers` を書くと既定の変更検知が無効になる。** → フィルタ付き自動起動と手動起動が両立する(`PipelineType: V2`)
