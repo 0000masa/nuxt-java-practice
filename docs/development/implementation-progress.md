@@ -27,6 +27,7 @@
 | 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 完了 |
 | 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 完了 |
 | 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 完了 |
+| 19 | DB を Aurora へ | RDS for MySQL を Aurora MySQL 8.4(プロビジョンド。stg: Writer 1 + Reader 1 / prod: Writer 1 + Reader 2)に置き換え、`@Transactional(readOnly = true)` を Reader に送る読み書き分離を入れる(認証の読み取りだけ Writer に固定)。あわせて Hikari のプールの大きさを明示、アラームを役割単位に組み直し、`cfn-apply.yml` のガードに `Remove` を追加(`allow_replacement` → `allow_destructive_changes`)。**設計 → [2026-09-13-phase19-aurora-design.md](../superpowers/specs/2026-09-13-phase19-aurora-design.md)**、方針 → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -38,6 +39,38 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ19 を実装した(ローカル確認済み・AWS 未検証)**(2026-09-13):
+  - **① ガード**: `cfn-apply.yml` が `Action: Remove` も全リソース対象で止めるようにし、入力を `allow_destructive_changes` に改名。
+    作り物の Change Set で判定を確認した(`Remove` と `Conditional` で止まり、`TaskDefinition` の作り直しは除外)
+  - **② アプリ**: `config/DataSourceConfig` で Writer / Reader の 2 プール + `LazyConnectionDataSourceProxy#setReadOnlyDataSource`。
+    認証の読み取り 2 か所(`loadUserByUsername` / `getCurrentUser`)から `readOnly` を外して Writer に固定。
+    **テスト 49 本すべて成功**(`ReadWriteRoutingTest` 3 本を追加)。開発中の backend も正常に再起動
+  - **③ インフラ**: `app.yml` を DBCluster + DBInstance 2〜3 台に置き換え、アラームを役割単位の 9 本 + ログ 2 本に、イベント購読を 2 本に。
+    buildspec / taskdef 2 つ / params 2 つを更新。**cfn-lint で指摘ゼロ**
+  - **設計から動いた点**(詳細 → [設計書 §5-3](../superpowers/specs/2026-09-13-phase19-aurora-design.md)):
+    - 振り分けは `AbstractRoutingDataSource` ではなく `setReadOnlyDataSource`(ユーザーと相談して決定)。**Reader のプールに `read-only: true` が必須**だった
+    - 読み取り専用の接続での書き込みを止めるのは MySQL サーバではなく **Connector/J**
+    - スロークエリの設定は Aurora では**インスタンス単位のパラメータ**だったので、クラスタパラメータグループには移さなかった
+    - Flyway には `spring.flyway.url` で Writer の URL を明示(アプリの DataSource がプロキシになり URL を持たないため)
+  - **④ 残り(AWS が要る)**: stg を建てて[設計書 §7](../superpowers/specs/2026-09-13-phase19-aurora-design.md) を 1 件ずつ潰す。
+    とくに**パラメータグループのファミリー名 `aurora-mysql8.4` は未確認**(ドキュメントにも cfn-lint にも根拠が無い)。
+    建てる前に `aws rds describe-db-engine-versions --engine aurora-mysql --query "DBEngineVersions[?starts_with(EngineVersion, '8.4')].[EngineVersion,DBParameterGroupFamily]" --output table` で確かめられる
+  - **新しい手動作業は無い**(Reader にも `app` ユーザーで繋ぐので SSM は増えない)
+  - 学習ノート → [docs/notes/aurora/](../notes/aurora/)
+
+- **フェーズ19 を設計した(実装未着手)**(2026-09-13):
+  - **決めたこと 17 項目は[設計書](../superpowers/specs/2026-09-13-phase19-aurora-design.md)に、なぜ Aurora にして Reader を使うかは [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) に。**
+    会社の DB が Aurora MySQL のプロビジョンドなので、その構成を建てて理解するのが目的(性能上の必要ではない)
+  - **設計中に見つけた穴**: `cfn-apply.yml` のガードは `Replacement` しか見ておらず、
+    **論理 ID の変更(`Remove` + `Add`)で DB が中身ごと消える更新を止めない。** DBInstance → DBCluster がまさにこの形。
+    → `Remove` も全リソース対象で止める(除外なし)。解除の入力を `allow_destructive_changes` に改名
+  - **設計中に見つけた上限**: Aurora の `db.t4g.medium` は `max_connections` が 90。
+    Blue/Green 中は旧タスクと新タスクが同時にプールを持つので、Hikari の既定(10 本 × 2 プール)だと prod の Writer が超える。
+    → プールの大きさを Writer / Reader 別に明示(初期値 5)
+  - **実装前に決め直す可能性がある点**: Spring Framework 6.1.2 以降の `LazyConnectionDataSourceProxy#setReadOnlyDataSource` が使えるなら、
+    `AbstractRoutingDataSource` が要らなくなる(設計書 決定4 の要検証)
+  - AWS 環境は建てていないので移行作業は無い。**実装は ガード → アプリ(ローカルで完結)→ インフラ → stg で実測 → ドキュメント の順**
 
 - **フェーズ13〜18 を完了にした**(2026-09-13):
   - **確認できたこと**: `cfn-deploy.yml` の 5 段階(deploy-zero → create-db-users → migrate → deploy-service → summary)が

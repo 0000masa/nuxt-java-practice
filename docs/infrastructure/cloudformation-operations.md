@@ -763,7 +763,7 @@ aws sesv2 get-account --query '{Production:ProductionAccessEnabled,Sending:Sendi
    → 同じイメージなので承認しても何も変わらない。却下しておいてよい
 ```
 
-**なぜ 2 段階なのか。** 必要な順序は `RDS → ユーザー作成 → マイグレーション → サービス起動` だが、CloudFormation には「タスクを流してからサービスを起動する」を表現する手段がない。しかも **ECS サービスは安定するまで最大 3 時間ポーリングされる**ので、起動できない状態で作るとスタックが 3 時間後に失敗する。`DesiredCount=0` なら即座に安定するので、その間に Run Task を回す。
+**なぜ 2 段階なのか。** 必要な順序は `DB(Aurora)作成 → ユーザー作成 → マイグレーション → サービス起動` だが、CloudFormation には「タスクを流してからサービスを起動する」を表現する手段がない。しかも **ECS サービスは安定するまで最大 3 時間ポーリングされる**ので、起動できない状態で作るとスタックが 3 時間後に失敗する。`DesiredCount=0` なら即座に安定するので、その間に Run Task を回す。
 
 **CloudFormation を実際に叩いているのは `cfn-apply.yml`。** このワークフローに aws コマンドは 1 つも無く、`workflow_call` で `cfn-apply.yml` と `db-task.yml` を呼ぶ順序だけを持っている(→ [ADR-0009](../adr/0009-cfn-apply-as-the-single-cloudformation-caller.md))。1 段目と 4 段目に渡している `web_desired_count` / `allow_missing_stack` / `allow_zero_desired_count` は、`cfn-apply.yml` が既存環境を守るために持っている guard を構築フローに対してだけ開ける鍵で、**`workflow_dispatch` には宣言されていない**(だから Actions の UI からは触れない)。
 
@@ -799,7 +799,7 @@ create-db-users の失敗で多いのは **SSM に入れたパスワードに `'
 
 ```
 Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
-  inputs: env=stg / image_tag=(空) / dry_run=false / allow_replacement=false
+  inputs: env=stg / image_tag=(空) / dry_run=false / allow_destructive_changes=false
 
   1. 前提を確かめる       … スタックの存在 / 状態 / DesiredCount≠0
   2. テンプレートを S3 に置く
@@ -844,14 +844,14 @@ Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
 ```
 Actions → 「CloudFormation スタックを削除」を実行(confirm に destroy と入力)
   1. 画像バケットを空にする
-  2. delete-stack + wait(RDS と NAT があるので 10〜15 分)
+  2. delete-stack + wait(DB と NAT があるので 10〜15 分。Aurora に変えてからの所要時間は未実測)
 ```
 
 **このワークフローは stg 専用。** 本番のスタックを消すボタンは作らない。
 
 **残るもの**(手動管理なので消えない): Route53 ホストゾーンとドメイン代 / ECR とイメージ / OIDC プロバイダ / IAM ロール 4 つ / SSM の SecureString 7 つ / **S3 バケット 2 つ**(テンプレート置き場・Lambda 成果物置き場 → §3)/ **CodeStar Connections** / **パイプラインのスタック**(別スタックなので `cfn-destroy` では消えない → §12)/ ACM 証明書は削除される(発行済みで放置しても無料なので影響なし)
 
-撤収し忘れると課金が続くもの: **NAT Gateway(約 $0.062/時)・RDS・ALB・WAF(Web ACL 月 $5 + ルール 月 $1 の時間割り)**。
+撤収し忘れると課金が続くもの: **NAT Gateway(約 $0.062/時)・Aurora(stg 2 台 / prod 3 台)・ALB・WAF(Web ACL 月 $5 + ルール 月 $1 の時間割り)**。
 
 ---
 
@@ -866,7 +866,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 | トピック | チャンネル | 何が飛んでくるか |
 |---|---|---|
 | `nuxt-java-practice-stg-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足 |
-| `nuxt-java-practice-stg-rds-alerts` | `#njp-alerts-rds` | RDS のログ / メトリクス / イベント |
+| `nuxt-java-practice-stg-rds-alerts` | `#njp-alerts-rds` | DB(Aurora)のログ / メトリクス / イベント |
 
 **フェーズ14 まではメール通知で、建てるたびに SNS の購読確認メールを 2 通踏む必要があった。**踏むまで 1 通も届かないのにスタックは緑になり、片方だけ踏み忘れるとその系統だけ無音になる、という運用だった。Slack のチャンネル転送には購読確認の概念が無いので、**この手作業は丸ごと消えた**(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
@@ -908,7 +908,7 @@ Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3
 | スタック | 中身 | ライフサイクル |
 |---|---|---|
 | `nuxt-java-practice-stg-pipeline` | CodePipeline / CodeBuild / アーティファクト S3 / IAM / **承認用の SNS + Lambda 2 つ + Function URL** | 常駐 |
-| `nuxt-java-practice-stg` | CodeDeploy の Application + DeploymentGroup / ECS / ALB / RDS | 作り捨て |
+| `nuxt-java-practice-stg` | CodeDeploy の Application + DeploymentGroup / ECS / ALB / Aurora | 作り捨て |
 
 `Export` / `ImportValue` は使っていない。パイプラインが必要とするのは `ApplicationName` と `DeploymentGroupName` という**文字列だけ**で、命名規則から予測できるため。おかげでアプリのスタックはいつでも撤収できる。
 
@@ -1021,7 +1021,7 @@ Actions → 「パイプラインのスタックを削除」を実行(confirm �
 | Run Task が成功したように見えるがマイグレーションされていない | `describe-tasks` の `exitCode` を見ているか。`run-task` は起動するだけで完了を待たない |
 | Google ログインで `redirect_uri_mismatch` | Google Console の承認済みリダイレクト URI と `APP_BASE_URL` が一致しているか |
 | `Template file size ... must be deployed via an S3 Bucket`(`DeployBucketRequiredError`) | テンプレートが 51,200 バイトを超えている。`deploy` に `--s3-bucket` が渡っているか。バケットを作ったか(→ §3) |
-| 反映が `作り直しが含まれています` で止まった | **意図した変更か確かめる。** `Database` が対象なら実行すると中のデータが消える。意図的なら `cfn-apply.yml` を `allow_replacement=true` で再実行。`cfn-deploy.yml` からは渡せないので、建てている途中(`WebDesiredCount=0`)なら `cfn-destroy.yml` で撤収して建て直す |
+| 反映が `作り直しまたは削除が含まれます` で止まった | **意図した変更か確かめる。** DB クラスタ(`DbCluster`)が対象なら実行すると中のデータが消える。論理 ID を変えただけでも「削除 + 追加」として出る。意図的なら `cfn-apply.yml` を `allow_destructive_changes=true` で再実行。`cfn-deploy.yml` からは渡せないので、建てている途中(`WebDesiredCount=0`)なら `cfn-destroy.yml` で撤収して建て直す |
 | イメージタグを変えただけで `作り直し` で止まる | **もう止まらない。** `AWS::ECS::TaskDefinition` は 19 プロパティ中 17 が `createOnlyProperties` で、イメージを変えれば必ず `Replacement: True` になる。回避不能かつ無害(新しいリビジョンの登録)なので停止の判定から外してある。差分の表には出る(→ [学習メモ §7-2](../notes/cloudformation/cli-commands-and-change-sets.md)) |
 | 反映が `差分がありませんでした` で終わる | 既に反映済み。テンプレートを直したつもりで直っていない(コミットし忘れ)可能性も見る |
 | 反映が `WebDesiredCount が 0 です` で止まった | `cfn-deploy.yml` が create-db-users / migrate で失敗して止まっている。先に `cfn-deploy.yml` を完走させる |

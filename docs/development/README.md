@@ -38,7 +38,7 @@ flowchart LR
 |---|---|---|---|---|
 | nuxt | Node 22(docker/ の Dockerfile) | 3000 | Nuxt dev サーバー(HMR 付き) | Spring Boot の static/ 配信に置き換え |
 | backend | Java 21(docker/ の Dockerfile) | 8080 | REST API | ECS Fargate |
-| mysql | mysql:8 | 3306 | データベース | RDS (MySQL) |
+| mysql | mysql:8 | 3306 | データベース | Aurora MySQL |
 | redis | redis:7 | 6379 | セッションの保存先(→ [ADR-0015](../adr/0015-session-store-on-redis.md)) | ElastiCache (Redis OSS 7.1) |
 | redis-test | redis:7 | - | `gradlew test` 専用の Redis。永続化しない | - |
 | redisinsight | redis/redisinsight | 5540 | Redis の中身をブラウザで見る GUI。**公式の redis イメージに GUI は入っていない**ので別コンテナ | - |
@@ -117,7 +117,8 @@ GUI は `http://localhost:5540`。**初回だけ接続先の登録が要る**(GU
 
 | 変数(例) | 開発 | 本番 |
 |---|---|---|
-| DB 接続先 | `mysql:3306` | RDS エンドポイント |
+| DB 接続先(Writer) | `mysql:3306` | Aurora のクラスタエンドポイント(`DB_HOST`) |
+| DB 接続先(Reader) | 設定しない(Writer と同じ `mysql:3306` に繋ぐ) | Aurora の Reader エンドポイント(`DB_READER_HOST`)→ [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) |
 | S3 エンドポイント | `http://minio:9000` | (未指定 = 本物の S3) |
 | SMTP ホスト | `mailpit:1025` | SES |
 

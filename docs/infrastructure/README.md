@@ -26,7 +26,7 @@ flowchart LR
         subgraph ECS[ECS Fargate]
             App[Spring Boot コンテナ<br/>静的ファイル + /api]
         end
-        RDS[(RDS<br/>MySQL)]
+        RDS[(Aurora MySQL<br/>Writer + Reader)]
         EC[(ElastiCache<br/>Redis / セッション)]
         S3[(S3<br/>画像保存)]
         CF[CloudFront<br/>画像配信]
@@ -57,16 +57,16 @@ flowchart LR
 | ALB | TLS 終端、ヘルスチェック、ECS タスクへの負荷分散 |
 | ECS (Fargate) | Spring Boot コンテナの実行基盤。サーバー管理不要の Fargate 起動タイプを使う |
 | ECR | Docker イメージのレジストリ。GitHub Actions からビルド & push |
-| RDS (MySQL) | アプリケーションデータの永続化 |
+| Aurora MySQL(プロビジョンド) | アプリケーションデータの永続化。Writer 1 台 + Reader(stg 1 台 / prod 2 台)で、読み取り専用トランザクションは Reader に送る → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) |
 | ElastiCache (Redis OSS) | ログインセッションの保存先。ノード 1 台のレプリケーショングループで、暗号化と AUTH トークンを掛ける。→ [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/elasticache.md](../notes/redis/elasticache.md) |
 | S3 | ユーザーアップロード画像の保存(フロントエンド配信には使わない) |
 | CloudFront | S3 上の画像の CDN 配信 |
 | SES | メール送信。独自ドメインで DKIM 認証する。**アプリは SMTP ではなく API 経路で送る**(SMTP 認証は IAM ユーザーの長期クレデンシャルが必要になるため) |
 | WAF | 検証環境の Basic 認証。ALB に関連付ける。ALB の `fixed-response` は `WWW-Authenticate` を付けられないので WAF でしか実現できない(→ [ADR-0006](../adr/0006-basic-auth-with-waf.md)) |
-| Secrets Manager | RDS のマスターパスワード。RDS が生成・保持し、DB を削除すると一緒に消える |
+| Secrets Manager | DB クラスタのマスターパスワード。RDS が生成・保持し、クラスタを削除すると一緒に消える |
 | SSM Parameter Store | `app` / `migrate` の DB パスワード、Google の資格情報、**ElastiCache の AUTH トークン**(手動作成・常駐) |
-| CloudWatch | ログの保管、アラーム 9 本(RDS のメトリクス 4 / RDS のログ 2 / ECS のタスク数不足 1 / **ElastiCache のメトリクス 2**)、RDS ログのメトリクスフィルタ 2 |
-| SNS | アラームと RDS イベント購読の通知先。トピック 3 本(ECS / RDS / **Redis**)。**宛先は Slack**(Amazon Q Developer in chat applications がトピック 1 本を 1 チャンネルに転送する)。→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) |
+| CloudWatch | ログの保管、アラーム 14 本(**DB のメトリクス 9**(Writer / Reader の役割単位 8 + レプリカ遅延 1)/ DB のログ 2 / ECS のタスク数不足 1 / ElastiCache のメトリクス 2)、DB ログのメトリクスフィルタ 2 |
+| SNS | アラームと RDS イベント購読(クラスタ / インスタンスの 2 本)の通知先。トピック 3 本(ECS / RDS / **Redis**)。**宛先は Slack**(Amazon Q Developer in chat applications がトピック 1 本を 1 チャンネルに転送する)。→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)、手順 → [docs/slack/README.md](../slack/README.md) |
 | Data Firehose | ECS のログを S3 に長期アーカイブする配信ストリーム。**ただしスタックと一緒に消えるので保全機能としては動いていない**(同上) |
 
 ## ドメインと管理範囲
@@ -82,7 +82,7 @@ CloudFormation で管理するもの / しないものを、ライフサイク�
 | **IAM の OIDC プロバイダ + GitHub Actions 用ロール** | **手動** | ECR に push するロールをスタックに入れると**循環依存**になる。push にはロールが要る → ロールを作るスタックは ECS がイメージを引けず ROLLBACK → 作られかけたロールごと消える、で永久に push できない。作成手順 → [github-actions-oidc.md](./github-actions-oidc.md) |
 | ACM 証明書 | CloudFormation | ホストゾーンが Route53 にあるため DNS 検証はすぐ通る。撤収のたびに作り直しても実用上の問題は出ない |
 | Route53 の A レコード(ALB 向け) | CloudFormation | ゾーンは手動管理のまま、**中身のレコードだけ**をスタックが出し入れする |
-| 上記以外すべて | CloudFormation | VPC / サブネット / NAT GW / SG / ALB / ECS / RDS / ElastiCache / S3 / CloudFront / IAM ロール |
+| 上記以外すべて | CloudFormation | VPC / サブネット / NAT GW / SG / ALB / ECS / Aurora / ElastiCache / S3 / CloudFront / IAM ロール |
 
 手動管理のホストゾーン ID と ECR リポジトリ URI は、スタックの `Parameters` として渡す。
 
@@ -91,7 +91,7 @@ CloudFormation で管理するもの / しないものを、ライフサイク�
 ## リクエストの流れ
 
 1. **ページ表示**: ユーザー → Route53 → ALB(TLS 終端)→ ECS の Spring Boot → `static/` 内の SSG 済み HTML/JS/CSS を返す
-2. **API 呼び出し**: ブラウザの JS → `https://ドメイン/api/**` → ALB → Spring Boot の REST API → RDS(データ)/ ElastiCache(ログイン状態)
+2. **API 呼び出し**: ブラウザの JS → `https://ドメイン/api/**` → ALB → Spring Boot の REST API → Aurora(データ。書き込みは Writer、読み取り専用トランザクションは Reader)/ ElastiCache(ログイン状態)
 3. **画像アップロード**: ブラウザ → `/api` → Spring Boot → S3 に保存
 4. **画像表示**: ブラウザ → CloudFront(画像用 URL)→ S3
 5. **メール送信**: Spring Boot → SES
@@ -148,7 +148,7 @@ GitHub Actions から AWS への認証は、アクセスキーではなく **OID
 
 スタックは 2 つある。**`cloudformation/pipeline.yml`(常駐)** がデプロイパイプラインを持ち、**`cloudformation/app.yml`(作り捨て)** が環境そのものを持つ。2 つは `Export` / `ImportValue` ではなく命名規則で繋いであるので、アプリのスタックはいつでも撤収できる(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。以下は作り捨て側の話。
 
-**使い捨て部分は 1 スタックにまとめる。** VPC・サブネット・NAT GW・SG・ALB・ACM・ECS・RDS・ElastiCache・S3・CloudFront・Route53 の A レコード・IAM ロールを 1 本のテンプレートに置く。
+**使い捨て部分は 1 スタックにまとめる。** VPC・サブネット・NAT GW・SG・ALB・ACM・ECS・Aurora・ElastiCache・S3・CloudFront・Route53 の A レコード・IAM ロールを 1 本のテンプレートに置く。
 
 分割しない理由:
 
@@ -176,7 +176,7 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 4. Basic 認証を通してブラウザで確認
 
 [インフラの変更を反映するとき(既に建っている環境に対して)]
-1. cfn-apply.yml を実行(env / dry_run / allow_replacement)
+1. cfn-apply.yml を実行(env / dry_run / allow_destructive_changes)
      Change Set を作る → 差分をジョブサマリに出す → 実行
    image_tag は workflow_dispatch には無い。アプリのデプロイはパイプラインの仕事
 
@@ -212,13 +212,13 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 `dry_run=true` にすると Change Set を作って実行せずに削除して終わる。構築側での狙いは差分の中身ではなく **pre-flight**(テンプレートが CloudFormation 側の検証を通るか + サービスロールで作れるか)で、15〜25 分かかる作成の前に数十秒で確かめられる。
 
-**反映では毎回 Change Set を作る。** 差分が意味を持つのは既存スタックを更新するときだから。`cfn-apply.yml` は `create-change-set` → 差分をジョブサマリに出す → `execute-change-set` の順に進み、**`Replacement: True`(リソースの作り直し)が含まれていたら実行せずに失敗する。** RDS が作り直されると新しい空のインスタンスになるため、`allow_replacement=true` を明示しない限り止める。
+**反映では毎回 Change Set を作る。** 差分が意味を持つのは既存スタックを更新するときだから。`cfn-apply.yml` は `create-change-set` → 差分をジョブサマリに出す → `execute-change-set` の順に進み、**`Replacement: True` / `Conditional`(リソースの作り直し)か `Remove`(削除)が含まれていたら実行せずに失敗する。** DB クラスタが作り直されると空のクラスタになり、削除されると中のデータごと消えるため、`allow_destructive_changes=true` を明示しない限り止める。論理 ID を変えただけでも「削除 + 追加」として出る → [フェーズ19 設計書の決定14](../superpowers/specs/2026-09-13-phase19-aurora-design.md)
 
 ### 削除まわりの注意(Terraform と挙動が違う)
 
 「終わったら全部消す」運用なので、ここを外すと課金が残る。
 
-- **RDS の `DeletionPolicy` は既定が `Delete` ではなく `Snapshot`。** 明示的に `Delete` を指定しないと、スタックを消してもスナップショットが残り課金され続ける
+- **RDS(Aurora の DB クラスタ)の `DeletionPolicy` は既定が `Delete` ではなく `Snapshot`。** 明示的に `Delete` を指定しないと、スタックを消してもスナップショットが残り課金され続ける
 - **S3 バケットはオブジェクトが残っていると削除に失敗する。** 素の CloudFormation に Terraform の `force_destroy` 相当は無い(ドキュメントに明記されている)。**撤収ワークフローが `aws s3 rm --recursive` してから `delete-stack` する**ことで解決している。カスタムリソース(CDK の `autoDeleteObjects` の中身)は書いていない → [ADR-0006](../adr/0006-basic-auth-with-waf.md) ではなく[設計書](../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)の決定14
 - **`force_destroy` が無いことは、書き手がいるバケットで競合になる。** ログアーカイブのバケットには Firehose が 900 秒ごとに自動で書きにくるので、「空にする → `delete-stack`」の間にフラッシュが挟まると `BucketNotEmpty` で `DELETE_FAILED` になる。撤収ワークフローが 1 回だけやり直す(2 回目は Firehose が既に消えているので確実に成功する)→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md)
 - **Termination protection を有効にしたスタックは削除できない。** このリポジトリでは有効にしない
@@ -228,7 +228,7 @@ GitHub Actions のワークフローは `workflow_dispatch`(手動トリガー)�
 
 ### コストに関する注意
 
-- 撤収し忘れると ALB・RDS・ElastiCache・NAT Gateway 等で課金が続くため、検証後は必ずスタックを削除する
+- 撤収し忘れると ALB・Aurora・ElastiCache・NAT Gateway 等で課金が続くため、検証後は必ずスタックを削除する
 - Route53 のホストゾーンとドメイン代は環境の有無にかかわらず発生する(手動管理で常駐するため)
 - ACM の証明書は発行済みで放置しても無料
 - 監視・検知層はほぼ無料枠に収まる。CloudWatch アラームは 10 本まで無料(このスタックは 7 本)、カスタムメトリクス 2 本と Firehose の取り込み量は数時間ぶんなら誤差。**Container Insights(`enhanced`)だけは取り込み量に応じて課金される**ので、費用が気になるときは `params` を `enabled` に落とす(`disabled` は選べない。ECS タスク数不足のアラームが動かなくなるため)

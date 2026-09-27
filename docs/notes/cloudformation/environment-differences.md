@@ -1,5 +1,7 @@
 # RDS / ECS の環境差分と、IaC 2 ツールでの表現力
 
+> **後日の追記(2026-09-13)**: フェーズ19 で DB を RDS for MySQL(`AWS::RDS::DBInstance` 1 台)から Aurora MySQL のクラスタに置き換えた。このノートに出てくる `Database` / `DbAllocatedStorage` / `DbMaxAllocatedStorage` / `DbMultiAZ` / `RdsFreeStorageThresholdBytes` は当時のテンプレートを題材にした記録で、今の `app.yml` には無い。環境差を分類する考え方はそのまま使える → [ADR-0016](../../adr/0016-aurora-provisioned-with-read-write-split.md)
+
 stg と本番で設定を変えるべきなのはどこか。そして「環境ごとに値を変える」という同じ目的に対して、Terraform と CloudFormation で書けること・書けないことがどう違うか。
 
 コード例は全部このリポジトリから引く。`terraform/`(前に書いた Laravel + nginx の構成)と `cloudformation/app.yml`(今の Spring Boot の構成)が両方コミットされているので、同じ話題を 2 つの書き方で並べられる。

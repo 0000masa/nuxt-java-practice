@@ -992,6 +992,8 @@ maybe=$(ids Conditional)
 - 作り直しになるかもしれない(`Conditional`): `WebService`
 ```
 
+> **後日の追記(2026-09-13・フェーズ19)**: ガードは **`Action: Remove` も止める**ようになり、解除の入力は **`allow_destructive_changes` に改名**した。リソースの種類を変える更新(`AWS::RDS::DBInstance` → `AWS::RDS::DBCluster`)や論理 ID の付け替えは、`Replacement` ではなく「旧リソースの `Remove` + 新リソースの `Add`」として出る。`Replacement` だけを見ていたこのガードは、DB が中身ごと消える更新を素通りさせていた。以下の `allow_replacement` / `Database` は当時の名前のまま残す → [フェーズ19 設計書の決定14・15](../../superpowers/specs/2026-09-13-phase19-aurora-design.md)
+
 ### 実機で起きたこと — `AWS::ECS::TaskDefinition` を判定から外した
 
 上の設計には「日常的に出る `Replacement` があると、解除が習慣化して安全弁ごと無効になる」という懸念を書いていた。**懸念していたのは `Conditional` だったが、実際に起きたのは `True` のほうだった。**

@@ -17,6 +17,8 @@
 | D | ECS タスク数不足(Metric Math で `running < desired`) | `ecs-task-shortage` |
 | F | 全ログ → Firehose → S3 アーカイブ | — |
 
+> **後日の追記(2026-09-13)**: フェーズ19 で DB を Aurora MySQL に移し、**A は役割単位(Writer / Reader)の 9 本**(CPU / FreeableMemory / DatabaseConnections / FreeLocalStorage を Writer と Reader に 1 本ずつ + レプリカ遅延)に、**C はクラスタとインスタンスの 2 本**に変わった。`FreeStorageSpace` は Aurora では意味を持たないので `FreeLocalStorage` に置き換えた → [ADR-0016](./0016-aurora-provisioned-with-read-write-split.md)。上の表は当時の記録として残す。
+
 **アプリのエラーログ通知(Terraform 側の Lambda 経由のメール)は移植しない。** 通知本文にログを入れられる形でないと管理しづらいため、Sentry などを別途検討する。
 
 ## 背景と理由

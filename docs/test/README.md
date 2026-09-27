@@ -184,12 +184,13 @@ tasks.named('test') {
 | `AuthTokenServiceTest` | `@DataJpaTest` | 使う | 7 | 使い捨てトークンの境界(期限切れ・使用済み・用途違い・ハッシュ保存・再発行での無効化) |
 | `AuthControllerTest` | `@WebMvcTest` | **不要** | 7 | 認証 API の入力チェックと `fieldErrors`、`/api/auth/me` が未ログインでも 200、パスワード変更が認可で弾かれること |
 | `AuthFlowTest` | `@SpringBootTest` | 使う | 3 | 登録 → 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと、Google ログインの入口が Google へ 302 すること |
+| `ReadWriteRoutingTest` | `@SpringBootTest` | 使う | 3 | 読み書きの振り分け(`readOnly` のトランザクションは Reader のプール、それ以外は Writer のプールから接続を借りること)と、読み取り専用トランザクション内の書き込みが開発環境でもエラーになること(Reader のプールの `read-only` 設定が効いていること)→ [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) |
 | `GoogleAccountServiceTest` | `@DataJpaTest` | 使う | 6 | Google ログインの分岐(既存ユーザーの特定・アカウントリンク・未確認アカウントの作り直し・新規作成の初期値・未確認メールの拒否・メール変更を取り込まないこと) |
 | `UsernameGeneratorTest` | `@DataJpaTest` | 使う | 3 | Google 由来ユーザーの username 生成(文字種の変換・衝突時の連番・使える文字が無いときの代替) |
 | `AppOidcUserTest` | 素の JUnit | **不要** | 1 | `getName()` がメールアドレスを返すこと(セッション無効化がメールを鍵に引くため) |
 | `AppOidcUserServiceTest` | 素の JUnit + Mockito | **不要** | 4 | Google のクレームをアプリの言葉に翻訳する部分(`email_verified` の 3 値変換・拒否の `OAuth2AuthenticationException` への翻訳・principal の組み立て) |
 
-合計 46 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` / `AppOidcUserServiceTest` は DB を使わない。
+合計 49 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` / `AppOidcUserServiceTest` は DB を使わない。
 
 `AppOidcUserTest` の 1 本は他より重要度が高い。ここが OIDC の既定(`sub`)のままでも画面上は何も壊れず、「パスワードをリセットしたのに Google ログインのセッションだけ生き残る」という形でしか露見しないため、手で気づくのがほぼ不可能。
 

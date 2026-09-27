@@ -65,7 +65,7 @@ IaC に Terraform ではなく素の CloudFormation YAML を選んだ理由(CDK 
 |---|---|---|
 | フロントエンド | Nuxt dev サーバー(Node.js コンテナ) | Spring Boot の static/ から配信 |
 | バックエンド | Spring Boot コンテナ | ECS Fargate(Spring Boot) |
-| データベース | MySQL コンテナ | RDS(MySQL) |
+| データベース | MySQL コンテナ | Aurora MySQL 8.4(プロビジョンド。Writer + Reader → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md)) |
 | 画像保存 | MinIO コンテナ | S3 + CloudFront |
 | メール送信 | Mailpit コンテナ | SES |
 | TLS 終端・LB | なし(HTTP 直アクセス) | ALB + ACM |
