@@ -97,7 +97,8 @@ principal 索引の SET に入っている `<id>` という**文字列**は、�
 ### 3-5. ElastiCache Serverless はパラメータグループを持てない
 
 → `notify-keyspace-events` を有効化できないため、3-3 の索引掃除が成立しない。
-加えて最小構成でも月 $90 前後で、**撤収運用と噛み合わない**(`cache.t4g.micro` は約 $0.016/時)。
+料金は補足にとどまる。Redis OSS の Serverless は最低計測量が 1 GB で $0.151/時(東京)と
+`cache.t4g.micro` の $0.025/時 の約 6 倍だが、Valkey なら最低 100 MB で $0.0101/時 とむしろ安い。
 
 ### 3-6. `AWS::ElastiCache::CacheCluster` は暗号化と AUTH に対応しない
 
@@ -126,7 +127,7 @@ TTL 付きキーを古い順に捨てる設定。**Spring Session のキーは�
 過去に ElastiCache 側で制限されていた時期があったパラメータのため、
 **実装時に AWS の「Redis のパラメータ」一覧に当てて裏を取る。**
 もし変更不可だった場合、3-5 の判断(Serverless を却下する根拠のひとつ)が揺らぐ。
-ただし料金の根拠は残るので、**ノード指定型という結論自体は変わらない。**
+料金の根拠は **Redis OSS を使い続ける限りは**残る(Valkey に移るなら Serverless のほうが安いので、判断をやり直す)。
 
 **検証結果(2026-09-13、初回の `cfn-deploy`):** パラメータグループに `notify-keyspace-events: Egx` を
 入れたまま ElastiCache の作成は通った。**変更できる。** ただし想定していなかった問題を 1 つ踏んだ。
