@@ -13,10 +13,9 @@
   { "ParameterKey": "PrivateSubnetACidr",              "ParameterValue": "192.168.17.0/24" },
   { "ParameterKey": "PrivateSubnetCCidr",              "ParameterValue": "192.168.18.0/24" },
 
+  { "ParameterKey": "DbEngineVersion",                 "ParameterValue": "8.4.mysql_aurora.8.4.7" },
   { "ParameterKey": "DbInstanceClass",                 "ParameterValue": "db.t4g.medium" },
-  { "ParameterKey": "DbAllocatedStorage",              "ParameterValue": "20" },
-  { "ParameterKey": "DbMaxAllocatedStorage",           "ParameterValue": "100" },
-  { "ParameterKey": "DbMultiAZ",                       "ParameterValue": "true" },
+  { "ParameterKey": "DbReaderCount",                   "ParameterValue": "2" },
   { "ParameterKey": "DbBackupRetentionDays",           "ParameterValue": "35" },
   { "ParameterKey": "DbDeleteAutomatedBackups",        "ParameterValue": "false" },
   { "ParameterKey": "DbDeletionProtection",            "ParameterValue": "true" },
@@ -26,6 +25,8 @@
   { "ParameterKey": "DbMasterUsername",                "ParameterValue": "admin" },
   { "ParameterKey": "DbAppUsername",                   "ParameterValue": "app" },
   { "ParameterKey": "DbMigrateUsername",               "ParameterValue": "migrate" },
+  { "ParameterKey": "DbWriterPoolSize",                "ParameterValue": "5" },
+  { "ParameterKey": "DbReaderPoolSize",                "ParameterValue": "5" },
 
   { "ParameterKey": "RedisNodeType",                    "ParameterValue": "cache.t4g.small" },
   { "ParameterKey": "RedisEngineVersion",               "ParameterValue": "7.1" },
@@ -48,10 +49,11 @@
   { "ParameterKey": "WebMemoryScaleOutCooldown",       "ParameterValue": "60" },
   { "ParameterKey": "ContainerInsights",               "ParameterValue": "enhanced" },
 
-  { "ParameterKey": "RdsCpuThresholdPercent",          "ParameterValue": "90" },
-  { "ParameterKey": "RdsFreeStorageThresholdBytes",    "ParameterValue": "2147483648" },
-  { "ParameterKey": "RdsFreeableMemoryThresholdBytes", "ParameterValue": "1073741824" },
-  { "ParameterKey": "RdsConnectionsThreshold",         "ParameterValue": "307" },
+  { "ParameterKey": "RdsCpuThresholdPercent",             "ParameterValue": "90" },
+  { "ParameterKey": "RdsFreeLocalStorageThresholdBytes",  "ParameterValue": "3435973836" },
+  { "ParameterKey": "RdsFreeableMemoryThresholdBytes",    "ParameterValue": "1073741824" },
+  { "ParameterKey": "RdsConnectionsThreshold",            "ParameterValue": "72" },
+  { "ParameterKey": "RdsReplicaLagThresholdMilliseconds", "ParameterValue": "1000" },
 
   { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "T0BT8V342DB" },
   { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "C0BTLRRUHQ9" },
