@@ -539,7 +539,7 @@ Terraform 側も同じで `deletion_protection = var.rds_config.deletion_protect
 
 | 項目 | stg / prod | なぜ対象外か |
 |---|---|---|
-| `VpcCidr` ほかサブネット | `192.168.0.0/20` / `192.168.16.0/20` | **重複できないから分けている**だけ。「本番だから値を変える」ではない |
+| `VpcCidr` ほかサブネット | `192.168.0.0/20` / `192.168.16.0/20` | **将来 VPC 同士を接続したときに衝突しないよう分けている**だけ(範囲が重なる VPC は作れるが、ピアリングなどでつなげなくなる → [CIDR の切り方](../vpc/local-route-and-subnet-cidr.md#stg-と-prod-の範囲をずらしている理由))。「本番だから値を変える」ではない |
 | `SsmParameterPath` | `/nuxt-java-practice/{stg,prod}/` | 名前空間の分離。値そのものに意味は無い |
 | `APP_BASE_URL` / `MAIL_FROM` | `!Sub https://${EnvName}.${AppSubdomain}.${DomainName}` | **環境名から自動的に決まる**。人が選ぶ値ではない |
 | `EnvName` / `SsmParameterPath` を使う各種名前 | スタック内で自動生成 | 同上 |

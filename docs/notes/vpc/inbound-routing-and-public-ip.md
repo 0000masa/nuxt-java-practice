@@ -4,6 +4,7 @@
 では、どこで、なぜ止まるのか。UDP ならどうか。RDS や Redis のセキュリティグループを全開放したらどうなるか。
 これらを、このリポジトリの `cloudformation/app.yml` の VPC 構成に沿って整理する。
 
+前提 → [ルートテーブルの `local` と CIDR の切り方](local-route-and-subnet-cidr.md)
 関連 → [ElastiCache](../redis/elasticache.md) / [フェーズ13 設計書](../../superpowers/specs/2026-08-19-phase13-cloudformation-design.md)
 
 ## まず結論(4 行)
