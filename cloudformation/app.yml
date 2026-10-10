@@ -19,7 +19,7 @@ AWSTemplateFormatVersion: "2010-09-09"
 # Description はマルチバイト文字を保持せず、コンソール上で ? に化ける
 # (AWS のドキュメントには 0〜1024 バイトとしか書かれていない、未文書の挙動)。
 # 日本語の説明は上のコメントブロックに置き、ここは英語で書く。
-Description: Verification environment for the posting app (ALB + ECS Fargate + RDS MySQL)
+Description: Verification environment for the posting app (ALB + ECS Fargate + Aurora MySQL)
 
 # -----------------------------------------------------------------------------
 # パラメータ
@@ -109,51 +109,49 @@ Parameters:
     Type: String
     Default: 192.168.2.0/24
 
-  # --- RDS ---
+  # --- DB(Aurora MySQL)--- → docs/adr/0016
+  DbEngineVersion:
+    Type: String
+    Description: >-
+      Aurora MySQL のエンジンバージョン。8.4 からは 8.4.mysql_aurora.8.4.7 の形で、末尾が
+      互換のコミュニティ版 MySQL のバージョンと一致する。開発環境の mysql:8(8.4)とメジャーを揃えている
   DbInstanceClass:
     Type: String
-    Description: prod は db.t4g.medium 以上(Performance Insights の対応もそこから)
-  DbAllocatedStorage:
-    Type: Number
-    MinValue: 20
-  # 設定しないとストレージ自動スケーリングは働かず、割当は DbAllocatedStorage で固定される。
-  # 空きが尽きると storage-full で DB が止まるので、逃げ道としてこちらを開けておく。
-  # DbAllocatedStorage より大きい必要があるが、パラメータをまたぐ制約は AllowedValues では
-  # 書けない(WebCpu と WebMemory の組み合わせと同じ)。値を変えるときは両方を見ること。
-  DbMaxAllocatedStorage:
-    Type: Number
-    MinValue: 20
     Description: >-
-      ストレージ自動スケーリングの上限(GiB)。伸びた分は縮小できないので、
-      「事故で自動的に払ってよい上限額」として決める
-  DbMultiAZ:
+      Writer / Reader 共通のインスタンスクラス。Aurora MySQL の最小は db.t4g.medium(micro / small は無い)。
+      max_connections の既定値もクラスで決まる(db.t4g.medium は 90)
+  # Reader の台数。CloudFormation にはループが無いので「N 台」は 1 台ずつ書くしかなく、
+  # 1 台目(DbInstance2)は常に作り、2 台目(DbInstance3)にだけ Condition を付けている
+  # (ElastiCache の RedisHasReplica と同じ形)。3 台以上にするときは DbInstance4 を足して AllowedValues を広げる。
+  DbReaderCount:
     Type: String
-    AllowedValues: ["true", "false"]
+    AllowedValues: ["1", "2"]
+    Description: Reader インスタンスの台数。stg は 1 / prod は 2
   DbBackupRetentionDays:
     Type: Number
-    MinValue: 0
+    MinValue: 1
     MaxValue: 35
-    Description: 0 で自動バックアップ無効。撤収前提の stg は 0
+    Description: 自動バックアップの保持日数。Aurora は 0(無効)にできないので、撤収前提の stg も最小の 1
   DbDeleteAutomatedBackups:
     Type: String
     AllowedValues: ["true", "false"]
-    Description: DB を消したときに保持期間内の自動バックアップも消すか。prod は false(消した後の最後の復旧手段になる)
+    Description: クラスタを消したときに保持期間内の自動バックアップも消すか。prod は false(消した後の最後の復旧手段になる)
   # 削除の API そのものを拒否する。DeletionPolicy は属性なので環境で切り替えられないが、
   # こちらはただのプロパティなので !Ref が効く。→ docs/notes/cloudformation/environment-differences.md §5-4
   DbDeletionProtection:
     Type: String
     AllowedValues: ["true", "false"]
-    Description: prod は true。true のままだと delete-stack が RDS を消せず撤収ごと失敗するので、消す前に false へ更新する 1 手が要る
+    Description: prod は true。true のままだと delete-stack がクラスタを消せず撤収ごと失敗するので、消す前に false へ更新する 1 手が要る
   DbPerformanceInsights:
     Type: String
     AllowedValues: ["true", "false"]
     Description: >-
-      db.t4g の micro / small は非対応で、true にすると
-      InvalidParameterCombination で失敗する(選択ではなく制約)
+      Performance Insights(2026-07-31 以降は CloudWatch Database Insights の Standard モードとして表示される)。
+      Aurora MySQL で非対応なのは db.t4g.micro / small だが、Aurora の最小クラスは db.t4g.medium なので両環境で使える
   DbMonitoringInterval:
     Type: Number
     AllowedValues: [0, 1, 5, 10, 15, 30, 60]
-    Description: 拡張モニタリングの収集間隔(秒)。0 で無効。60 秒なら取り込み量が CloudWatch Logs の無料枠に収まる
+    Description: 拡張モニタリングの収集間隔(秒)。0 で無効。インスタンスごとに付く
   DbName:
     Type: String
     Default: app
@@ -164,11 +162,22 @@ Parameters:
   DbAppUsername:
     Type: String
     Default: app
-    Description: DML だけを持つユーザー。db-ops タスクが作る → docs/adr/0005
+    Description: DML だけを持つユーザー。db-ops タスクが作る → docs/adr/0005。Writer / Reader の両方にこのユーザーで繋ぐ → docs/adr/0016
   DbMigrateUsername:
     Type: String
     Default: migrate
     Description: DDL を持つユーザー。db-migrate タスクだけが使う
+  # アプリの接続プールの大きさ(Writer / Reader それぞれ)。taskdef の環境変数になる。
+  # 1 タスクが Writer 用と Reader 用のプールを 1 つずつ持ち、起動時からこの本数を張り続ける(固定サイズ)。
+  # Blue/Green デプロイ中は旧タスクと新タスクが同時にプールを持つので、
+  # 「WebMaxCapacity × 2 × この値 + マイグレーションのタスク」が max_connections に収まるように決める
+  # → docs/superpowers/specs/2026-09-13-phase19-aurora-design.md の決定9
+  DbWriterPoolSize:
+    Type: Number
+    MinValue: 1
+  DbReaderPoolSize:
+    Type: Number
+    MinValue: 1
 
   # --- ElastiCache(セッションストア)--- → docs/adr/0015
   RedisNodeType:
@@ -308,26 +317,35 @@ Parameters:
     AllowedPattern: ^[A-Za-z0-9]+$
     Description: ElastiCache の検知を流す Slack チャンネルの ID(#njp-alerts-redis)
 
-  # 以下 4 つは AWS 公式の推奨アラーム(Best Practice Recommended Alarms)ベース。
-  # インスタンスクラスとストレージ容量に連動するので環境ごとに渡す。
+  # 以下は AWS 公式の推奨アラーム(Best Practice Recommended Alarms)ベース。
+  # インスタンスクラスに連動するので環境ごとに渡す。Writer と Reader は同じクラスなので値は共通。
   # CloudFormation に算術の組み込み関数が無いため、計算済みの値を params に書く。
   RdsCpuThresholdPercent:
     Type: Number
     MinValue: 1
     MaxValue: 100
     Description: CPUUtilization がこれを超えた状態が 5 分続いたら通知
-  RdsFreeStorageThresholdBytes:
+  RdsFreeLocalStorageThresholdBytes:
     Type: Number
-    Description: FreeStorageSpace がこれを下回ったら通知。割当ストレージの 10% が目安
+    Description: >-
+      FreeLocalStorage(インスタンスごとの一時領域。ソートや一時テーブルに使う)がこれを下回ったら通知。
+      上限はクラスで決まり(db.t4g.medium は最大 32 GiB)、その 10% が目安。
+      データ本体はクラスタボリュームにあって自動で伸びるので、RDS for MySQL の FreeStorageSpace に当たるものは無い
   RdsFreeableMemoryThresholdBytes:
     Type: Number
     Description: FreeableMemory がこれを下回ったら通知。インスタンスの RAM の 25% が目安
   RdsConnectionsThreshold:
     Type: Number
     Description: >-
-      DatabaseConnections がこれを超えたら通知。max_connections は
-      {DBInstanceClassMemory/12582880} でメモリ連動なので、
+      DatabaseConnections がこれを超えたら通知。Aurora MySQL の max_connections の既定値は
+      インスタンスクラスごとの表で決まる(db.t4g.medium は 90)ので、その 8 割が目安。
       インスタンスクラスを変えたらこの値も見直す
+  RdsReplicaLagThresholdMilliseconds:
+    Type: Number
+    MinValue: 1
+    Description: >-
+      AuroraReplicaLagMaximum(全 Reader の中で最大の遅延)がこれを超えた状態が 5 分続いたら通知。
+      認証の読み取りだけ Writer に固定して残りを Reader で読む設計は、「遅延は普段小さい」前提に立っている → docs/adr/0016
 
   # --- その他 ---
   LogRetentionDays:
@@ -361,6 +379,9 @@ Conditions:
   BasicAuthEnabled: !Equals [!Ref EnableBasicAuth, "true"]
 
   EnhancedMonitoringEnabled: !Not [!Equals [!Ref DbMonitoringInterval, 0]]
+
+  # Reader の 2 台目(DbInstance3)を作るか
+  DbHasSecondReader: !Equals [!Ref DbReaderCount, "2"]
 
   # レプリカが 1 台も無い状態で AutomaticFailoverEnabled / MultiAZEnabled を true にすると
   # 「フェイルオーバー先が無い」として作成が失敗する。ノード数から自動で決める。
@@ -724,8 +745,8 @@ Resources:
   # ===========================================================================
   # ロググループ
   # ===========================================================================
-  # RDS のロググループを明示的に作って RDS に DependsOn させる。
-  # 先に消えると、RDS が削除処理中の最終書き込みで同名のロググループを作り直し、
+  # DB のロググループを明示的に作ってクラスタに DependsOn させる。
+  # 先に消えると、DB が削除処理中の最終書き込みで同名のロググループを作り直し、
   # スタック管理外の孤児(保持期間 無期限)が残る。
   EcsLogGroup:
     Type: AWS::Logs::LogGroup
@@ -740,7 +761,7 @@ Resources:
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
-      LogGroupName: !Sub /aws/rds/instance/${ProjectName}-${EnvName}-db/error
+      LogGroupName: !Sub /aws/rds/cluster/${ProjectName}-${EnvName}-db/error
       RetentionInDays: !Ref LogRetentionDays
 
   RdsSlowQueryLogGroup:
@@ -748,12 +769,18 @@ Resources:
     DeletionPolicy: Delete
     UpdateReplacePolicy: Delete
     Properties:
-      LogGroupName: !Sub /aws/rds/instance/${ProjectName}-${EnvName}-db/slowquery
+      LogGroupName: !Sub /aws/rds/cluster/${ProjectName}-${EnvName}-db/slowquery
       RetentionInDays: !Ref LogRetentionDays
 
   # ===========================================================================
-  # RDS
+  # DB(Aurora MySQL)
   # ===========================================================================
+  # 決定 → docs/adr/0016、設計 → specs/2026-09-13-phase19-aurora-design.md
+  #
+  # 【クラスタとインスタンスは別のリソース】
+  # データ(ストレージ)・DB ユーザー・バックアップ・削除保護・ログのエクスポートはクラスタ
+  # (AWS::RDS::DBCluster)が持ち、インスタンス(AWS::RDS::DBInstance)は計算資源だけを持つ。
+  # インスタンスを消してもデータは消えない。
   DbSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
@@ -767,19 +794,26 @@ Resources:
 
   # スロークエリログは既定のパラメータグループでは生成すらされないので有効化する。
   # フェーズ8(検索ラボ)とフェーズ10(index 実験)で使う。
+  #
+  # 【クラスタパラメータグループではなく、インスタンスの DB パラメータグループに置く】
+  # Aurora MySQL では slow_query_log / long_query_time / log_output はインスタンス単位のパラメータで、
+  # クラスタパラメータグループには出てこない(AWS の Aurora MySQL パラメータ一覧で確認)。
+  # そのため全インスタンスにこのグループを付ける。クラスタ単位で変えたいパラメータは今は無いので、
+  # クラスタパラメータグループは既定のまま。
+  #
   # 注意: MariaDB は 10.11 で変数名が変わったが(log_slow_query など)、MySQL は従来名のまま。
   # 参考にした Terraform リポジトリは MariaDB なので、あちらの変数名はここでは通らない。
   DbParameterGroup:
     Type: AWS::RDS::DBParameterGroup
     Properties:
-      Description: !Sub ${ProjectName}-${EnvName} MySQL 8.4
-      Family: mysql8.4
+      Description: !Sub ${ProjectName}-${EnvName} Aurora MySQL 8.4
+      Family: aurora-mysql8.4
       Parameters:
         slow_query_log: "1"
         # 秒。MySQL の既定は 10 秒だが、Web アプリで 10 秒は既に大事故なので 1 秒に締める
         long_query_time: "1"
         # CloudWatch Logs へのエクスポートは「インスタンス内のログファイルを転送する」仕組みなので、
-        # 既定の TABLE のままだと mysql.slow_log テーブルに書かれ、転送すべきファイルが存在しない。
+        # TABLE だと mysql.slow_log テーブルに書かれ、転送すべきファイルが存在しない。
         # エラーログはこの設定に関係なく常にファイル出力される。
         log_output: FILE
 
@@ -798,9 +832,9 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
 
-  Database:
-    Type: AWS::RDS::DBInstance
-    # 【重要】RDS だけは DeletionPolicy の既定が Delete ではなく Snapshot。
+  DbCluster:
+    Type: AWS::RDS::DBCluster
+    # 【重要】DBCluster も DeletionPolicy の既定が Delete ではなく Snapshot。
     # 明示しないとスタックを消してもスナップショットが残って課金が続く。
     # UpdateReplacePolicy も同じ理由で明示する(作り直しが起きたときの取り残し防止)。
     DeletionPolicy: Delete
@@ -809,38 +843,25 @@ Resources:
       - RdsErrorLogGroup
       - RdsSlowQueryLogGroup
     Properties:
-      DBInstanceIdentifier: !Sub ${ProjectName}-${EnvName}-db
-      Engine: mysql
-      # 開発環境(docker compose の mysql:8)が 8.4.x なので合わせる
-      EngineVersion: "8.4"
-      DBInstanceClass: !Ref DbInstanceClass
-      AllocatedStorage: !Ref DbAllocatedStorage
-      MaxAllocatedStorage: !Ref DbMaxAllocatedStorage
-      StorageType: gp3
+      DBClusterIdentifier: !Sub ${ProjectName}-${EnvName}-db
+      Engine: aurora-mysql
+      EngineVersion: !Ref DbEngineVersion
+      # 標準(aurora)。I/O 最適化(aurora-iopt1)が得になるのは I/O の料金が費用の大部分を占めるときだけ
+      StorageType: aurora
       StorageEncrypted: true
-      DBName: !Ref DbName
+      DatabaseName: !Ref DbName
       MasterUsername: !Ref DbMasterUsername
       # パスワードを渡さない。RDS が生成して Secrets Manager にシークレットを作る。
-      # テンプレートにも SSM にも手元にも値が現れず、DB を消すとシークレットも消える。
+      # テンプレートにも SSM にも手元にも値が現れず、クラスタを消すとシークレットも消える。
       ManageMasterUserPassword: true
       DBSubnetGroupName: !Ref DbSubnetGroup
-      VPCSecurityGroups:
+      VpcSecurityGroupIds:
         - !Ref RdsSecurityGroup
-      DBParameterGroupName: !Ref DbParameterGroup
-      PubliclyAccessible: false
-      MultiAZ: !Ref DbMultiAZ
       DeletionProtection: !Ref DbDeletionProtection
       BackupRetentionPeriod: !Ref DbBackupRetentionDays
       DeleteAutomatedBackups: !Ref DbDeleteAutomatedBackups
       CopyTagsToSnapshot: true
-      AutoMinorVersionUpgrade: true
-      EnablePerformanceInsights: !Ref DbPerformanceInsights
-      MonitoringInterval: !Ref DbMonitoringInterval
-      # 拡張モニタリングが無効(0)のときにロールを渡すと組み合わせエラーになるので外す
-      MonitoringRoleArn: !If
-        - EnhancedMonitoringEnabled
-        - !GetAtt RdsMonitoringRole.Arn
-        - !Ref AWS::NoValue
+      # Writer と Reader のログが同じロググループに流れる(ストリームはインスタンスごと)
       EnableCloudwatchLogsExports:
         - error
         - slowquery
@@ -851,6 +872,99 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub ${ProjectName}-${EnvName}-db
+
+  # 【インスタンスの名前に Writer / Reader を入れない】
+  # どれが Writer かは固定ではない。フェイルオーバーすると Reader のどれかが Writer に昇格し、
+  # 元の Writer は Reader として戻ってくる。名前に役割を入れると、フェイルオーバー後に名前が嘘をつく。
+  # 役割はクラスタが決めるもので、アラームも役割(Role 次元)で見ている(→ 監視のセクション)。
+  #
+  # 【最初の Writer は DbInstance1】
+  # クラスタで最初に作られたインスタンスが Writer になる。CloudFormation は依存の無いリソースを
+  # 並列に作るので、Reader 側に DependsOn: DbInstance1 を付けて作成順を固定している。
+  #
+  # AZ は分けて置く(サブネットは A / C の 2 つだけなので、prod の 3 台目は A と同じ AZ になる)。
+  # データはクラスタボリュームが 3 AZ に複製するので、分けているのは計算資源の置き場所だけ。
+  #
+  # 【DeletionPolicy: Delete は念のための明示】
+  # Aurora のインスタンスはデータを持たない(データはクラスタボリュームにある)ので、
+  # インスタンス単位のスナップショットというものが存在しない。スナップショットは常にクラスタ単位で、
+  # 撤収時に残すかどうかは DbCluster の DeletionPolicy だけで決まる。
+  # RDS for MySQL の DBInstance の既定値(Snapshot)を知っている読み手が迷わないように、Delete と書いている。
+  DbInstance1:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${EnvName}-db-1
+      DBClusterIdentifier: !Ref DbCluster
+      Engine: aurora-mysql
+      DBInstanceClass: !Ref DbInstanceClass
+      DBParameterGroupName: !Ref DbParameterGroup
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: !Ref DbPerformanceInsights
+      MonitoringInterval: !Ref DbMonitoringInterval
+      # 拡張モニタリングが無効(0)のときにロールを渡すと組み合わせエラーになるので外す
+      MonitoringRoleArn: !If
+        - EnhancedMonitoringEnabled
+        - !GetAtt RdsMonitoringRole.Arn
+        - !Ref AWS::NoValue
+      PreferredMaintenanceWindow: sun:15:00-sun:15:30
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-db-1
+
+  DbInstance2:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    DependsOn: DbInstance1
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${EnvName}-db-2
+      DBClusterIdentifier: !Ref DbCluster
+      Engine: aurora-mysql
+      DBInstanceClass: !Ref DbInstanceClass
+      DBParameterGroupName: !Ref DbParameterGroup
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: !Ref DbPerformanceInsights
+      MonitoringInterval: !Ref DbMonitoringInterval
+      MonitoringRoleArn: !If
+        - EnhancedMonitoringEnabled
+        - !GetAtt RdsMonitoringRole.Arn
+        - !Ref AWS::NoValue
+      PreferredMaintenanceWindow: sun:15:00-sun:15:30
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-db-2
+
+  DbInstance3:
+    Type: AWS::RDS::DBInstance
+    Condition: DbHasSecondReader
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    DependsOn: DbInstance1
+    Properties:
+      DBInstanceIdentifier: !Sub ${ProjectName}-${EnvName}-db-3
+      DBClusterIdentifier: !Ref DbCluster
+      Engine: aurora-mysql
+      DBInstanceClass: !Ref DbInstanceClass
+      DBParameterGroupName: !Ref DbParameterGroup
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      PubliclyAccessible: false
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: !Ref DbPerformanceInsights
+      MonitoringInterval: !Ref DbMonitoringInterval
+      MonitoringRoleArn: !If
+        - EnhancedMonitoringEnabled
+        - !GetAtt RdsMonitoringRole.Arn
+        - !Ref AWS::NoValue
+      PreferredMaintenanceWindow: sun:15:00-sun:15:30
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvName}-db-3
 
   # ===========================================================================
   # ElastiCache(セッションストア)
@@ -1043,7 +1157,7 @@ Resources:
           Value: !Sub ${ProjectName}-${EnvName}-alb
 
   # Blue/Green はターゲットグループを 2 つ使う。CodeDeploy はデプロイのたびに
-  # green 側へタスクセットを作り、HTTPS リスナーの既定アクションを付け替える。
+  # green 側へタスクセットを作り、HTTPS リスナーの向き先(この構成では既定アクション)を付け替える。
   # 2 つとも CodeDeployDeploymentGroup の LoadBalancerInfo が TargetGroupName 属性で参照する。
   # ヘルスチェックは actuator の liveness(DB を含まない)。DB を含む health を使うと
   # RDS が一時的に落ちたときに全タスクが unhealthy になって入れ替わり続ける。
@@ -1100,9 +1214,15 @@ Resources:
             StatusCode: HTTP_301
 
   # 【既定アクションが本番トラフィックの入口である】
-  # CodeDeploy の Blue/Green は「リスナーの既定アクション」を blue と green の間で
-  # 書き換えることで切り替える。TrafficRoute.ListenerArns の定義は
-  # 「The Amazon Resource Name (ARN) of one listener.」で、リスナールール ARN は渡せない。
+  # CodeDeploy の Blue/Green は、デプロイグループに渡したターゲットグループを forward 先にしている
+  # ところを、このリスナーの中から探して blue と green の間で書き換える。
+  # 既定アクションにあれば ModifyListener、リスナールールにあれば ModifyRule を呼ぶ。
+  # この構成では既定アクションに置いているので、書き換わるのは既定アクション。
+  # TrafficRoute.ListenerArns が取るのはリスナー ARN だけだが、これは「どのリスナーを見るか」の指定で、
+  # 書き換える場所をリスナーの既定アクションに限る制約ではない。
+  #
+  # 既定アクションに置いたのは、公式ユーザーガイドの手順が示す構成がこれだけだから。
+  # ルールを書き換える動きは公式には書かれていないので、それに頼らない。→ ADR-0013 §3 の訂正
   #
   # CodeDeploy がデプロイ中にこの既定アクションを書き換える。Terraform では
   # ignore_changes = [default_action] が要るところだが、CloudFormation は実リソースの
@@ -1111,10 +1231,10 @@ Resources:
   #
   # 【かつてここは fixed-response 403 だった】
   # 「既定は 403、ホスト名が一致したものだけを priority 100 のルールが blue/green へ通す」
-  # という構成にしていた。ECS ネイティブ Blue/Green はリスナールール単位で動くので
-  # それが成立したが、CodeDeploy はルール単位では動けない。ルールは既定より先に評価されるため、
-  # あのルールを残したまま CodeDeploy に繋ぐと「デプロイは成功するのにトラフィックが
-  # 一切切り替わらない」という壊れ方をする。→ ADR-0013
+  # という構成にしていた(ECS ネイティブ Blue/Green の時代)。CodeDeploy に移すとき、
+  # 「CodeDeploy は既定アクションしか書き換えられない」と誤読してこの構成をやめた。
+  # 実際にはルール側も書き換わるので、あの構成のままでも動いたはず(このリポジトリでは未確認)。
+  # 戻していないのは、上の公式手順に揃える理由と、下の「失うものが無い」理由による。→ ADR-0013
   #
   # 【ホスト名による絞り込みを再現していない理由】
   # ALB の DNS 名(*.elb.amazonaws.com)や IP を直接叩かれても、この構成では失うものが無い。
@@ -1320,7 +1440,7 @@ Resources:
                 Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                Resource: !GetAtt Database.MasterUserSecret.SecretArn
+                Resource: !GetAtt DbCluster.MasterUserSecret.SecretArn
 
   # CodeDeploy が ECS のタスクセットを作り、ALB のリスナーを付け替えるために引き受けるロール。
   # ネイティブ Blue/Green のときは ECS 自身がリスナールールの重みを書き換えていたので
@@ -1383,14 +1503,23 @@ Resources:
             - ContainerPort: 8080
               Protocol: tcp
           Environment:
+            # クラスタエンドポイント = 常に Writer(フェイルオーバーすると新しい Writer に向き直る)
             - Name: DB_HOST
-              Value: !GetAtt Database.Endpoint.Address
+              Value: !GetAtt DbCluster.Endpoint.Address
             - Name: DB_PORT
-              Value: !GetAtt Database.Endpoint.Port
+              Value: !GetAtt DbCluster.Endpoint.Port
+            # 読み取り専用トランザクションの接続先(→ docs/adr/0016、backend の config/DataSourceConfig)
+            - Name: DB_READER_HOST
+              Value: !GetAtt DbCluster.ReadEndpoint.Address
             - Name: DB_NAME
               Value: !Ref DbName
             - Name: DB_USER
               Value: !Ref DbAppUsername
+            # Writer / Reader それぞれの接続プールの大きさ(決め方 → パラメータ DbWriterPoolSize のコメント)
+            - Name: DB_WRITER_POOL_SIZE
+              Value: !Ref DbWriterPoolSize
+            - Name: DB_READER_POOL_SIZE
+              Value: !Ref DbReaderPoolSize
             # マイグレーションは db-migrate タスクが済ませている
             - Name: FLYWAY_ENABLED
               Value: "false"
@@ -1463,9 +1592,18 @@ Resources:
             - Name: APP_TASK
               Value: migrate
             - Name: DB_HOST
-              Value: !GetAtt Database.Endpoint.Address
+              Value: !GetAtt DbCluster.Endpoint.Address
             - Name: DB_PORT
-              Value: !GetAtt Database.Endpoint.Port
+              Value: !GetAtt DbCluster.Endpoint.Port
+            # このタスクも Spring Boot を起動するので Reader 用のプールを定義する(AppTaskDefinition と揃える)。
+            # Hikari のプールは最初に接続を借りるときに作られるので、読み取り専用トランザクションが
+            # 走らなければ Reader には繋がない
+            - Name: DB_READER_HOST
+              Value: !GetAtt DbCluster.ReadEndpoint.Address
+            - Name: DB_WRITER_POOL_SIZE
+              Value: !Ref DbWriterPoolSize
+            - Name: DB_READER_POOL_SIZE
+              Value: !Ref DbReaderPoolSize
             - Name: DB_NAME
               Value: !Ref DbName
             # datasource は app ユーザー(JPA の validate に使う)、Flyway だけ migrate ユーザー
@@ -1580,10 +1718,12 @@ Resources:
                 FLUSH PRIVILEGES;
               "
           Environment:
+            # ユーザー作成も任意 SQL も Writer に流す。Aurora では DB ユーザーもクラスタのストレージにあるので、
+            # Writer で CREATE USER すれば Reader にも見える
             - Name: DB_HOST
-              Value: !GetAtt Database.Endpoint.Address
+              Value: !GetAtt DbCluster.Endpoint.Address
             - Name: DB_PORT
-              Value: !GetAtt Database.Endpoint.Port
+              Value: !GetAtt DbCluster.Endpoint.Port
             # 以下 2 つは db-task.yml が action=sql のとき containerOverrides で上書きする
             - Name: SQL
               Value: ""
@@ -1591,9 +1731,9 @@ Resources:
               Value: master
           Secrets:
             - Name: MASTER_USER
-              ValueFrom: !Sub '${Database.MasterUserSecret.SecretArn}:username::'
+              ValueFrom: !Sub '${DbCluster.MasterUserSecret.SecretArn}:username::'
             - Name: MASTER_PASSWORD
-              ValueFrom: !Sub '${Database.MasterUserSecret.SecretArn}:password::'
+              ValueFrom: !Sub '${DbCluster.MasterUserSecret.SecretArn}:password::'
             - Name: APP_DB_PASSWORD
               ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
             - Name: MIGRATE_DB_PASSWORD
@@ -1692,7 +1832,7 @@ Resources:
   #
   # 【それでも残る代償 — Service を編集する更新では今も止まる】
   # WebDesiredCount を変えるなど Service 自身に手を入れる更新では、今でも Service が Modify に
-  # 入るので 4 の Conditional が出てガードに止まる。そのときは allow_replacement=true で通す。
+  # 入るので 4 の Conditional が出てガードに止まる。そのときは allow_destructive_changes=true で通す。
   # 「イメージ更新のたび」だった頃と違って意図してサービスを触ったときだけなので、
   # 反射で解除する手順にはならない(ガードが形骸化するという当初の懸念はここで解ける)。
   # なお構築フロー(cfn-deploy.yml)の 4 段目で WebDesiredCount が 0 → 1 になるときは、
@@ -1700,7 +1840,7 @@ Resources:
   #
   # 【静的値 → 参照の書き換え自体が一度だけ Conditional を出す】
   # 解決後の値が同じでも CloudFormation は書き換えを変更として扱う。移行のときだけ
-  # allow_replacement=true が要る(または撤収して建て直す。新規作成なら Add なので出ない)。
+  # allow_destructive_changes=true が要る(または撤収して建て直す。新規作成なら Add なので出ない)。
   #
   # DependsOn: Service は消した。参照が戻ったので暗黙の依存も戻っている。
   # → 依存の話は docs/notes/cloudformation/terraform-to-cloudformation.md §4-5
@@ -1825,7 +1965,9 @@ Resources:
           ServiceName: !GetAtt Service.Name
       # 【ListenerArns はリスナー ARN のみ。リスナールール ARN は渡せない】
       # 「The Amazon Resource Name (ARN) of one listener.」と定義されており、配列だが最大 1 個。
-      # CodeDeploy はこのリスナーの既定アクションを blue と green の間で書き換える。
+      # CodeDeploy はこのリスナーの中から、下の TargetGroups を forward 先にしている場所を探して
+      # blue と green の間で書き換える(既定アクションでもリスナールールでもよい)。
+      # この構成では既定アクションにある(→ HttpsListener のコメント)。
       # TestTrafficRoute(切替前に green だけを叩けるリスナー)は作っていない。
       # これを足して DeploymentReadyOption を STOP_DEPLOYMENT にすれば、Lambda を書かずに
       # 「人が green を確認してから切り替える」にできる。ただしリスナーを 1 本増やし、
@@ -1853,7 +1995,7 @@ Resources:
   # 【前提】これは「常時稼働する stg」を前提に書かれた検知層を、作り捨ての環境に
   # そのまま移植したもの。生じる不整合は構成を歪めて解決せず、運用で吸収する。
   # 受け入れている帰結は 3 つ。詳細は ADR-0010。
-  #   1. 建てるたびに「OK になりました」通知が 7 通届く
+  #   1. 建てるたびに「OK になりました」通知がアラームの数だけ(14 通)届く
   #      (新規アラームは INSUFFICIENT_DATA -> OK も状態遷移なので OKActions が発火する)
   #   2. ログアーカイブは撤収のたびに全部消える。保全機能としては動いていない
   #   3. スロークエリのアラームはフェーズ8・10 の実験中に鳴り続ける
@@ -2048,18 +2190,32 @@ Resources:
           Label: running < desired
           Expression: IF(m_running < m_desired, 1, 0)
 
-  # --- A: RDS メトリクスアラーム 4 本 -------------------------------------
+  # --- A: DB メトリクスアラーム 9 本(役割単位) -----------------------------
   # 評価は AWS 公式推奨どおり「60 秒 x 5 データポイント連続」。一過性のスパイクで鳴らさない。
-  RdsCpuHighAlarm:
+  #
+  # 【インスタンス単位ではなく役割(Role 次元: WRITER / READER)で見る】
+  # DBClusterIdentifier + Role の次元は、その役割のインスタンスをまとめた値になる。
+  # フェイルオーバーで役割が入れ替わっても「Writer の CPU」は新しい Writer を見続け、
+  # Reader の台数(DbReaderCount)でアラームの数も変わらない。
+  # インスタンス単位(DBInstanceIdentifier)にすると、フェイルオーバー後は writer と名の付いた
+  # アラームが Reader を見ていることになる。
+  #
+  # READER は複数台をまとめた値なので、1 台だけ悪化しても平均では薄まる。悪化方向に
+  # Maximum(CPU・接続数)/ Minimum(空きメモリ・空き領域)で評価する。
+  # 集計値に対するこの統計が「一番悪い 1 台」を表すかは stg で確かめる(設計書 §7)。
+  # CPU: バーストクレジットの枯渇や暴走クエリ
+  RdsWriterCpuHighAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-cpu-high
-      AlarmDescription: RDS CPUUtilization is too high (burst credit exhaustion / runaway query)
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-writer-cpu-high
+      AlarmDescription: DB writer CPUUtilization is too high (burst credit exhaustion / runaway query)
       Namespace: AWS/RDS
       MetricName: CPUUtilization
       Dimensions:
-        - Name: DBInstanceIdentifier
-          Value: !Ref Database
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: WRITER
       Statistic: Average
       Period: 60
       ComparisonOperator: GreaterThanThreshold
@@ -2072,21 +2228,22 @@ Resources:
       OKActions:
         - !Ref RdsAlertsTopic
 
-  # ストレージ枯渇は DB 停止に直結するので、悪化方向に安全側の Minimum で評価する
-  RdsFreeStorageLowAlarm:
+  RdsReaderCpuHighAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-free-storage-low
-      AlarmDescription: RDS FreeStorageSpace is running low (risk of DB stopping)
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-reader-cpu-high
+      AlarmDescription: DB reader CPUUtilization is too high (heavy read queries routed to readers)
       Namespace: AWS/RDS
-      MetricName: FreeStorageSpace
+      MetricName: CPUUtilization
       Dimensions:
-        - Name: DBInstanceIdentifier
-          Value: !Ref Database
-      Statistic: Minimum
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: READER
+      Statistic: Maximum
       Period: 60
-      ComparisonOperator: LessThanThreshold
-      Threshold: !Ref RdsFreeStorageThresholdBytes
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RdsCpuThresholdPercent
       EvaluationPeriods: 5
       DatapointsToAlarm: 5
       TreatMissingData: notBreaching
@@ -2095,16 +2252,19 @@ Resources:
       OKActions:
         - !Ref RdsAlertsTopic
 
-  RdsFreeableMemoryLowAlarm:
+  # 空きメモリ: スワップや OOM の前兆
+  RdsWriterFreeableMemoryLowAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-freeable-memory-low
-      AlarmDescription: RDS FreeableMemory is running low (swap / OOM precursor)
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-writer-freeable-memory-low
+      AlarmDescription: DB writer FreeableMemory is running low (swap / OOM precursor)
       Namespace: AWS/RDS
       MetricName: FreeableMemory
       Dimensions:
-        - Name: DBInstanceIdentifier
-          Value: !Ref Database
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: WRITER
       Statistic: Average
       Period: 60
       ComparisonOperator: LessThanThreshold
@@ -2117,6 +2277,158 @@ Resources:
       OKActions:
         - !Ref RdsAlertsTopic
 
+  RdsReaderFreeableMemoryLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-reader-freeable-memory-low
+      AlarmDescription: DB reader FreeableMemory is running low (swap / OOM precursor)
+      Namespace: AWS/RDS
+      MetricName: FreeableMemory
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: READER
+      Statistic: Minimum
+      Period: 60
+      ComparisonOperator: LessThanThreshold
+      Threshold: !Ref RdsFreeableMemoryThresholdBytes
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # 接続数: max_connections(db.t4g.medium は 90)に近づいた。接続リークやプールの設定ミス
+  RdsWriterConnectionsHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-writer-connections-high
+      AlarmDescription: DB writer DatabaseConnections near max_connections (connection leak / pool size)
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: WRITER
+      Statistic: Average
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RdsConnectionsThreshold
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  RdsReaderConnectionsHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-reader-connections-high
+      AlarmDescription: DB reader DatabaseConnections near max_connections (connections skewed to one reader / pool size)
+      Namespace: AWS/RDS
+      MetricName: DatabaseConnections
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: READER
+      Statistic: Maximum
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RdsConnectionsThreshold
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # 一時領域(RDS for MySQL の FreeStorageSpace の置き換え)。大きなソートや一時テーブルで減る。
+  # 枯渇はクエリの失敗に直結するので、悪化方向に安全側の Minimum で評価する
+  RdsWriterFreeLocalStorageLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-writer-free-local-storage-low
+      AlarmDescription: DB writer FreeLocalStorage is running low (large sorts / temporary tables)
+      Namespace: AWS/RDS
+      MetricName: FreeLocalStorage
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: WRITER
+      Statistic: Minimum
+      Period: 60
+      ComparisonOperator: LessThanThreshold
+      Threshold: !Ref RdsFreeLocalStorageThresholdBytes
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  RdsReaderFreeLocalStorageLowAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-reader-free-local-storage-low
+      AlarmDescription: DB reader FreeLocalStorage is running low (large sorts / temporary tables)
+      Namespace: AWS/RDS
+      MetricName: FreeLocalStorage
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: READER
+      Statistic: Minimum
+      Period: 60
+      ComparisonOperator: LessThanThreshold
+      Threshold: !Ref RdsFreeLocalStorageThresholdBytes
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
+
+  # レプリカ遅延: Writer が発行する「全 Reader の中で最大の遅延」(ミリ秒)。
+  # 読み取り専用トランザクションを Reader に送る設計(→ docs/adr/0016)は、遅延が普段小さいことを前提にしている。
+  # その前提が崩れたことに気づくためのアラーム。
+  #
+  # 【既知の衝突】フェーズ9 のシードは posts 100 万件などを Writer に一気に投入するので、ここが鳴るはず。
+  # スロークエリのアラームと同じく、閾値は緩めず通知を人が無視する運用にする。→ ADR-0010
+  RdsReplicaLagHighAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-replica-lag-high
+      AlarmDescription: Aurora replica lag is high (reads routed to readers may return stale data)
+      Namespace: AWS/RDS
+      MetricName: AuroraReplicaLagMaximum
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DbCluster
+        - Name: Role
+          Value: WRITER
+      Statistic: Maximum
+      Period: 60
+      ComparisonOperator: GreaterThanThreshold
+      Threshold: !Ref RdsReplicaLagThresholdMilliseconds
+      EvaluationPeriods: 5
+      DatapointsToAlarm: 5
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref RdsAlertsTopic
+      OKActions:
+        - !Ref RdsAlertsTopic
   # --- A': ElastiCache メトリクスアラーム 2 本 ----------------------------
   # ノード 1 台なので CacheClusterId は <ReplicationGroupId>-001 になる。
   # ReplicationGroup の戻り値にノード ID は含まれないので、命名規則から組み立てる。
@@ -2172,28 +2484,6 @@ Resources:
         - !Ref RedisAlertsTopic
       OKActions:
         - !Ref RedisAlertsTopic
-
-  RdsConnectionsHighAlarm:
-    Type: AWS::CloudWatch::Alarm
-    Properties:
-      AlarmName: !Sub ${ProjectName}-${EnvName}-rds-connections-high
-      AlarmDescription: RDS DatabaseConnections near max_connections (connection leak / pool exhaustion)
-      Namespace: AWS/RDS
-      MetricName: DatabaseConnections
-      Dimensions:
-        - Name: DBInstanceIdentifier
-          Value: !Ref Database
-      Statistic: Average
-      Period: 60
-      ComparisonOperator: GreaterThanThreshold
-      Threshold: !Ref RdsConnectionsThreshold
-      EvaluationPeriods: 5
-      DatapointsToAlarm: 5
-      TreatMissingData: notBreaching
-      AlarmActions:
-        - !Ref RdsAlertsTopic
-      OKActions:
-        - !Ref RdsAlertsTopic
 
   # --- B: RDS ログ由来のメトリクスとアラーム ------------------------------
   # 名前空間に EnvName を含めているのは、メトリクスフィルタの出力にディメンションが
@@ -2255,7 +2545,7 @@ Resources:
         - !Ref RdsAlertsTopic
 
   # スロークエリは 1 件ごとに通知するとアラート疲れを起こすので「5 分間に 5 件以上」の急増だけ拾う。
-  # どの SQL が遅いかは通知後に CloudWatch Logs Insights で見に行く(stg は Performance Insights 非対応)。
+  # どの SQL が遅いかは通知後に CloudWatch Logs Insights で見に行く(Performance Insights でも SQL ごとに見られる)。
   #
   # 【既知の衝突】フェーズ8(検索ラボ)とフェーズ10(index 実験)は、100 万件の posts に
   # index 無しのクエリを投げる実験なので、long_query_time=1 秒をまたぐクエリが連続して出る。
@@ -2279,26 +2569,54 @@ Resources:
       OKActions:
         - !Ref RdsAlertsTopic
 
-  # --- C: RDS イベント購読 -------------------------------------------------
-  # ログにもメトリクスにも出ない「RDS 自体のライフサイクル事象」を拾う。
+  # --- C: RDS イベント購読(クラスタ / インスタンスの 2 本) ------------------
+  # ログにもメトリクスにも出ない「DB 自体のライフサイクル事象」を拾う。
   # creation / deletion のカテゴリは購読していないので、建て直しのたびには飛ばない。
-  # configuration change は RDS の設定を変える cfn-apply のたびに自分にも通知が来るが、
+  # configuration change は DB の設定を変える cfn-apply のたびに自分にも通知が来るが、
   # 実務と同じ構成を維持する判断。
-  RdsEventSubscription:
+  #
+  # 【CloudWatch を経由しない】A・B のアラームは
+  #   A: RDS → CloudWatch メトリクス → アラーム(しきい値判定)→ SNS
+  #   B: RDS → CloudWatch Logs → メトリクスフィルタ → メトリクス → アラーム → SNS
+  # の経路だが、イベント購読は RDS の機能(RDS イベント通知)で、
+  #   RDS → SNS
+  # と直接 publish する。イベントは「起きたこと」そのものでしきい値判定が要らないため。
+  # (同じイベントは購読が無くても EventBridge のデフォルトバスにも流れるが、ここでは使っていない)
+  #
+  # 【2 本に分けている理由】1 つの購読が持てる SourceType は 1 種類だけで、
+  # Aurora のフェイルオーバーのイベント(RDS-EVENT-0071 など)は db-cluster 側にしか出ない。
+  # 一方、再起動や low storage はインスタンス側に出る。
+  RdsClusterEventSubscription:
     Type: AWS::RDS::EventSubscription
     Properties:
-      SubscriptionName: !Sub ${ProjectName}-${EnvName}-rds-events
+      SubscriptionName: !Sub ${ProjectName}-${EnvName}-rds-cluster-events
+      SnsTopicArn: !Ref RdsAlertsTopic
+      SourceType: db-cluster
+      SourceIds:
+        - !Ref DbCluster
+      Enabled: true
+      EventCategories:
+        - failover     # フェイルオーバーの開始・完了・失敗
+        - failure      # クラスタの障害
+        - maintenance  # エンジンのアップグレードなど
+
+  RdsInstanceEventSubscription:
+    Type: AWS::RDS::EventSubscription
+    Properties:
+      SubscriptionName: !Sub ${ProjectName}-${EnvName}-rds-instance-events
       SnsTopicArn: !Ref RdsAlertsTopic
       SourceType: db-instance
       SourceIds:
-        - !Ref Database
+        - !Ref DbInstance1
+        - !Ref DbInstance2
+        # Fn::If はリストの要素としても使えて、AWS::NoValue を返すと要素ごと消える(→ 学習メモ §8-3)
+        - !If [DbHasSecondReader, !Ref DbInstance3, !Ref AWS::NoValue]
       Enabled: true
       EventCategories:
         - availability          # 停止・再起動
         - configuration change  # DB 設定変更(ガバナンス用途)
-        - failover              # Multi-AZ フェイルオーバー
         - failure               # インスタンス障害
-        - low storage           # ストレージ残量逼迫
+        - low storage           # クラスタボリュームの残量逼迫もインスタンス側に出る(RDS-EVENT-0227)
         - maintenance           # メンテナンスウィンドウでの再起動等
 
   # ===========================================================================
@@ -2511,14 +2829,22 @@ Outputs:
     Description: db-task.yml が run-task するタスク定義の family(Flyway。最新 ACTIVE が使われる)
     Value: !Sub ${ProjectName}-${EnvName}-db-migrate
 
+  # buildspec.yml が taskdef.json / taskdef-migrate.json の DB_HOST に差し込む。
+  # クラスタエンドポイント = 常に Writer(フェイルオーバーすると新しい Writer に向き直る)
   DbEndpoint:
-    Value: !GetAtt Database.Endpoint.Address
+    Description: taskdef のプレースホルダに差し込む Writer(クラスタエンドポイント)
+    Value: !GetAtt DbCluster.Endpoint.Address
+
+  # buildspec.yml が DB_READER_HOST に差し込む。Reader のどれかに DNS で振り分けられる
+  DbReaderEndpoint:
+    Description: taskdef のプレースホルダに差し込む Reader エンドポイント
+    Value: !GetAtt DbCluster.ReadEndpoint.Address
 
   # buildspec.yml が taskdef.json / taskdef-migrate.json の DB_PORT に差し込む。
   # 実際には 3306 だが、他の値と同じく describe-stacks 一発で取れるようにしておく
   DbPort:
     Description: taskdef のプレースホルダに差し込む DB のポート
-    Value: !GetAtt Database.Endpoint.Port
+    Value: !GetAtt DbCluster.Endpoint.Port
 
   # buildspec.yml が taskdef.json / taskdef-migrate.json の REDIS_HOST / REDIS_PORT に差し込む。
   # クラスターモード無効なので PrimaryEndPoint(有効なら ConfigurationEndPoint)。
@@ -2532,7 +2858,7 @@ Outputs:
 
   DbMasterSecretArn:
     Description: RDS が作ったマスターパスワードのシークレット(手元から DB に入るときに読む)
-    Value: !GetAtt Database.MasterUserSecret.SecretArn
+    Value: !GetAtt DbCluster.MasterUserSecret.SecretArn
 
   ImageBucketName:
     Description: 撤収時に空にするバケット
