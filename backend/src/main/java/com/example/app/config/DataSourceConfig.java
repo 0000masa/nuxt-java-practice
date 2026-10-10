@@ -20,7 +20,7 @@ import com.zaxxer.hikari.HikariDataSource;
  * (→ docs/adr/0016-aurora-provisioned-with-read-write-split.md)。
  * 開発とテストは {@code DB_READER_HOST} を設定しないので、両方が同じ MySQL に繋がる。
  *
- * <p><b>振り分けているのは {@link LazyConnectionDataSourceProxy} だけ。</b>
+ * <p><b>Reader と Writer のどちらに繋ぐかを判断しているのは {@link LazyConnectionDataSourceProxy} だけ。</b>
  * トランザクションの開始時に Spring が {@code setReadOnly(true)} を呼んでも、このプロキシは実際の接続をまだ取らずに
  * 値を控えておき、最初の SQL を流す瞬間に「控えた値が true なら Reader、そうでなければ Writer」から接続を借りる
  * ({@code setReadOnlyDataSource} は Spring Framework 6.1.2 から)。

@@ -152,7 +152,10 @@ app:
         maximum-pool-size: ${DB_READER_POOL_SIZE:5} # 固定サイズにする理由は spring.datasource.hikari と同じ
         # LazyConnectionDataSourceProxy は Reader から借りた接続に setReadOnly(true) を呼ばないので、
         # プールの既定として読み取り専用にしておく。これが無いと、Reader が同じ MySQL を指す開発環境では
-        # 読み取り専用トランザクション内の書き込みが素通りし、振り分けの誤りに気づけない
+        # 読み取り専用トランザクション内の書き込みが素通りし、振り分けの誤りに気づけない。
+        # 仕組み: HikariCP がプールに入れる接続を作るたびに setReadOnly(true) を呼び、ドライバ(Connector/J)が
+        # MySQL に SET SESSION TRANSACTION READ ONLY を送る。以後その接続での書き込みは MySQL が
+        # ERROR 1792(Cannot execute statement in a READ ONLY transaction)で拒否する
         read-only: true
   # app.task(タスクモード)は<b>ここに書かない</b>。
   # 環境変数 APP_TASK だけで与える。ここに task: ${APP_TASK:} と書くと、未指定でも
