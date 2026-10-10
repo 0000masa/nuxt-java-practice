@@ -13,7 +13,7 @@ on:
       env:
         description: 対象環境
         type: choice
-        options: [stg]
+        options: [stg, prod]
         default: stg
       action:
         description: create-db-users(app / migrate ユーザーを作る) / migrate(Flyway) / sql(任意 SQL)

@@ -35,7 +35,7 @@ on:
       env:
         description: 対象環境
         type: choice
-        options: [stg]
+        options: [stg, prod]
         default: stg
       image_tag:
         description: ECR のイメージタグ(CodePipeline の Build ステージのログに出る短縮 SHA)
