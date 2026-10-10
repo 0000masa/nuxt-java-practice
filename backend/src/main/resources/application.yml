@@ -2,19 +2,32 @@ spring:
   application:
     name: app
   datasource:
+    # アプリの接続は Writer と Reader の 2 つのプールに分かれる(組み立ては config/DataSourceConfig → docs/adr/0016)。
+    # ここ(spring.datasource.*)が Writer。Reader は下の app.datasource.reader で、URL だけが違う。
     url: jdbc:mysql://${DB_HOST:localhost}:${DB_PORT:3306}/${DB_NAME:app}
     username: ${DB_USER:app}
     password: ${DB_PASSWORD:password}
+    hikari:
+      pool-name: writer
+      # 固定サイズのプールにする(minimum-idle を書かない = maximum-pool-size と同じ。HikariCP の推奨)。
+      # 起動した時点でこの本数を張り、使っていなくても持ち続ける。
+      # 値は Aurora の max_connections(db.t4g.medium は 90)から逆算する。Blue/Green デプロイ中は
+      # 旧タスクと新タスクが同時にプールを持つので、既定の 10 だと prod で上限を超える
+      # → docs/superpowers/specs/2026-09-13-phase19-aurora-design.md の決定9
+      maximum-pool-size: ${DB_WRITER_POOL_SIZE:5}
   flyway:
     # 開発は起動時にマイグレーションする(既定)。
     # AWS では ECS サービスを false にし、専用の Run Task(SPRING_MAIN_WEB_APPLICATION_TYPE=none)だけが
     # true で起動して DDL 権限を持つ migrate ユーザーで流す。理由 → docs/adr/0005
     enabled: ${FLYWAY_ENABLED:true}
+    # url を書くと、Flyway はアプリの DataSource を使わず、url / user / password から
+    # 非プールの DataSource を自分で作る(FlywayAutoConfiguration#getMigrationDataSource)。
+    # 書かないと、user が設定されているときアプリの DataSource から URL を引き継ごうとするが、
+    # アプリの DataSource は Writer / Reader を振り分けるプロキシ(config/DataSourceConfig)で URL を持っていない。
+    # DDL は Writer にしか通らないので、Writer の URL を明示する。
+    url: ${spring.datasource.url}
     # 接続に使うユーザーを datasource と別にできる。AWS では Run Task 側に migrate ユーザーを渡す。
     # 既定は datasource と同じ値なので、開発では接続先も接続ユーザーも変わらない。
-    # なお user が設定されていると、Spring は datasource の URL とドライバだけを引き継いだ
-    # 非プールの DataSource を Flyway 用に作る(FlywayAutoConfiguration#getMigrationDataSource)。
-    # datasource の Hikari プールがそのまま使われるのは user が未設定のときだけ。
     user: ${FLYWAY_DB_USER:${DB_USER:app}}
     password: ${FLYWAY_DB_PASSWORD:${DB_PASSWORD:password}}
   jpa:
@@ -127,6 +140,20 @@ app:
     from: ${MAIL_FROM:no-reply@example.com}
     # smtp(開発の Mailpit)か ses(本番)。実体の切り替えは config/MailSenderConfig
     transport: ${MAIL_TRANSPORT:smtp}
+  # Reader 用の接続プール(config/DataSourceConfig が読む。AppProperties には入れていない)。
+  # ユーザーとパスワードは spring.datasource と同じで、URL だけが違う。
+  datasource:
+    reader:
+      # 本番は Aurora の Reader エンドポイント(taskdef が DB_READER_HOST を渡す)。
+      # 開発とテストは DB_READER_HOST を設定しないので DB_HOST と同じ MySQL に繋ぐ
+      url: jdbc:mysql://${DB_READER_HOST:${DB_HOST:localhost}}:${DB_PORT:3306}/${DB_NAME:app}
+      hikari:
+        pool-name: reader
+        maximum-pool-size: ${DB_READER_POOL_SIZE:5} # 固定サイズにする理由は spring.datasource.hikari と同じ
+        # LazyConnectionDataSourceProxy は Reader から借りた接続に setReadOnly(true) を呼ばないので、
+        # プールの既定として読み取り専用にしておく。これが無いと、Reader が同じ MySQL を指す開発環境では
+        # 読み取り専用トランザクション内の書き込みが素通りし、振り分けの誤りに気づけない
+        read-only: true
   # app.task(タスクモード)は<b>ここに書かない</b>。
   # 環境変数 APP_TASK だけで与える。ここに task: ${APP_TASK:} と書くと、未指定でも
   # 「空文字のプロパティが存在する」状態になり、config/TaskRunner の

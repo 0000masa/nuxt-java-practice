@@ -59,11 +59,13 @@ Spring Boot 3.0 以降、Spring Session Redis の既定実装は `RedisSessionRe
   設定・ドキュメント・テストがすべて二重になり、**どちらの構成も"本物"にならない**と判断した
 - **ElastiCache Serverless** — 運用は一番楽だが、**パラメータグループを持てない**ため
   `notify-keyspace-events` を有効化できず、`indexed` の索引掃除が成立しない。
-  加えて最小構成でも月 $90 前後かかり、**使い終わったら撤収する運用**と噛み合わない
+  料金はエンジン次第で、Redis OSS は最低計測量 1 GB のため時間単価がノード指定型(`cache.t4g.micro`)の約 6 倍、
+  Valkey は最低 100 MB でむしろ安い。**却下の決め手は料金ではなく通知の設定ができないこと**
+  (単価の比較 → `docs/notes/redis/elasticache.md` §2)
 - **Valkey** — ElastiCache では Redis OSS が 7.1 で止まっている一方 Valkey は 8.x が使え、
   料金も約 20% 安い。それでも採らなかったのは、**リポジトリ全体で Redis と Valkey の用語が割れる**ため。
   `docs/notes/redis/` というフォルダ名から `spring.data.redis.*` まで、学習対象の名前は 1 つに揃えたい。
-  料金差は `cache.t4g.micro` では月 $2〜3 で、判断材料にならない
+  料金差は `cache.t4g.micro` では月 $4 弱で、判断材料にならない
 - **IAM 認証(RBAC + `AuthenticationMode: iam`)** — パスワードを置かずに済む最も新しい方式。
   ただし **Lettuce は IAM トークンの生成に対応しておらず**、15 分で失効するトークンを再発行する
   `RedisCredentialsProvider` を自作する必要がある。学習の本筋から外れるので見送った
