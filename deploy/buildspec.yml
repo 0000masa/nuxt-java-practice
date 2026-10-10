@@ -169,9 +169,12 @@ phases:
             -e "s|__IMAGE__|${IMAGE_URI}|g" \
             -e "s|__DB_HOST__|$(out DbEndpoint)|g" \
             -e "s|__DB_PORT__|$(out DbPort)|g" \
+            -e "s|__DB_READER_HOST__|$(out DbReaderEndpoint)|g" \
             -e "s|__DB_NAME__|$(param DbName)|g" \
             -e "s|__DB_APP_USER__|$(param DbAppUsername)|g" \
             -e "s|__DB_MIGRATE_USER__|$(param DbMigrateUsername)|g" \
+            -e "s|__DB_WRITER_POOL_SIZE__|$(param DbWriterPoolSize)|g" \
+            -e "s|__DB_READER_POOL_SIZE__|$(param DbReaderPoolSize)|g" \
             -e "s|__APP_BASE_URL__|$(out AppUrl)|g" \
             -e "s|__MAIL_FROM__|no-reply@${SES_IDENTITY}|g" \
             -e "s|__S3_BUCKET__|$(out ImageBucketName)|g" \
