@@ -27,7 +27,8 @@
 | 16 | Code 系デプロイ | アプリのデプロイを CodePipeline + CodeBuild + CodeDeploy に移す(ECS を CODE_DEPLOY 制御に、taskdef/appspec を Git に、Slack 承認を Chatbot で)。**設計 → [2026-09-05-phase16-codepipeline-design.md](../superpowers/specs/2026-09-05-phase16-codepipeline-design.md)**、方針 → [ADR-0012](../adr/0012-deploy-method-per-branch.md) / [ADR-0013](../adr/0013-app-deploy-with-code-services.md) | 完了 |
 | 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 完了 |
 | 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 完了 |
-| 19 | DB を Aurora へ | RDS for MySQL を Aurora MySQL 8.4(プロビジョンド。stg: Writer 1 + Reader 1 / prod: Writer 1 + Reader 2)に置き換え、`@Transactional(readOnly = true)` を Reader に送る読み書き分離を入れる(認証の読み取りだけ Writer に固定)。あわせて Hikari のプールの大きさを明示、アラームを役割単位に組み直し、`cfn-apply.yml` のガードに `Remove` を追加(`allow_replacement` → `allow_destructive_changes`)。**設計 → [2026-09-13-phase19-aurora-design.md](../superpowers/specs/2026-09-13-phase19-aurora-design.md)**、方針 → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) | 作業中 |
+| 19 | DB を Aurora へ | RDS for MySQL を Aurora MySQL 8.4(プロビジョンド。stg: Writer 1 + Reader 1 / prod: Writer 1 + Reader 2)に置き換え、`@Transactional(readOnly = true)` を Reader に送る読み書き分離を入れる(認証の読み取りだけ Writer に固定)。あわせて Hikari のプールの大きさを明示、アラームを役割単位に組み直し、`cfn-apply.yml` のガードに `Remove` を追加(`allow_replacement` → `allow_destructive_changes`)。**設計 → [2026-09-13-phase19-aurora-design.md](../superpowers/specs/2026-09-13-phase19-aurora-design.md)**、方針 → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) | 完了 |
+| 20 | 認証メールを SQS 経由に | 認証メールの送信を、SQS 経由で別の ECS サービス(ワーカー。同じイメージを `app.role=worker` で起動)に移す。トークンの発行もワーカーで行い、メッセージに秘密を載せない。冪等キー(`processed_messages`)、DLQ と滞留のアラーム、ローカルは ElasticMQ + `worker` コンテナ。**設計 → [2026-10-11-phase20-sqs-auth-mail-design.md](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)**、方針 → [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) | 未着手 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -39,6 +40,17 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ20 を設計した(実装未着手)**(2026-10-11):
+  - **決めたこと 22 項目は[設計書](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)に、なぜトークンの発行までワーカーに移すかは [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) に。**
+    会社の「片方の ECS サービスが SQS に入れ、もう片方が取り出して処理する」構成を建てて理解するのが目的
+  - **設計中に見つけた穴**: トークンの発行をワーカーに移すと、「リセットを申請 → パスワードを変更 → ワーカーが発行」の順で
+    パスワード変更による失効をすり抜けたリンクが届く。→ `users.password_changed_at` を足して塞ぐ(設計書 決定11)
+  - **実装の最初に確かめること**: Gradle 2 つの同居(決定20)/ Web を立てないときの自動設定(決定2)/
+    ECS の標準デプロイのアクションと Git 管理のタスク定義の関係(3-9)
+
+- **フェーズ19 を完了にした**(2026-10-11):
+  - ユーザーからの申告で完了とした。**stg で確かめた内容(パラメータグループのファミリー名 `aurora-mysql8.4` の正否、設計書 §7 の各項目)はこのファイルに未記録**
 
 - **フェーズ19 を実装した(ローカル確認済み・AWS 未検証)**(2026-09-13):
   - **① ガード**: `cfn-apply.yml` が `Action: Remove` も全リソース対象で止めるようにし、入力を `allow_destructive_changes` に改名。
