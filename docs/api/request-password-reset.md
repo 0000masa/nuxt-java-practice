@@ -54,6 +54,13 @@
 1. `AuthController.requestPasswordReset()` — `com/example/app/auth/AuthController.java`
 2. `AuthService.requestPasswordReset()` — `com/example/app/auth/AuthService.java`
    メールアドレスで users を引く(無ければ 400)→ 未確認なら 400
-3. `AuthTokenService.issue()` — `com/example/app/auth/AuthTokenService.java`
-   `PASSWORD_RESET` 用途のトークンを発行(DB には SHA-256 ハッシュのみ)
-4. `AuthMailRequestedEvent` の発行 → コミット後に `AuthMailSender` が `{APP_BASE_URL}/password-reset/confirm?token=...` を載せたメールを送る
+3. `AuthService` が `AuthMailRequestedEvent` を発行
+   **メール送信はここでは行わない。** 依頼(`requestId` / `userId` / `purpose` / `requestedAt`)をイベントとして発行するだけ
+4. `AuthMailEnqueuer` — `com/example/app/auth/AuthMailEnqueuer.java`
+   **トランザクションのコミット後**に、依頼を JSON にして SQS(開発は ElasticMQ)へ送る。レスポンスはここで返る
+5. (別サービスのワーカー)`AuthMailWorker.process()` — `com/example/app/auth/AuthMailWorker.java`
+   処理済みの依頼なら何もしない → 処理する時点の状態を確かめ直す(確認済みか、**依頼の後にパスワードが変更されていないか**。変更されていれば送らない) → `AuthTokenService.issue()` で古い未使用トークンを失効させて新しいトークンを発行(DB には SHA-256 ハッシュのみ)→ `AuthMailSender` がメールを送る
+
+トークンの発行とメール送信をワーカーに任せている理由は [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md)。
+レスポンスが返った時点では、まだメールは送られていない(ワーカーが止まっていれば、戻るまでキューで待つ)。
+メールには `{APP_BASE_URL}/password-reset/confirm?token=...` が載る。

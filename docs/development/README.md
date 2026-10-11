@@ -16,6 +16,8 @@ flowchart LR
         Insight[redisinsight<br/>GUI :5540]
         Minio[(minio<br/>S3互換<br/>:9000 / UI :9001)]
         Mail[mailpit<br/>SMTP :1025<br/>UI :8025]
+        Mq[(elasticmq<br/>SQS互換<br/>:9324)]
+        Worker[worker<br/>Spring Boot<br/>APP_ROLE=worker]
     end
 
     Browser -->|http://localhost:3000| Nuxt
@@ -23,7 +25,10 @@ flowchart LR
     App --> DB
     App -->|セッション| Redis
     App -->|画像保存 S3 API| Minio
-    App -->|SMTP| Mail
+    App -->|認証メールの依頼| Mq
+    Worker -->|受信| Mq
+    Worker --> DB
+    Worker -->|SMTP| Mail
     Insight --> Redis
     Browser -.Redis GUI :5540.-> Insight
     Browser -.MinIO管理画面 :9001.-> Minio
@@ -45,14 +50,18 @@ flowchart LR
 | minio | minio/minio | 9000 (API) / 9001 (管理UI) | S3 互換の画像保存 | S3 + CloudFront |
 | minio-init | minio/mc | - | 起動時に `images` バケットを自動作成して終了する一発ジョブ(`--ignore-existing` で冪等) | - |
 | mailpit | axllent/mailpit | 1025 (SMTP) / 8025 (Web UI) | メールの受信・確認 | SES |
+| elasticmq | softwaremill/elasticmq-native | 9324 | SQS 互換のキュー。キュー(`auth-mail` / DLQ / テスト用の `auth-mail-test`)は `docker/elasticmq/elasticmq.conf` で起動時に作られる。**画面は無い**ので中身は AWS CLI で見る | SQS |
+| worker | Java 21(backend と同じ Dockerfile) | - | 認証メールのワーカー。backend と同じソースを `APP_ROLE=worker` で動かし、キューから受け取ってメールを送る(→ [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md)) | ECS Fargate(Web とは別のサービス) |
 
 Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docker/backend/`)、`docker-compose.yml` はリポジトリ直下に置く。開発用 Dockerfile は「実行環境(Node / JDK)だけ」を持ち、ソースコードは volumes でマウントする方式。本番用 Dockerfile は AWS 構築時に別途作成する。
 
 ### 永続化と環境変数
 
-- MySQL(`mysql-data`)、MinIO(`minio-data`)、Redis(`redis-data`)、RedisInsight の設定(`redisinsight-data`)、Gradle キャッシュ(`gradle-cache`)は named volume で永続化。`docker compose down` してもデータは残る
+- MySQL(`mysql-data`)、MinIO(`minio-data`)、Redis(`redis-data`)、RedisInsight の設定(`redisinsight-data`)、Gradle キャッシュ(`gradle-cache`、worker 用の `gradle-cache-worker`)は named volume で永続化。`docker compose down` してもデータは残る
   - **Redis は AOF(`--appendonly yes`)で永続化している。** 本番の ElastiCache は逆にスナップショットを取らない設定なので、**ローカルのほうが手厚い**。開発中に毎回ログインし直さずに済むことを優先した(→ [ADR-0015](../adr/0015-session-store-on-redis.md))。「落ちたら消える」を体験したいときは `docker compose exec redis redis-cli FLUSHALL`
   - `redis-test` には volume を付けない(テストのデータは残さない)
+  - **worker の Gradle キャッシュは backend と分けている。** 共有すると、別コンテナの Gradle がロックを持っているときに互いに調整できず、`Timeout waiting to lock journal cache` で起動に失敗する(実測)。プロジェクト側のキャッシュも `--project-cache-dir` で分けている
+  - **elasticmq はキューの中身を永続化しない。** 再起動すると溜まっていたメッセージは消える
 - 環境変数は**リポジトリ直下の `.env` で一元管理**する(`.env` は gitignore、テンプレートの `.env.example` をコミット)。1枚のファイルを二役で使う:
   - **backend**: `env_file: .env` で全変数を丸ごと注入。**変数が増えても `.env` に追記するだけ**で compose の変更は不要
   - **mysql / minio / minio-init**: 公式イメージが決めた変数名(`MYSQL_USER` など)しか受け取れないため、compose 内の `${...}` 展開で必要な値だけマッピング(compose はリポジトリ直下の `.env` を自動で読む)

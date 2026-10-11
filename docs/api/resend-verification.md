@@ -35,7 +35,7 @@
 
 ## 古いリンクは無効になる
 
-新しいトークンを発行するとき、**同じ用途の未使用トークンはすべて使用済みにする**。有効なリンクが同時に複数存在しないようにするため、再送すると前回のメールのリンクは使えなくなる。
+新しいトークンを発行するとき(ワーカーが依頼を処理するとき)、**同じ用途の未使用トークンはすべて使用済みにする**。有効なリンクが同時に複数存在しないようにするため、再送すると前回のメールのリンクは使えなくなる。
 
 ## 呼び出される画面
 
@@ -47,6 +47,12 @@
 1. `AuthController.resendVerification()` — `com/example/app/auth/AuthController.java`
 2. `AuthService.resendVerification()` — `com/example/app/auth/AuthService.java`
    メールアドレスで users を引く(無ければ 400)→ 確認済みなら 400
-3. `AuthTokenService.issue()` — `com/example/app/auth/AuthTokenService.java`
-   古い未使用トークンを無効化してから新しいトークンを発行
-4. `AuthMailRequestedEvent` の発行 → コミット後に `AuthMailSender` が送信
+3. `AuthService` が `AuthMailRequestedEvent` を発行
+   **メール送信はここでは行わない。** 依頼(`requestId` / `userId` / `purpose` / `requestedAt`)をイベントとして発行するだけ
+4. `AuthMailEnqueuer` — `com/example/app/auth/AuthMailEnqueuer.java`
+   **トランザクションのコミット後**に、依頼を JSON にして SQS(開発は ElasticMQ)へ送る。レスポンスはここで返る
+5. (別サービスのワーカー)`AuthMailWorker.process()` — `com/example/app/auth/AuthMailWorker.java`
+   処理済みの依頼なら何もしない → 処理する時点の状態を確かめ直す(未確認のままか) → `AuthTokenService.issue()` で古い未使用トークンを失効させて新しいトークンを発行(DB には SHA-256 ハッシュのみ)→ `AuthMailSender` がメールを送る
+
+トークンの発行とメール送信をワーカーに任せている理由は [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md)。
+レスポンスが返った時点では、まだメールは送られていない(ワーカーが止まっていれば、戻るまでキューで待つ)。

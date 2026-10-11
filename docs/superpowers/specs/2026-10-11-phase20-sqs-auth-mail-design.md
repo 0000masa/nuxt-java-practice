@@ -1,7 +1,7 @@
 # フェーズ20: 認証メールを SQS 経由でワーカーサービスに送らせる
 
 日付: 2026-10-11
-ステータス: 設計済み・実装未着手
+ステータス: アプリ実装済み(ローカルで確認 2026-10-11)・インフラ未着手
 
 方針 → [ADR-0017](../../adr/0017-auth-mail-via-sqs-worker.md)。
 フェーズ3 の[設計の決定7](./2026-08-05-phase3-auth-design.md)(メールはコミット後に同じスレッドで同期送信する)を置き換える。
@@ -341,6 +341,34 @@ ADR-0017 で、フェーズ3 の設計の決定7 を置き換えたことを明�
 - 学習ノート(新規)— §7 の観察の手順と結果
 
 過去のフェーズの設計書(フェーズ3 など)は当時の記録なので書き換えない。
+
+## 5-3. 実装で確定したこと(設計から動いた点)
+
+ローカルの実装(§6 の 1・2)で分かったこと。
+
+- **ワーカーでも Web サーバーは立てる(決定2 を変更)。** `SPRING_MAIN_WEB_APPLICATION_TYPE=none` にすると Spring Session が初期化されず、
+  `UserSessionManager` が解決できずに起動に失敗する。`TaskRunner` が Web サーバーを立てているのと同じ理由。
+  **帰結として、ワーカーにも Redis の接続情報と、ElastiCache への通信の許可が要る。** 8080 番は開くが ALB に登録しないので外から届かない
+- **Gradle のキャッシュは backend と worker で分ける(決定20 の要検証が確定)。** 共有すると `Timeout waiting to lock journal cache` で起動に失敗する。
+  `gradle-cache-worker` の volume と `--project-cache-dir` で分けた。`build/` は共有のままで問題は出ていない
+- **`stopTimeout` は 30 秒では足りない可能性がある(決定12 を変更)。** SDK の同期クライアントはソケットの読み取り中だと割り込みで抜けられないことがあり、
+  ロングポーリング(最大 20 秒)の最中に止められると、応答が返るまで待つ。受信ループは最大 25 秒待つので、
+  **ワーカーのタスク定義では `stopTimeout` を 60 秒にする**(Fargate の上限は 120 秒)
+- **ローカルでは SIGTERM での止まり方を観察できない。** `gradlew bootRun` 経由だと SIGTERM を受けるのが Gradle で、アプリの JVM はシャットダウン処理を通らない。
+  止まり方は `SqsReceiveLoopTest` で確かめ、本物の SIGTERM は stg で見る
+- **ElasticMQ(`elasticmq-native` 1.7.1)には画面が無い。** 中身は AWS CLI で見る(→ [local-observation.md](../../notes/sqs/local-observation.md))
+- **ワーカーの Reader のプールは開かれない。** `DataSourceConfig` は Reader のプールも作るが、HikariCP は最初に接続を求められるまでプールを開かない。
+  ワーカーは読み取り専用のトランザクションを使わないので、ログ上も Writer の 2 本だけだった(決定18 はコードを変えずに満たせた)
+- **処理済みの記録は、処理の最初に INSERT する。** 先に `existsById` で重複を見て、無ければ `saveAndFlush` で INSERT してから本処理に入る。
+  同時に 2 つのワーカーが同じ依頼を受けた場合、後の側は主キーのロックで待たされて重複で失敗する(主キーが「処理中」の鍵を兼ねる)。
+  エンティティは `Persistable#isNew` を常に true にし、`save` が merge(SELECT → INSERT)にならないようにした
+- **`password_changed_at` は `User#setPasswordHash` の中で更新する。** 会員登録・変更・リセットのどの経路でも付け忘れないため。会員登録でも入るが、リセットは確認済みのユーザーにしか許さないので判断に影響しない
+- **`requestedAt` は `Instant`(UTC)、`password_changed_at` は既存の列と同じ `LocalDateTime`。** 比べるときは JVM の既定のタイムゾーンで `Instant` に直す。Web とワーカーは同じイメージなので既定のタイムゾーンも同じ
+- **Web 側の送信は、`SdkException` に限らず `RuntimeException` を全部捕まえる。** コミット後に例外が漏れると、登録済みなのに利用者へ 500 が返るため
+- **外部への通信のタイムアウト**: SQS は 1 回の呼び出し 30 秒(試行ごとに 25 秒)、SES は 20 秒(試行ごとに 10 秒)、SMTP(Mailpit)は接続 5 秒・読み書き 10 秒、
+  ワーカーのトランザクションは 30 秒(`@Transactional(timeout = 30)`)
+- **確認したこと**: テスト 62 本がすべて成功(追加 13 本: `AuthMailWorkerTest` 7、`AuthMailEnqueuerTest` 2、`SqsReceiveLoopTest` 4)/
+  §7 のローカルの項目のうち、溜まる → 流れる、重複で 1 通、DLQ への移動、レスポンスが SMTP を待たない(約 0.1 秒)を観察した(→ [local-observation.md](../../notes/sqs/local-observation.md))
 
 ## 6. 実装順序
 

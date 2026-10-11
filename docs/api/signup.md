@@ -75,15 +75,22 @@
    `@Valid` で `SignupRequest` のバリデーションを実行(違反時はここで 400)
 2. `AuthService.signup()` — `com/example/app/auth/AuthService.java`
    メールアドレスと username の重複を判定 → 未確認なら既存行を削除 → パスワードをハッシュ化して users に INSERT
-3. `AuthTokenService.issue()` — `com/example/app/auth/AuthTokenService.java`
-   `SecureRandom` で 32 バイトのトークンを作り、**SHA-256 ハッシュだけを** auth_tokens に保存。生の値を戻り値で返す
-4. `AuthService` が `AuthMailRequestedEvent` を発行 → **トランザクションのコミット後**に `AuthMailSender` が送信
+3. `AuthService` が `AuthMailRequestedEvent` を発行
+   **メール送信はここでは行わない。** 依頼(`requestId` / `userId` / `purpose` / `requestedAt`)をイベントとして発行するだけ
+4. `AuthMailEnqueuer` — `com/example/app/auth/AuthMailEnqueuer.java`
+   **トランザクションのコミット後**に、依頼を JSON にして SQS(開発は ElasticMQ)へ送る。レスポンスはここで返る
+5. (別サービスのワーカー)`AuthMailWorker.process()` — `com/example/app/auth/AuthMailWorker.java`
+   処理済みの依頼なら何もしない → 処理する時点の状態を確かめ直す(未確認のままか) → `AuthTokenService.issue()` で古い未使用トークンを失効させて新しいトークンを発行(DB には SHA-256 ハッシュのみ)→ `AuthMailSender` がメールを送る
 
-メール送信をコミット後に回しているのは、DB トランザクションを SMTP の往復時間だけ開けたままにしないため、かつメールサーバー障害で登録自体が失敗しないようにするため。逆に「登録はできたがメールが届かない」は起こり得るので、[確認メールの再送](./resend-verification.md)で救う。
+トークンの発行とメール送信をワーカーに任せている理由は [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md)。
+レスポンスが返った時点では、まだメールは送られていない(ワーカーが止まっていれば、戻るまでキューで待つ)。
+
+送信の依頼をコミット後に回しているのは、まだコミットされていないユーザーをワーカーが読みに行かないようにするため、かつロールバックしたのに依頼だけが残らないようにするため。逆に「登録はできたが依頼を送れなかった」は起こり得るので、[確認メールの再送](./resend-verification.md)で救う。
 
 登場するその他のファイル:
 
 - リクエストボディ定義: `com/example/app/auth/dto/SignupRequest.java`
 - パスワードのハッシュ化: `com/example/app/config/SecurityConfig.java`(`PasswordEncoder`。`{bcrypt}` プレフィックス付きで保存される)
-- メール本文とリンクの組み立て: `com/example/app/auth/AuthMailSender.java`
+- メール本文とリンクの組み立て: `com/example/app/auth/AuthMailSender.java`(ワーカーが呼ぶ)
+- 受信ループ: `com/example/app/common/queue/SqsReceiveLoop.java`、ワーカーとしての起動: `com/example/app/auth/AuthMailQueueConfig.java`
 - 400 変換: `com/example/app/common/exception/FieldValidationException.java`、`GlobalExceptionHandler.java`
