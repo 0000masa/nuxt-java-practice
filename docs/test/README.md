@@ -2,7 +2,8 @@
 
 バックエンドのテストは **backend コンテナの中で実行**し、
 DB は開発 DB(`app`)ではなく**テスト専用の database `app_test`**、
-セッションの Redis は開発用ではなく**テスト専用コンテナ `redis-test`** を使う。
+セッションの Redis は開発用ではなく**テスト専用コンテナ `redis-test`**、
+キュー(ElasticMQ)は開発用の `auth-mail` ではなく**テスト専用キュー `auth-mail-test`** を使う。
 
 - ホストに JDK を置かない方針なので、実行は常に `docker compose exec backend` 経由
 - **本物の MySQL 8 / Redis 7 を使う**(インメモリ DB には差し替えない)
@@ -14,6 +15,7 @@ DB は開発 DB(`app`)ではなく**テスト専用の database `app_test`**、
 tasks.named('test') {
     environment 'DB_NAME', 'app_test'      // MySQL は同じコンテナで database を分ける
     environment 'REDIS_HOST', 'redis-test' // Redis はコンテナごと分ける
+    environment 'SQS_AUTH_MAIL_QUEUE_URL', 'http://elasticmq:9324/000000000000/auth-mail-test' // キューは同じ ElasticMQ で名前を分ける
 }
 ```
 
@@ -32,6 +34,9 @@ database を分けるほうが安い。**コストの釣り合う場所が違っ
 
 なお `redis-test` には **永続化を付けていない**(volume なし)。
 テスト間でセッションが残る必要はなく、残ると原因の分かりにくい相互依存を生むため。
+
+キューを分けるのは、**開発中の worker が動いていても、テストが送ったメッセージを横取りさせない**ため。
+ElasticMQ は MySQL と同じく「同じコンテナで名前を分ける」方式にした。キュー 1 つは設定ファイルに数行足すだけで済むので、コンテナを増やすほどではない。
 
 テストの仕組みそのもの(`@SpringBootTest` / `@WebMvcTest` / `@DataJpaTest` の違い、Flyway との関係)は学習メモ → [docs/notes/java/spring/testing-and-test-database.md](../notes/java/spring/testing-and-test-database.md)
 
@@ -183,14 +188,17 @@ tasks.named('test') {
 | `PostRepositoryTest` | `@DataJpaTest` | 使う | 6 | カーソルページネーションの境界条件、新規保存で id / created_at が埋まり DB に行が入ること |
 | `AuthTokenServiceTest` | `@DataJpaTest` | 使う | 7 | 使い捨てトークンの境界(期限切れ・使用済み・用途違い・ハッシュ保存・再発行での無効化) |
 | `AuthControllerTest` | `@WebMvcTest` | **不要** | 7 | 認証 API の入力チェックと `fieldErrors`、`/api/auth/me` が未ログインでも 200、パスワード変更が認可で弾かれること |
-| `AuthFlowTest` | `@SpringBootTest` | 使う | 3 | 登録 → 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと、Google ログインの入口が Google へ 302 すること |
+| `AuthFlowTest` | `@SpringBootTest` | 使う | 3 | 登録 → (キューに送られた依頼をワーカーが処理)→ 未確認ではログイン不可 → メール確認 → ログイン成功の一連、未ログインでは投稿できないこと、Google ログインの入口が Google へ 302 すること。SQS はモック |
+| `AuthMailWorkerTest` | `@SpringBootTest` | 使う | 7 | 認証メールのワーカーの判断(送る / 重複配信は何もしない / 確認済み・ユーザーがいない・依頼後にパスワードが変わったら送らない / 送信に失敗したら処理済みの記録もロールバックされ、再配信でやり直せる)→ [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) |
+| `AuthMailEnqueuerTest` | `@SpringBootTest` | 使う | 2 | 認証メールの依頼がコミットの後にだけキューへ送られること(ロールバックでは送られない)、本文に秘密が載らないこと |
+| `SqsReceiveLoopTest` | 素の JUnit + **ElasticMQ** | **不要** | 4 | 受信ループ(成功したら削除 / 失敗したら削除しない / 処理中の 1 件を終えてから止まる / 受信スレッドが想定外に終わったら後始末を呼ぶ)。テスト用キュー `auth-mail-test` を使う |
 | `ReadWriteRoutingTest` | `@SpringBootTest` | 使う | 3 | 読み書きの振り分け(`readOnly` のトランザクションは Reader のプール、それ以外は Writer のプールから接続を借りること)と、読み取り専用トランザクション内の書き込みが開発環境でもエラーになること(Reader のプールの `read-only` 設定が効いていること)→ [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) |
 | `GoogleAccountServiceTest` | `@DataJpaTest` | 使う | 6 | Google ログインの分岐(既存ユーザーの特定・アカウントリンク・未確認アカウントの作り直し・新規作成の初期値・未確認メールの拒否・メール変更を取り込まないこと) |
 | `UsernameGeneratorTest` | `@DataJpaTest` | 使う | 3 | Google 由来ユーザーの username 生成(文字種の変換・衝突時の連番・使える文字が無いときの代替) |
 | `AppOidcUserTest` | 素の JUnit | **不要** | 1 | `getName()` がメールアドレスを返すこと(セッション無効化がメールを鍵に引くため) |
 | `AppOidcUserServiceTest` | 素の JUnit + Mockito | **不要** | 4 | Google のクレームをアプリの言葉に翻訳する部分(`email_verified` の 3 値変換・拒否の `OAuth2AuthenticationException` への翻訳・principal の組み立て) |
 
-合計 49 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` / `AppOidcUserServiceTest` は DB を使わない。
+合計 62 本。`@WebMvcTest` の 15 本と `AppOidcUserTest` / `AppOidcUserServiceTest` / `SqsReceiveLoopTest` は DB を使わない。
 
 `AppOidcUserTest` の 1 本は他より重要度が高い。ここが OIDC の既定(`sub`)のままでも画面上は何も壊れず、「パスワードをリセットしたのに Google ログインのセッションだけ生き残る」という形でしか露見しないため、手で気づくのがほぼ不可能。
 
