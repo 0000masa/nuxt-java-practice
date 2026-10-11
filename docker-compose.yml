@@ -27,6 +27,36 @@ services:
         condition: service_healthy # MySQL が応答できるようになってから起動する
       redis:
         condition: service_healthy # Spring Session(indexed)は起動時にキースペース通知を購読しに行くので、待たないと起動に失敗する
+      elasticmq:
+        condition: service_started # 認証メールの依頼を送る先
+
+  # 認証メールのワーカー。backend と同じソースを、役割だけ変えて動かす(APP_ROLE=worker)。
+  # 本番の ECS で 2 つのサービスに分けるのと同じ形にして、ワーカーだけを止める・戻すを試せるようにしている
+  # (docker compose stop worker → 登録しても届かず、キューに溜まる → start で流れる)。
+  # → docs/superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md の決定20
+  worker:
+    build: ./docker/backend
+    volumes:
+      - ./backend:/app
+      # Gradle のキャッシュは backend と分ける。共有すると、ロックを持つ相手(別コンテナの Gradle)と
+      # localhost 越しに調整できず、「Timeout waiting to lock journal cache」で起動に失敗する(実測)
+      - gradle-cache-worker:/root/.gradle
+    # プロジェクト側のキャッシュ(/app/.gradle)も backend と分ける。理由は上と同じ
+    command: ["sh", "./gradlew", "bootRun", "--project-cache-dir", "/tmp/gradle-project-cache"]
+    # ポートは公開しない。本番のワーカーも ALB に繋がず、外から HTTP を受けない
+    env_file:
+      - .env
+    environment:
+      APP_ROLE: worker
+      # マイグレーションは backend が流す。本番も ECS サービスは Flyway を走らせない
+      FLYWAY_ENABLED: "false"
+      # 受信スレッドは 1 本なので、Writer の接続は 2 本で足りる(決定18)
+      DB_WRITER_POOL_SIZE: "2"
+    depends_on:
+      backend:
+        condition: service_started # Flyway(backend が流す)より先に読みに行かないよう、backend の後に起動する
+      elasticmq:
+        condition: service_started
 
   mysql:
     image: mysql:8
@@ -124,9 +154,20 @@ services:
       - "1025:1025" # SMTP(アプリからの送信先)
       - "8025:8025" # Web UI(ブラウザで http://localhost:8025)
 
+  # SQS の代わり(本番は Amazon SQS)。キューは起動時に設定ファイルから作られる → docker/elasticmq/elasticmq.conf
+  # 中身はホストから AWS CLI で覗ける(例: aws --endpoint-url http://localhost:9324 sqs receive-message ...)
+  # 手順 → docs/notes/sqs/local-observation.md
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.7.1
+    volumes:
+      - ./docker/elasticmq/elasticmq.conf:/opt/elasticmq.conf:ro
+    ports:
+      - "9324:9324" # SQS 互換 API
+
 volumes:
   mysql-data:
   minio-data:
   redis-data: # Redis の AOF。redis-test には付けない(テストのデータは残さない)
   redisinsight-data: # GUI に登録した接続先の設定
   gradle-cache:
+  gradle-cache-worker: # worker 用。backend と共有するとロックがぶつかる(worker のコメント参照)

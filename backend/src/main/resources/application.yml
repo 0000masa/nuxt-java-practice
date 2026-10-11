@@ -98,6 +98,12 @@ spring:
   mail:
     host: ${SMTP_HOST:localhost} # 開発は Mailpit、本番は SES
     port: ${SMTP_PORT:1025}
+    # SMTP(開発の Mailpit)のタイムアウト(ミリ秒)。JavaMail の既定は無限で、応答が無いと認証メールの
+    # ワーカーの受信スレッドが止まり続ける(フェーズ20 の決定13)。本番の SES は SDK 側で設定している
+    properties:
+      mail.smtp.connectiontimeout: 5000
+      mail.smtp.timeout: 10000
+      mail.smtp.writetimeout: 10000
 server:
   port: 8080
 management:
@@ -157,6 +163,17 @@ app:
         # MySQL に SET SESSION TRANSACTION READ ONLY を送る。以後その接続での書き込みは MySQL が
         # ERROR 1792(Cannot execute statement in a READ ONLY transaction)で拒否する
         read-only: true
+  # このプロセスの役割(web / worker)。同じイメージを ECS の 2 つのサービスで使い分ける。
+  # worker のときだけ認証メールのキューを受け取る(auth/AuthMailQueueConfig)。
+  # 綴りは起動時に検査される(config/AppProperties が enum で受け取る)
+  # → docs/superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md の決定2
+  role: ${APP_ROLE:web}
+  sqs:
+    # 開発とテストは ElasticMQ(.env の SQS_ENDPOINT)。AWS では設定しない(空なら本物の SQS に繋ぐ)
+    endpoint: ${SQS_ENDPOINT:}
+    # 認証メールのキュー。AWS では CloudFormation が作ったキューの URL を taskdef が渡す。
+    # テストは build.gradle が auth-mail-test に差し替える
+    auth-mail-queue-url: ${SQS_AUTH_MAIL_QUEUE_URL:}
   # app.task(タスクモード)は<b>ここに書かない</b>。
   # 環境変数 APP_TASK だけで与える。ここに task: ${APP_TASK:} と書くと、未指定でも
   # 「空文字のプロパティが存在する」状態になり、config/TaskRunner の

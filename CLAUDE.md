@@ -54,6 +54,7 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 - DB: MySQL 8(本番は Aurora MySQL 8.4 のプロビジョンド。読み取り専用トランザクションは Reader に送る → `docs/adr/0016-aurora-provisioned-with-read-write-split.md`)
 - 画像保存: MinIO(開発)/ S3 + CloudFront(本番)
 - メール送信: Mailpit(開発)/ SES(本番)
+- キュー: ElasticMQ(開発)/ SQS(本番)。認証メールの送信を別の ECS サービス(ワーカー。同じイメージを `APP_ROLE=worker` で起動)に任せる → `docs/adr/0017-auth-mail-via-sqs-worker.md`
 - インフラ: **CloudFormation(素の YAML。CDK は使わない)** + GitHub Actions(OIDC 認証、workflow_dispatch でスタック作成/削除)
 - AWS: 独自ドメイン(Route53 + ACM)、ALB → ECS Fargate → Aurora MySQL、ECR
 
@@ -89,7 +90,8 @@ Nuxt 4 + Spring Boot のアプリケーションを docker-compose で開発し�
 | --- | --- |
 | nginx + Laravel の 2 コンテナ | Nginx なし。Spring Boot 単体(決定事項 1) |
 | フロントを S3 + CloudFront で配信(`s3.tf` の `frontend_bucket`、`cloudfront.tf` の 2 ディストリビューション) | SSG 出力を Spring Boot の `static/` から配信。S3 + CloudFront は画像専用(決定事項 2・3) |
-| SQS キューワーカー(`sqs.tf` / `ecs_queue.tf`)、EventBridge バッチ(`event_bridge.tf`)、Lambda 通知(`lambda.tf`) | 採用しない |
+| SQS キューワーカー(`sqs.tf` / `ecs_queue.tf`) | 認証メールで採用した(フェーズ20 → ADR-0017)。ただし別イメージではなく同じイメージを役割で切り替える |
+| EventBridge バッチ(`event_bridge.tf`)、Lambda 通知(`lambda.tf`) | 採用しない |
 | CloudFront スコープの WAF(`waf.tf`) | Basic 認証の方式が異なる → `docs/adr/0006-basic-auth-with-waf.md` |
 | ecspresso でのデプロイ、preview 環境(`stg/preview_shared.tf`) | デプロイまで CloudFormation スタック内で完結(`docs/adr/0007-app-deploy-inside-cloudformation.md`)。preview 環境はない |
 | `terraform-aws-modules/vpc` などの外部モジュール、`stg/` という環境ディレクトリ | 素の YAML 1 スタックを作り捨て。環境ごとの値は `cloudformation/params/` |

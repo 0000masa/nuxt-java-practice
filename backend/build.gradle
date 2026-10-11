@@ -31,6 +31,7 @@ dependencies {
 	// BOM を入れて個別の artifact からはバージョンを省く(フェーズ6 で s3 を足すときも版が揃う)。
 	implementation platform('software.amazon.awssdk:bom:2.54.0')
 	implementation 'software.amazon.awssdk:sesv2' // 本番のメール送信。SMTP 認証(= IAM ユーザーの長期クレデンシャル)を持たず、タスクロールだけで送れる(設計 → specs/2026-08-19-phase13 の決定4)
+	implementation 'software.amazon.awssdk:sqs' // 認証メールの依頼のキュー。開発は ElasticMQ(フェーズ20 → docs/adr/0017)
 	developmentOnly 'org.springframework.boot:spring-boot-devtools'
 	runtimeOnly 'org.flywaydb:flyway-mysql' // MySQL 8 対応(flyway-core だけでは MySQL に接続できない)
 	runtimeOnly 'com.mysql:mysql-connector-j'
@@ -51,4 +52,7 @@ tasks.named('test') {
 	// MySQL は同じコンテナで database を分ける方式、Redis はコンテナごと分ける方式で、
 	// 意図的に非対称にしている(理由 → docs/test/README.md、設計 → specs/2026-09-12-phase18 の決定5)
 	environment 'REDIS_HOST', 'redis-test'
+	// キューも開発用(auth-mail)ではなくテスト専用のキューに向ける。MySQL と同じく、同じ ElasticMQ の中で名前を分ける。
+	// 開発中のワーカーが動いていても、テストの送ったメッセージを横取りしないようにするため
+	environment 'SQS_AUTH_MAIL_QUEUE_URL', 'http://elasticmq:9324/000000000000/auth-mail-test'
 }
