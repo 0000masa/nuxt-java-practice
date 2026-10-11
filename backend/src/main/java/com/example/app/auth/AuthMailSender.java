@@ -3,14 +3,10 @@ package com.example.app.auth;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.mail.MailException;
 import org.springframework.mail.MailSender;
 import org.springframework.mail.SimpleMailMessage;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.event.TransactionPhase;
-import org.springframework.transaction.event.TransactionalEventListener;
 
 import com.example.app.config.AppProperties;
 
@@ -27,8 +23,6 @@ import com.example.app.config.AppProperties;
 @Component
 class AuthMailSender {
 
-	private static final Logger log = LoggerFactory.getLogger(AuthMailSender.class);
-
 	private final MailSender mailSender;
 	private final AppProperties appProperties;
 
@@ -38,32 +32,21 @@ class AuthMailSender {
 	}
 
 	/**
-	 * phase = AFTER_COMMIT … 発行元のトランザクションがコミットされた<b>後</b>に呼ばれる。
+	 * 認証メールを組み立てて送る。<b>ワーカーの {@link AuthMailWorker} から、トランザクションの中で呼ばれる。</b>
 	 *
-	 * <p>これにより「メールは届いたのに登録はロールバックされていた」という食い違いが起きない。
-	 * 逆向きの食い違い(登録はできたがメールが届かない)は起こり得るので、確認メールの再送で救う。
+	 * <p>以前は Web のコミット後に呼ばれ、送信の失敗をログに残して握りつぶしていた。
+	 * 今は逆で、<b>失敗は例外のまま投げる</b>。ワーカーのトランザクションがロールバックされ、
+	 * メッセージは削除されずに SQS から再配信される。それがリトライになる(フェーズ20 の決定8・10)。
 	 *
-	 * <p>送信失敗をここで握りつぶしているのは意図的。コミット後に例外を投げると、
-	 * DB 上は登録が成立しているのに利用者には 500 が返る、という最も分かりにくい状態になる。
-	 * 記録を残して再送に誘導するほうが復帰しやすい(設計の決定7)。
+	 * @throws MailException 送信に失敗したとき
 	 */
-	//このアノテーションがあることによってeventPublisher.publishEvent()で発行されたイベントを受け取ることができる。
-	//@TransactionalEventListener には、素の @EventListener には無い条件が 2 つ乗っています。
-	// - 呼ばれるタイミングが遅れる — 発行元のトランザクションがコミットされた後（AFTER_COMMIT 指定のため）
-	// - トランザクションの中で発行されないと、そもそも呼ばれない
-	@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
-	void onAuthMailRequested(AuthMailRequestedEvent event) {
+	void send(String toEmail, AuthTokenPurpose purpose, String rawToken) {
 		SimpleMailMessage message = new SimpleMailMessage();
 		message.setFrom(appProperties.mail().from());
-		message.setTo(event.toEmail());
-		message.setSubject(subject(event.purpose()));
-		message.setText(text(event));
-
-		try {
-			mailSender.send(message);
-		} catch (MailException e) {
-			log.error("認証メールの送信に失敗しました。宛先={} 用途={}", event.toEmail(), event.purpose(), e);
-		}
+		message.setTo(toEmail);
+		message.setSubject(subject(purpose));
+		message.setText(text(purpose, rawToken));
+		mailSender.send(message);
 	}
 
 	private String subject(AuthTokenPurpose purpose) {
@@ -73,9 +56,9 @@ class AuthMailSender {
 		};
 	}
 
-	private String text(AuthMailRequestedEvent event) {
-		String url = link(event);
-		return switch (event.purpose()) {
+	private String text(AuthTokenPurpose purpose, String rawToken) {
+		String url = link(purpose, rawToken);
+		return switch (purpose) {
 			case EMAIL_VERIFICATION -> """
 					投稿アプリへのご登録ありがとうございます。
 
@@ -104,13 +87,13 @@ class AuthMailSender {
 	 * メールに載せるリンク。<b>バックエンドではなくフロントのページ</b>に向ける(設計の決定5)。
 	 * 遷移先のページが token をクエリから取り出し、POST で API を叩いて処理を完了させる。
 	 */
-	private String link(AuthMailRequestedEvent event) {
-		String path = switch (event.purpose()) {
+	private String link(AuthTokenPurpose purpose, String rawToken) {
+		String path = switch (purpose) {
 			case EMAIL_VERIFICATION -> "/verify-email";
 			case PASSWORD_RESET -> "/password-reset/confirm";
 		};
 		// Base64URL は URL に使える文字だけで構成されるが、値の作り方を変えたときに壊れないよう明示的に符号化する。
 		return appProperties.baseUrl() + path + "?token="
-				+ URLEncoder.encode(event.rawToken(), StandardCharsets.UTF_8);
+				+ URLEncoder.encode(rawToken, StandardCharsets.UTF_8);
 	}
 }
