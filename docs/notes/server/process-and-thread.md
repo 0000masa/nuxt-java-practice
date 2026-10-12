@@ -9,6 +9,8 @@
 
 技術ごとのプロセスとスレッドの使い方(Spring Boot / Node.js / Laravel / Nginx / Apache)は別ノートにまとめた → [process-models-by-server.md](./process-models-by-server.md)
 
+親プロセスと子プロセス、タスクマネージャーで親子関係を見る方法も別ノートにまとめた → [parent-and-child-process.md](./parent-and-child-process.md)
+
 ## 0. どこで出てきたか
 
 [AuthMailQueueConfig.java](../../../backend/src/main/java/com/example/app/auth/AuthMailQueueConfig.java) の `exit` メソッドは、`new Thread(...)` で `auth-mail-exit` というスレッドを作り、その中で Spring と JVM を終了させている。受信ループの [SqsReceiveLoop.java](../../../backend/src/main/java/com/example/app/common/queue/SqsReceiveLoop.java) も、`sqs-receiver-auth-mail` という専用のスレッドで動いている。ここから「スレッドとは何か」「プロセスとはどう違うのか」という疑問が出た。
@@ -86,7 +88,7 @@ $ docker compose exec worker jcmd -l
 
 ### 1 つのコンテナに Java のプロセスが 3 つある
 
-開発環境では、アプリを `./gradlew bootRun` で起動している(`docker/backend/Dockerfile` の `CMD`)。そのため、3 つのプロセスが親子の関係で並ぶ。`PPID` は親プロセスの PID である。
+開発環境では、アプリを `./gradlew bootRun` で起動している(`docker/backend/Dockerfile` の `CMD`)。そのため、3 つのプロセスが親子の関係で並ぶ。`PPID` は親プロセスの PID である(親子関係そのものは → [parent-and-child-process.md](./parent-and-child-process.md))。
 
 ```
 PID 1    gradlew(Gradle を起動するだけの小さな Java)
@@ -322,6 +324,7 @@ ContainerDefinitions:
 
 ## 関連
 
+- 親プロセスと子プロセス、親子関係の見方、親が先に終わったときの扱い → [parent-and-child-process.md](./parent-and-child-process.md)
 - 技術ごとのプロセスとスレッドの使い方(Spring Boot / Node.js / Laravel / Nginx / Apache) → [process-models-by-server.md](./process-models-by-server.md)
 - プロセスとユーザー、タスクマネージャーの「ユーザー名」列 → [../os-users-and-file-locations.md](../os-users-and-file-locations.md)
 - 素の Linux で、Spring Boot と Nginx + php-fpm の常駐プロセスがどう違うか → [../deploying-to-bare-linux.md](../deploying-to-bare-linux.md)
