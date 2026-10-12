@@ -2,7 +2,9 @@ package com.example.app.auth;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -32,6 +34,11 @@ import org.springframework.test.web.servlet.MvcResult;
 
 import com.example.app.user.UserRepository;
 
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SendMessageRequest;
+import software.amazon.awssdk.services.sqs.model.SendMessageResponse;
+import tools.jackson.databind.json.JsonMapper;
+
 /**
  * 会員登録からログインまでを 1 本で通す結合テスト。
  *
@@ -44,6 +51,11 @@ import com.example.app.user.UserRepository;
  * <p><b>メール送信はモックに差し替える。</b>実際に SMTP へ送らないだけでなく、
  * トークンは DB にハッシュしか残らないので、生の値を得るには送信内容を覗くしかない
  * (これは利用者と同じ経路をたどっているとも言える)。
+ *
+ * <p><b>キュー(SQS)もモックに差し替え、ワーカーの処理はテストが代わりに呼ぶ。</b>
+ * 登録の API はキューに依頼を送るだけで、トークンの発行とメール送信はワーカーが行う(→ docs/adr/0017)。
+ * 送られた依頼を捕まえて {@link AuthMailWorker} に渡すことで、受信ループを動かさずに
+ * 「Web → キュー → ワーカー」の流れを 1 本のテストの中でたどる。
  */
 // @SpringBootTest … アプリ全体を起動する。DataSource は application.yml の設定そのままなので本物の MySQL に
 //   つなぐ。@DataJpaTest のようなスライステストと違い「DB をインメモリ DB に差し替える」既定が無いため、
@@ -79,12 +91,28 @@ class AuthFlowTest {
 	@MockitoBean
 	JavaMailSender mailSender; // ← 偽物にしたい(SMTP に送らせない & 送信内容を覗きたい)
 
-	// このテストはトランザクションで囲めない(囲むとコミットされず、AFTER_COMMIT のメール送信が発火しない)。
+	@MockitoBean
+	SqsClient sqsClient; // ← 偽物にしたい(キューに送らせない & 送った依頼を覗きたい)
+
+	@Autowired
+	AuthMailWorker authMailWorker; // ← 本物が欲しい(依頼を渡してトークンの発行とメール送信をさせる)
+
+	@Autowired
+	JsonMapper jsonMapper;
+
+	// このテストはトランザクションで囲めない(囲むとコミットされず、AFTER_COMMIT のキューへの送信が発火しない)。
 	// そのため作ったデータは自分で消す。前回の失敗が残っていても動くよう、前後の両方で消している。
 	@BeforeEach
 	@AfterEach
 	void cleanUp() {
 		userRepository.findByEmail(EMAIL).ifPresent(userRepository::delete);
+	}
+
+	// モックの SqsClient は既定で null を返すので、送信の応答だけ用意しておく
+	@BeforeEach
+	void stubQueue() {
+		when(sqsClient.sendMessage(any(SendMessageRequest.class)))
+				.thenReturn(SendMessageResponse.builder().messageId("test-message-id").build());
 	}
 
 	@Test
@@ -99,7 +127,8 @@ class AuthFlowTest {
 						""".formatted(EMAIL, PASSWORD)))
 				.andExpect(status().isCreated());
 
-		// 2. 確認メールが送られ、そこからトークンが取れる
+		// 2. キューに送られた依頼をワーカーが処理すると、確認メールが送られ、そこからトークンが取れる
+		authMailWorker.process(captureQueuedRequest());
 		String rawToken = captureTokenFromSentMail();
 
 		// 3. メール未確認の状態ではログインできない。しかもメッセージが区別されている
@@ -168,21 +197,24 @@ class AuthFlowTest {
 		assertThat(location).contains("/api/login/oauth2/code/google");
 	}
 
-	private String captureTokenFromSentMail() {
-		// ArgumentCaptor … モックが受け取った引数を保管し、後から取り出すための箱。この行では空の箱を用意するだけで、
-		//   中身が入るのは verify() の中に captor.capture() と書いた次の行。
-		// 同じ型名を 2 回書くのは、2 つが別の相手に向けた情報のため。
-		//   <SimpleMailMessage> … コンパイラ向け。getValue() の戻り値の型が決まり、キャストが要らなくなる。
-		//   SimpleMailMessage.class … 実行時の Mockito 向け。ジェネリクスの型情報はコンパイル後に消える(型消去)ので、
-		//     消えない形でも型を渡す必要がある。渡した型は「引数がこの型のときだけ受け取る」判定に使われる
-		//     (JavaMailSender.send には MimeMessage を取る版もあるため、この絞り込みには意味がある)。
-		// Mockito 5.7 以降は ArgumentCaptor.captor() と書けば左辺から型を推論するが、記事の大半は forClass なので合わせている。
-		ArgumentCaptor<SimpleMailMessage> captor = ArgumentCaptor.forClass(SimpleMailMessage.class);
-		// captor.capture() は、見た目は send() に渡す引数ですが、実際には「上で指定した型の値なら受け入れる。ただし受け取った値は箱に保存する」という特殊な指示です
-		//capture() は verify() の中でしか使ってはいけません。 普通のメソッド呼び出しのように単独で書くと、Mockito の内部状態が壊れて予想外のエラーになります。
-		verify(mailSender).send(captor.capture());
+	/** コミットの後に SQS へ送られた依頼を取り出す(→ AuthMailEnqueuer) */
+	private AuthMailRequestedEvent captureQueuedRequest() {
+		ArgumentCaptor<SendMessageRequest> captor = ArgumentCaptor.forClass(SendMessageRequest.class);
+		verify(sqsClient).sendMessage(captor.capture());
+		return jsonMapper.readValue(captor.getValue().messageBody(), AuthMailRequestedEvent.class);
+	}
 
-		//getValue() は箱の中身を取り出します。複数回捕獲した場合は最後の1つが返ります（全部欲しいときは getAllValues()）。ここでは送信は1回なので getValue() で十分です。
+	// テストの中でアプリが送った確認メールを捕まえて、本文に入っているトークンを取り出すメソッド
+	private String captureTokenFromSentMail() {
+
+		// ArgumentCaptorとは : Mockito のクラスで、モックのメソッドに渡された引数を、テストから後で取り出すためのもの
+		// ArgumentCaptor.forClass とは : 捕まえる引数の型を指定して captor を作る、static のファクトリメソッド
+		ArgumentCaptor<SimpleMailMessage> captor = ArgumentCaptor.forClass(SimpleMailMessage.class);
+
+		// - capture():verify(...) の引数の位置に書きます。「どんな値でも条件を満たすことにして、その値を保存する」という意味の指示になります。verify の中でだけ使います。
+		verify(mailSender).send(captor.capture());// 履歴を照合し、本物のメールを captor のリストに入れる
+
+		// - getValue():保存した値を取り出します。何回も呼ばれた場合は、最後の 1 つが返ります。
 		SimpleMailMessage sent = captor.getValue();
 		assertThat(sent.getTo()).containsExactly(EMAIL);
 		assertThat(sent.getSubject()).contains("メールアドレスの確認");
