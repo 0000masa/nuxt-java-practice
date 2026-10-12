@@ -1,5 +1,7 @@
 package com.example.app.config;
 
+import java.time.Duration;
+
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -48,7 +50,13 @@ public class MailSenderConfig {
 	@Bean
 	@ConditionalOnProperty(name = "app.mail.transport", havingValue = "ses")
 	SesV2Client sesV2Client() {
-		return SesV2Client.create();
+		// タイムアウトは、認証メールのワーカーが固まらないようにするため(フェーズ20 の決定13)。
+		// 既定では呼び出し全体(SDK の自動リトライ込み)の上限が無く、SES の応答が滞ると受信スレッドがここで止まり続ける。
+		return SesV2Client.builder()
+				.overrideConfiguration(config -> config
+						.apiCallTimeout(Duration.ofSeconds(20))
+						.apiCallAttemptTimeout(Duration.ofSeconds(10)))
+				.build();
 	}
 
 	/**
