@@ -284,7 +284,60 @@ Op.TIMES.apply(2, 3);   // 6
 
 `Op` に抽象メソッドを宣言し、定数ごとに `{ }` の中で中身を書く。switch で分岐する代わりに、定数そのものが振る舞いを持つ。新しい定数を足すとき `apply` を書き忘れると、コンパイルエラーになる。
 
-`{ }` を付けた定数は、`Op` を継承した**名前の無いサブクラス**のインスタンスになる。そのため `Op.PLUS.getClass()` は `Op$1` のようなクラスを返す。「この定数がどの enum のものか」を知りたいときは、`getDeclaringClass()` を使う(`Op` が返る)。
+この書き方は、Java の 2 つの仕組みを組み合わせている。
+
+- **抽象メソッド** — `abstract int apply(int a, int b);` のように、名前と引数だけを決めて中身(`{ }`)を書かないメソッド。「継承するクラスは必ずこのメソッドを書くこと」という約束になる。抽象メソッドを持つクラスは `new` できない(中身の無いメソッドを呼ばれると困るため)
+- **匿名クラス** — `new Shape() { ... }` のように、`new` と同時にクラスの中身を書いて作る、**名前の無いサブクラス**。宣言と生成が 1 回きりのセットで、そのクラスをもう一度 `new` することはできない
+
+`PLUS { ... }` の `{ }` は、`PLUS` 用の匿名クラスの本体である。1 章と同じく普通のクラスに書き直すと、次の意味になる(説明用。このままではコンパイルできない)。
+
+```java
+abstract class Op extends Enum<Op> {
+
+    // フィールドの型は Op。中身は Op を継承した匿名クラスのインスタンス
+    public static final Op PLUS = new Op("PLUS", 0) {      // ← 匿名クラス Op$1
+        int apply(int a, int b) { return a + b; }          //    抽象メソッド apply を実装する
+    };
+    public static final Op TIMES = new Op("TIMES", 1) {    // ← 匿名クラス Op$2
+        int apply(int a, int b) { return a * b; }
+    };
+
+    abstract int apply(int a, int b);                      // ← 抽象メソッド
+}
+```
+
+```
+Op クラス(abstract)
+├── PLUS  ──参照──▶ Op$1 のインスタンス { name = "PLUS",  ordinal = 0 }
+└── TIMES ──参照──▶ Op$2 のインスタンス { name = "TIMES", ordinal = 1 }
+
+Op$1 extends Op … apply は a + b
+Op$2 extends Op … apply は a * b
+```
+
+読み取れることは次の 4 つ。
+
+- **`PLUS` と `TIMES` は、`{ }` が無い enum と同じく `Op` の `public static final` フィールド**である。`Op` が持っているのはフィールドで、匿名クラスそのものではない(匿名クラスは `Op$1.class` / `Op$2.class` という別のファイルになる)
+- **`{ }` は、フィールドに処理を足しているのではない。** 処理を持つのはクラスで、`{ }` は匿名クラスの本体として `Op` の抽象メソッド `apply` を実装している
+- **`Op.PLUS.apply(2, 3)` で `Op$1` の `apply` が動く。** フィールドの型は `Op` だが、オーバーライドしたメソッドは実際のインスタンスのクラスのものが選ばれる(`List<String> list = new ArrayList<>()` で `list.add()` を呼ぶと `ArrayList` の `add` が動くのと同じ)
+- **`Op` は `final` ではなく `abstract` なクラスになる。** 普通の enum は自動的に `final class` だが、`Op` は `Op$1` / `Op$2` に継承される必要があるので `final` が付かない。抽象メソッドを持つので `abstract` になる。それでもコンストラクタは `private` なので、外から継承したり `new` したりはできない
+
+`{ }` の中に `Op` で宣言していないメソッドを足しても、外からは呼べない。フィールド `PLUS` の型は `Op` なので、呼べるのは `Op` に宣言されたメソッドだけである。`{ }` でできるのは、実質的に「`Op` で決めたメソッドの中身を、定数ごとに変えること」になる。
+
+```java
+enum Op {
+    PLUS {
+        int apply(int a, int b) { return a + b; }
+        void hello() { }                 // Op に無いメソッドを足す
+    };
+
+    abstract int apply(int a, int b);
+}
+
+Op.PLUS.hello();   // コンパイルエラー: Op に hello() は無い
+```
+
+`{ }` を付けた定数は匿名クラスのインスタンスなので、`Op.PLUS.getClass()` は `Op$1` を返す。「この定数がどの enum のものか」を知りたいときは、`getDeclaringClass()` を使う(`Op` が返る)。
 
 ### enum に interface を実装させる
 
@@ -340,6 +393,8 @@ Registry.INSTANCE.put("a", "b");
 - **`values()` / `valueOf(String)`** — コンパイラが自動で作る `static` メソッド。全定数の配列(コピー)/ 名前から定数を探す
 - **型安全な enum パターン** — enum が登場する前に、`private` コンストラクタと `static final` フィールドで enum を手書きした書き方
 - **`EnumMap` / `EnumSet`** — enum をキーや要素にする専用のコレクション。`ordinal` を添字に使うので速い
+- **抽象メソッド** — `abstract` を付け、名前と引数だけ決めて中身を書かないメソッド。継承するクラスに実装を強制する。持つクラスは `abstract class` になり、`new` できない
+- **匿名クラス** — `new 親() { ... }` のように、`new` と同時に中身を書いて作る名前の無いサブクラス。enum の定数に `{ }` を付けると、その定数は匿名クラスのインスタンスになる
 - **緩やかな束縛(relaxed binding)** — Spring Boot が設定の名前や値の書き方の違い(大文字・小文字、`-` と `_` など)を吸収する仕組み
 - **シングルトン** — インスタンスを 1 個だけに保って共有する仕組み。enum の定数 1 つで作るのが Java では最も堅い書き方
 
