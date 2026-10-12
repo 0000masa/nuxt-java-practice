@@ -169,10 +169,14 @@ app:
   # → docs/superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md の決定2
   role: ${APP_ROLE:web}
   sqs:
-    # 開発とテストは ElasticMQ(.env の SQS_ENDPOINT)。AWS では設定しない(空なら本物の SQS に繋ぐ)
+    # 開発とテストは ElasticMQ(.env の SQS_ENDPOINT)。AWS では設定しない。
+    # 空なら SDK が AWS_REGION(ECS が自動で入れる)から https://sqs.<リージョン>.amazonaws.com を組み立てる
+    # どのサーバーと通信するか(クライアント全体の設定)。
+    # SDK は通信先をこの値かリージョンから決め、キューの URL のホストは見ないので、開発では queue-url と別に要る
     endpoint: ${SQS_ENDPOINT:}
     # 認証メールのキュー。AWS では CloudFormation が作ったキューの URL を taskdef が渡す。
     # テストは build.gradle が auth-mail-test に差し替える
+    # そのサーバーのどのキューか
     auth-mail-queue-url: ${SQS_AUTH_MAIL_QUEUE_URL:}
   # app.task(タスクモード)は<b>ここに書かない</b>。
   # 環境変数 APP_TASK だけで与える。ここに task: ${APP_TASK:} と書くと、未指定でも

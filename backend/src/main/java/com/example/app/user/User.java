@@ -32,6 +32,11 @@ public class User {
 	@Column(name = "password_hash")
 	private String passwordHash;
 
+	// パスワードを最後に設定した日時。setPasswordHash が更新する。
+	// 認証メールのワーカーが「リセットの依頼より後に変更されたか」を見るのに使う(→ V5 のコメント)
+	@Column(name = "password_changed_at")
+	private LocalDateTime passwordChangedAt;
+
 	// Google OIDC の不変 ID(メールではなくこちらをキーにする)
 	@Column(name = "google_sub")
 	private String googleSub;
@@ -96,9 +101,20 @@ public class User {
 		return passwordHash;
 	}
 
-	/** ハッシュ化済みの値を渡すこと。平文を渡さないよう、呼び出し側で PasswordEncoder を通す。 */
+	/**
+	 * ハッシュ化済みの値を渡すこと。平文を渡さないよう、呼び出し側で PasswordEncoder を通す。
+	 *
+	 * <p>{@link #getPasswordChangedAt()} もここで一緒に更新する。会員登録・パスワード変更・リセットの完了の
+	 * どの経路でも付け忘れないよう、呼び出し側に任せない。
+	 */
 	public void setPasswordHash(String passwordHash) {
 		this.passwordHash = passwordHash;
+		this.passwordChangedAt = LocalDateTime.now();
+	}
+
+	/** パスワードを最後に設定した日時。V5 より前に設定したユーザーは NULL。 */
+	public LocalDateTime getPasswordChangedAt() {
+		return passwordChangedAt;
 	}
 
 	/** NULL のときは Google 未連携。値が入っていれば Google ログインが使える。 */
