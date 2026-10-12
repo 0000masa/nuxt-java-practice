@@ -1641,6 +1641,8 @@ sudo mysql_secure_installation      # root パスワード設定、匿名ユー�
 
 - OS ユーザーと権限、専用ユーザーの作り方、`.service` ファイルの基本的な読み方 → [os-users-and-file-locations.md](./os-users-and-file-locations.md)
 - ファイル権限そのものの仕組み(`rwx`、`umask`) → [file-permissions-and-exec-bit.md](./file-permissions-and-exec-bit.md)
+- プロセスとスレッドとは何か、コンテナの中での実測 → [server/process-and-thread.md](./server/process-and-thread.md)
+- Spring Boot / Node.js / php-fpm / Nginx / Apache が、プロセスとスレッドをどう使うか → [server/process-models-by-server.md](./server/process-models-by-server.md)
 - 環境変数がプロセスに渡る仕組みと `.env` の扱い → [env-vars-basics.md](./env-vars-basics.md)
 - JVM・Corretto・ビルドと実行の関係 → [java-build-and-run.md](./java-build-and-run.md)
 - CI(GitHub Actions)でビルドとテストを回す構成 → [ci-with-github-actions.md](./ci-with-github-actions.md)

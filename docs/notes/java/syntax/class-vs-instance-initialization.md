@@ -402,6 +402,8 @@ Spring も同じ役割をコンテナが担うが、Spring のコンテナはア
 - コンストラクタの見分け方(`new` で何が呼ばれるか = インスタンス初期化の入口) → [constructor-declaration.md](./constructor-declaration.md)
 - `static` **メソッド**の話(static ファクトリメソッド、interface の static メソッド) → [static-methods-and-factory-methods.md](./static-methods-and-factory-methods.md)
 - オブジェクトとクラスの違い、3 言語での立ち位置 → [../../object-and-class-by-language.md](../../object-and-class-by-language.md)
+- クラス側(`static`)とインスタンス側の役割と使い分け → [class-side-and-instance-side.md](./class-side-and-instance-side.md)
+- enum の仕組みと使い方(5 章の続き) → [enum.md](./enum.md)
 - クラス自体を値として持つ(`Post.class` / `Post::class`) → [class-literal.md](./class-literal.md)
 - 数値リテラルと整数型(`TOKEN_BYTES` のような定数の型の話) → [numeric-literals-and-integer-types.md](./numeric-literals-and-integer-types.md)
 - 今回の題材のコード → [AuthTokenService.java](../../../../backend/src/main/java/com/example/app/auth/AuthTokenService.java) と [AuthTokenPurpose.java](../../../../backend/src/main/java/com/example/app/auth/AuthTokenPurpose.java)

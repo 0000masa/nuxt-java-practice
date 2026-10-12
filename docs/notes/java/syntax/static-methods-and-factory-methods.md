@@ -436,6 +436,7 @@ TypeScript ではクラス自体が実行時の値なので、`Dog` をそのま
 - interface と implements の基本、`default` メソッド、抽象クラスとの違い → [interface-and-implements.md](./interface-and-implements.md)
 - `static` **フィールド**がいつ初期化されるか(クラス初期化とインスタンス初期化、`static {}`、コンパイル時定数) → [class-vs-instance-initialization.md](./class-vs-instance-initialization.md)
 - コンストラクタの見分け方(クラス名と同名・戻り値なし) → [constructor-declaration.md](./constructor-declaration.md)
+- クラス側(`static`)とインスタンス側の役割と使い分け(`new` しなくても使えるもの) → [class-side-and-instance-side.md](./class-side-and-instance-side.md)
 - クラス自体を値として持つ(`Post.class` / TypeScript でクラスが値であること) → [class-literal.md](./class-literal.md)
 - 今回の題材のコード → [MailSenderConfig.java](../../../../backend/src/main/java/com/example/app/config/MailSenderConfig.java)
 - SES 経路そのものの設計(なぜ SMTP を使わないか、Bean の切り替え) → [../spring/mail-sending-and-transport-switching.md](../spring/mail-sending-and-transport-switching.md)

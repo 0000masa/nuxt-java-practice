@@ -175,6 +175,7 @@ List<Category> findAllByOrderByDisplayOrderAsc();
 
 ## 関連
 
+- JDBC・コネクションプール・ドライバ・Flyway まで含めた DB アクセスの層の全体図と、Laravel / Prisma / Drizzle との対応 → [db-access-stack.md](db-access-stack.md)
 - パッケージ・interface・import の仕組み(なぜ Entity と Repository を別ファイル・別クラスにできるか) → [java-package-basics.md](../../java-package-basics.md)
 - `PostRepository` の JPQL・join fetch・カーソルページネーションの詳細 → [PostRepository.java](../../../../backend/src/main/java/com/example/app/post/PostRepository.java) のコメント
 - `Post` エンティティの `@Entity` / `@ManyToOne` / コンストラクタの読み方 → [Post.java](../../../../backend/src/main/java/com/example/app/post/Post.java) のコメント

@@ -406,6 +406,7 @@ docker compose exec backend sh -c \
 
 - テストの実行方法と `app_test` の作り方 → [docs/test/README.md](../../../test/README.md)
 - `@SpringBootTest` / `@WebMvcTest` / `@DataJpaTest` の使い分けと Flyway との関係 → [testing-and-test-database.md](testing-and-test-database.md)
+- DB アクセスの層の全体図(JDBC からマイグレーションまで)と、スキーマの正がどこにあるかの比較 → [db-access-stack.md](db-access-stack.md)
 - Repository と Entity を分ける理由、Active Record と Data Mapper の詳しい比較 → [repository-and-entity-vs-laravel-model.md](repository-and-entity-vs-laravel-model.md)
 - エンティティに引数なしコンストラクタが要る理由 → [jpa-entity-noarg-constructor.md](jpa-entity-noarg-constructor.md)
 - コミット後に処理を動かす仕組み(`@TransactionalEventListener`)→ [application-events-vs-queues.md](application-events-vs-queues.md)
