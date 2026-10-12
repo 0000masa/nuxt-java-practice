@@ -28,7 +28,7 @@
 | 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 完了 |
 | 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 完了 |
 | 19 | DB を Aurora へ | RDS for MySQL を Aurora MySQL 8.4(プロビジョンド。stg: Writer 1 + Reader 1 / prod: Writer 1 + Reader 2)に置き換え、`@Transactional(readOnly = true)` を Reader に送る読み書き分離を入れる(認証の読み取りだけ Writer に固定)。あわせて Hikari のプールの大きさを明示、アラームを役割単位に組み直し、`cfn-apply.yml` のガードに `Remove` を追加(`allow_replacement` → `allow_destructive_changes`)。**設計 → [2026-09-13-phase19-aurora-design.md](../superpowers/specs/2026-09-13-phase19-aurora-design.md)**、方針 → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) | 完了 |
-| 20 | 認証メールを SQS 経由に | 認証メールの送信を、SQS 経由で別の ECS サービス(ワーカー。同じイメージを `app.role=worker` で起動)に移す。トークンの発行もワーカーで行い、メッセージに秘密を載せない。冪等キー(`processed_messages`)、DLQ と滞留のアラーム、ローカルは ElasticMQ + `worker` コンテナ。**設計 → [2026-10-11-phase20-sqs-auth-mail-design.md](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)**、方針 → [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) | 未着手 |
+| 20 | 認証メールを SQS 経由に | 認証メールの送信を、SQS 経由で別の ECS サービス(ワーカー。同じイメージを `app.role=worker` で起動)に移す。トークンの発行もワーカーで行い、メッセージに秘密を載せない。冪等キー(`processed_messages`)、DLQ と滞留のアラーム、ローカルは ElasticMQ + `worker` コンテナ。**設計 → [2026-10-11-phase20-sqs-auth-mail-design.md](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)**、方針 → [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) | 作業中 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -40,6 +40,17 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ20 のアプリ側を実装した(ローカル確認済み・インフラ未着手)**(2026-10-11):
+  - **作ったもの**: マイグレーション V5(`processed_messages`、`users.password_changed_at`)/ 受信ループ `common/queue/SqsReceiveLoop` /
+    Web 側の送信 `AuthMailEnqueuer` / ワーカーの処理本体 `AuthMailWorker` / ワーカーとしての起動 `AuthMailQueueConfig`(`app.role=worker`)/
+    `SqsConfig` / ローカルの `elasticmq` と `worker` コンテナ
+  - **テスト 62 本すべて成功**(13 本追加)。ElasticMQ で、溜まる → 流れる、重複で 1 通、5 回の失敗で DLQ、を観察した → [local-observation.md](../notes/sqs/local-observation.md)
+  - **設計から動いた点**(詳細 → [設計書 §5-3](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)):
+    - **ワーカーでも Web サーバーを立てる**(Web なしだと Spring Session が無く起動に失敗する)。そのため**ワーカーにも Redis が要る**
+    - **ワーカーの `stopTimeout` は 60 秒にする**(ロングポーリング中は割り込みで抜けられないことがある)
+    - Gradle のキャッシュは backend と worker で分ける(共有するとロックで起動に失敗する)
+  - **残り**: インフラ(`app.yml` / params / パイプライン / buildspec とタスク定義)→ stg で確認 → ドキュメント(`docs/infrastructure/`、`docs/slack/`)
 
 - **フェーズ20 を設計した(実装未着手)**(2026-10-11):
   - **決めたこと 22 項目は[設計書](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)に、なぜトークンの発行までワーカーに移すかは [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) に。**
