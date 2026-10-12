@@ -70,7 +70,7 @@ public class AuthService {
 	}
 
 	/**
-	 * 会員登録。未確認ユーザーを作り、確認メールの送信を予約する。
+	 * 会員登録。未確認ユーザーを作り、確認メールの送信を依頼する。
 	 *
 	 * <p>メールアドレスが既に使われているときの振る舞いが 2 つに分かれる
 	 * (詳細と理由 → docs/adr/0003-account-enumeration-and-unverified-signup.md)。
@@ -120,7 +120,7 @@ public class AuthService {
 		user.setPasswordHash(passwordEncoder.encode(request.password()));
 		userRepository.save(user);
 
-		issueVerificationMail(user);
+		requestVerificationMail(user);
 	}
 
 	/** メール確認を完了させる。トークンが不正・期限切れ・使用済みなら 400。 */
@@ -134,7 +134,7 @@ public class AuthService {
 		}
 	}
 
-	/** 確認メールを再送する。古い未使用トークンは AuthTokenService.issue の中で無効化される。 */
+	/** 確認メールを再送する。古い未使用トークンは、ワーカーが新しいトークンを発行するときに無効化される。 */
 	@Transactional
 	public void resendVerification(String email) {
 		User user = userRepository.findByEmail(email)
@@ -142,7 +142,7 @@ public class AuthService {
 		if (user.getEmailVerifiedAt() != null) {
 			throw new InvalidRequestException("メールアドレスの確認は既に完了しています。そのままログインしてください");
 		}
-		issueVerificationMail(user);
+		requestVerificationMail(user);
 	}
 
 	/**
@@ -161,12 +161,10 @@ public class AuthService {
 		if (user.getEmailVerifiedAt() == null) {
 			throw new InvalidRequestException("メールアドレスの確認が完了していません。先に確認メールから有効化してください");
 		}
-		//トークンを発行し、<b>生の値</b>を返す。DB にはハッシュだけを保存する
-		String rawToken = authTokenService.issue(user, AuthTokenPurpose.PASSWORD_RESET,
-				AuthTokenService.PASSWORD_RESET_TTL);
-		eventPublisher.publishEvent(
-				new AuthMailRequestedEvent(user.getEmail(), AuthTokenPurpose.PASSWORD_RESET, rawToken)
-			);
+		// トークンはここでは発行しない。ワーカーが受け取った時点で発行してメールを送る(→ docs/adr/0017)。
+		// ここでの確認(登録済み・確認済み)は利用者にその場でエラーを返すためのもので、
+		// ワーカーも処理する時点で同じことを確かめ直す(キューで待つ間に状態が変わりうるため)
+		eventPublisher.publishEvent(AuthMailRequestedEvent.of(user.getId(), AuthTokenPurpose.PASSWORD_RESET));
 	}
 
 	/**
@@ -218,14 +216,9 @@ public class AuthService {
 		userSessionManager.deleteAllExcept(user.getEmail(), currentSessionId);
 	}
 
-	private void issueVerificationMail(User user) {
-		//トークンを発行し、<b>生の値</b>を返す
-		//同じ用途の未使用トークンは無効化する
-		String rawToken = authTokenService.issue(user, AuthTokenPurpose.EMAIL_VERIFICATION,
-				AuthTokenService.EMAIL_VERIFICATION_TTL);
-		// 送信自体はこのトランザクションのコミット後に行われる(→ AuthMailSender)。
-		eventPublisher.publishEvent(
-				new AuthMailRequestedEvent(user.getEmail(), AuthTokenPurpose.EMAIL_VERIFICATION, rawToken)
-			);
+	private void requestVerificationMail(User user) {
+		// 依頼を出すだけ。このトランザクションのコミット後に SQS へ送られ(→ AuthMailEnqueuer)、
+		// トークンの発行(古いものの失効を含む)と送信はワーカーが行う(→ AuthMailWorker、docs/adr/0017)
+		eventPublisher.publishEvent(AuthMailRequestedEvent.of(user.getId(), AuthTokenPurpose.EMAIL_VERIFICATION));
 	}
 }
