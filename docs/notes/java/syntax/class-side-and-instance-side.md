@@ -114,9 +114,112 @@ class Cat {
 
 クラス初期化がいつ・何回走るかは → [class-vs-instance-initialization.md](./class-vs-instance-initialization.md)
 
-### 補足:「クラスそのもの」を値として扱う
+### 補足:「クラスそのもの」を値として扱う — `Role.class`
 
 Java では、クラス名をそのまま変数に入れることはできない。クラスそのものを値として扱いたいときは、`Role.class` で `Class` 型のオブジェクトを取り出す(`EnumMap<>(Role.class)` などで使う)。→ [class-literal.md](./class-literal.md)
+
+#### 誤解:「どのクラスも `class` という `static` フィールドを暗黙に持っている」
+
+`Role.class` は `Role.WEB` と同じ「クラス名.何か」の形をしているので、`class` という隠れたフィールドがあるように見える。しかし **`class` はフィールドではない。`.class` は「クラスリテラル」という専用の構文**で、コンパイラが特別に扱う。
+
+| | `Role.WEB` | `Role.class` |
+|---|---|---|
+| 正体 | `static` フィールドの参照 | クラスリテラル(言語仕様が決めた専用の構文) |
+| どこで宣言されているか | `Role` の中 | どこにも宣言されていない |
+
+フィールドでないことは、次の 2 点から分かる。
+
+- **`class` は予約語なので、フィールドの名前に使えない。** `static Class<Role> class = ...;` はコンパイルエラーになる
+- **リフレクションでフィールドを一覧しても出てこない。** `Role.class.getDeclaredFields()` で出てくるのは、`WEB`・`WORKER` と、コンパイラが足す `$VALUES` だけで、`class` は無い
+
+中身の `Class` オブジェクトは、**JVM がクラスを読み込む(ロードする)ときに、クラスごとに 1 個作って管理している**。コンパイラは `Role.class` を「`Role` の `Class` オブジェクトを JVM からもらう」というバイトコード(`ldc` 命令)に変換する。つまり、クラスが自分の `Class` オブジェクトをフィールドに持っているわけではない。JVM が管理している 1 個を、`.class` という窓口から受け取っている。
+
+#### `.class` を付けられるもの・付けられないもの
+
+型の名前なら、ほぼ何にでも付けられる。
+
+```java
+Role.class          // enum
+String.class        // 普通のクラス
+Runnable.class      // インターフェース
+int.class           // プリミティブ型
+int[].class         // 配列型
+void.class          // void にもある
+```
+
+付けられないのは、ジェネリクスに関わる 2 つだけである。
+
+```java
+List<String>.class  // コンパイルエラー。実行時には型引数が消える(型消去)ので、List.class しかない
+T.class             // コンパイルエラー。型変数 T の中身は実行時には分からない
+```
+
+#### `Role.class` ではクラス初期化が走らない
+
+`Role.WEB` に触れるとクラス初期化が走り、その中で `new Role("WEB", 0)` が実行される(上の誤解の節)。一方、`Role.class` で `Class` オブジェクトを取り出すだけでは、**クラス初期化は走らない**。`static` フィールドに値が入るのは、`Role.WEB` などに初めて触れたときである。この点でも、`Role.class` は `static` フィールドの読み出しとは別の扱いだと分かる。
+
+#### 実際に確かめた結果
+
+backend コンテナ(Java 21)で確かめた。enum のコンストラクタに出力を仕込み、`Role.class` を取り出してから `Role.WEB` に触れる。
+
+```java
+public class Main {
+    public static void main(String[] args) {
+        System.out.println("--- Role.class を取り出す");
+        Class<Role> c = Role.class;
+        System.out.println("--- getDeclaredFields");
+        System.out.println(Arrays.toString(Arrays.stream(c.getDeclaredFields()).map(f -> f.getName()).toArray()));
+        System.out.println("--- Role.WEB に触る");
+        Role r = Role.WEB;
+        System.out.println("--- その他");
+        System.out.println(Role.class == Role.class);
+        System.out.println(int.class + " / " + int[].class + " / " + void.class);
+    }
+}
+enum Role {
+    WEB, WORKER;
+    Role() { System.out.println("new Role: " + name()); }
+}
+```
+
+```
+--- Role.class を取り出す
+--- getDeclaredFields
+[WEB, WORKER, $VALUES]
+--- Role.WEB に触る
+new Role: WEB
+new Role: WORKER
+--- その他
+true
+int / class [I / void
+```
+
+- `Role.class` を取り出しても、さらに `getDeclaredFields()` でフィールドを調べても、コンストラクタは呼ばれない。**`Role.WEB` に触れた時点で初めて** 2 個まとめて作られる
+- フィールドの一覧は `WEB`・`WORKER`・`$VALUES` で、`class` は無い
+- `Role.class == Role.class` は `true`。何度書いても同じ 1 個が返る
+- `int[].class` が `class [I` と出るのは、JVM の中での配列型の名前(`[` は配列、`I` は `int`)
+
+コンパイルエラーになる 3 つも確かめた。
+
+```
+// static Class<C> class = null;
+error: <identifier> expected                  ← class は予約語なので名前に使えない
+
+// Object a = List<String>.class;
+error: <identifier> expected                  ← 型引数付きの型には .class を付けられない
+
+// Object b = T.class;
+error: cannot select from a type variable    ← 型変数には .class を付けられない
+```
+
+`return String.class;` を `javap -c` で逆アセンブルすると、フィールドを読む `getstatic` ではなく `ldc` 命令になっている。
+
+```
+0: ldc           #7                  // class java/lang/String
+2: areturn
+```
+
+`Role.WEB` のような `static` フィールドの読み出しなら `getstatic` になる。`.class` がフィールドではないことは、バイトコードの上でも確かめられる。
 
 ## 4. どちらに置くかの決め方
 
@@ -161,6 +264,7 @@ Spring のサービス(`@Service` など)は、Spring が 1 個 `new` してイ�
 - **「クラスは設計図だから、`new` しないと何も使えない」と考える。** 設計図の役割(③)とは別に、クラスは `static` の置き場(②)でもある。`static` のものは `new` しなくても使える(1・2 章)
 - **「`static` フィールドは、持ち主のクラスを `new` しないと値を持たない」と考える。** クラス初期化で値が入る。enum ではインスタンスのほうがクラス初期化の中で作られる(3 章)
 - **「インスタンスを手に入れる方法は `new` だけ」と考える。** `Role.WORKER`(`static` フィールド)、`Role.valueOf(...)`・`SesV2Client.create()`(`static` メソッド)、Spring の注入でも手に入る(2 章)
+- **「`Role.class` は、どのクラスも暗黙に持っている `class` フィールドの参照」と考える。** フィールドではなく、クラスリテラルという専用の構文。`Class` オブジェクトは JVM がクラスごとに 1 個管理していて、`.class` はそれを受け取る窓口(3 章)
 - **`static` メソッドの中でインスタンスのフィールドを読もうとする。** コンパイルエラー。どのインスタンスのものかが決まらない(2 章)
 - **Spring のサービスで、依存を使う処理を `static` にする。** 注入もテストでの差し替えもできなくなる(4 章)
 - **`static` に可変の状態を置く。** 全員で共有されるので、別のリクエストの値が混ざる(4 章)
@@ -173,6 +277,7 @@ Spring のサービス(`@Service` など)は、Spring が 1 個 `new` してイ�
 - **インスタンス** — クラスから作られた実体。オブジェクトとほぼ同じ意味で、どのクラスから作られたかを強調する言い方
 - **インスタンス化** — クラスからインスタンスを作ること。Java では `new` で行う
 - **クラス初期化** — クラスが最初に使われたときに 1 回だけ行われる処理。`static` フィールドに値が入る
+- **クラスリテラル** — `Role.class` のように、型の名前に `.class` を付けて、その型の `Class` オブジェクトを取り出す構文。フィールドの参照ではない
 - **`static` ファクトリメソッド** — `new` の代わりに、インスタンスを作って返す `static` メソッド(`valueOf`、`create`、`of` など)
 - **Bean** — Spring が管理するインスタンス。既定では 1 種類につき 1 個だけ作られる
 
