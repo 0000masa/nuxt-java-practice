@@ -29,6 +29,12 @@ services:
         condition: service_healthy # Spring Session(indexed)は起動時にキースペース通知を購読しに行くので、待たないと起動に失敗する
       elasticmq:
         condition: service_started # 認証メールの依頼を送る先
+    # worker が「コンパイルが終わって起動しきった」ことを待つために使う
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/api/actuator/health/liveness"]
+      interval: 5s
+      timeout: 3s
+      retries: 60 # 初回は依存のダウンロードとフルコンパイルで数分かかるので長めに待つ
 
   # 認証メールのワーカー。backend と同じソースを、役割だけ変えて動かす(APP_ROLE=worker)。
   # 本番の ECS で 2 つのサービスに分けるのと同じ形にして、ワーカーだけを止める・戻すを試せるようにしている
@@ -41,8 +47,12 @@ services:
       # Gradle のキャッシュは backend と分ける。共有すると、ロックを持つ相手(別コンテナの Gradle)と
       # localhost 越しに調整できず、「Timeout waiting to lock journal cache」で起動に失敗する(実測)
       - gradle-cache-worker:/root/.gradle
+    # コンパイルは backend に任せ、worker は backend が作った build/classes をそのまま使って起動する。
+    # 両方がコンパイルすると、worker のフルコンパイルが出力先を一度空にした瞬間に backend が起動して
+    # ClassNotFoundException で落ちる(実測)。-x はそのタスクを実行しない指定
     # プロジェクト側のキャッシュ(/app/.gradle)も backend と分ける。理由は上と同じ
-    command: ["sh", "./gradlew", "bootRun", "--project-cache-dir", "/tmp/gradle-project-cache"]
+    command: ["sh", "./gradlew", "bootRun", "-x", "compileJava", "-x", "processResources",
+              "--project-cache-dir", "/tmp/gradle-project-cache"]
     # ポートは公開しない。本番のワーカーも ALB に繋がず、外から HTTP を受けない
     env_file:
       - .env
@@ -54,7 +64,7 @@ services:
       DB_WRITER_POOL_SIZE: "2"
     depends_on:
       backend:
-        condition: service_started # Flyway(backend が流す)より先に読みに行かないよう、backend の後に起動する
+        condition: service_healthy # コンパイルと Flyway(どちらも backend が行う)が終わってから起動する
       elasticmq:
         condition: service_started
 

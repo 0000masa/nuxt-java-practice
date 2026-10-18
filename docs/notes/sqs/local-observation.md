@@ -112,3 +112,20 @@ sqs receive-message --queue-url http://localhost:9324/000000000000/auth-mail-dlq
 Gradle はキャッシュのロックを持っているプロセスに「譲ってくれ」と頼むとき、**localhost の通信**を使う。
 コンテナが違うと localhost も別物なので、相手に頼みようがなく待ち続ける。
 worker には別の volume(`gradle-cache-worker`)と別のプロジェクトキャッシュ(`--project-cache-dir`)を持たせて解決した。
+
+## 6. 両方がコンパイルすると、backend が `ClassNotFoundException` で落ちる
+
+5 の対処のあと、`docker compose up -d` で backend がときどき起動に失敗するようになった(2026-10-18)。
+
+```
+> Task :compileJava UP-TO-DATE
+> Task :bootRun FAILED
+Error: Could not find or load main class com.example.app.Application
+```
+
+ログの時刻を並べると、backend が `UP-TO-DATE` と判断して `java` を起動した瞬間に、worker の `compileJava` が走っていた。
+worker のプロジェクトキャッシュは `/tmp` にあり、コンテナを作り直すたびに空になる。前回の実行履歴が無いので Gradle はフルコンパイルし、
+その前に出力先の `build/classes/java/main` を一度空にする。`build/` は `./backend` のマウントで共有しているので、backend から見るとクラスファイルが消えていた。
+
+backend と worker は同じクラスファイルを `APP_ROLE` で使い分けているだけなので、**コンパイルは backend だけにさせた。**
+worker は `bootRun -x compileJava -x processResources` で起動し、backend の healthcheck が通る(= コンパイルと Flyway が終わる)まで待つ。

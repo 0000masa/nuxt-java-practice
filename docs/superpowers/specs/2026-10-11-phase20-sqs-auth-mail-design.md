@@ -350,7 +350,12 @@ ADR-0017 で、フェーズ3 の設計の決定7 を置き換えたことを明�
   `UserSessionManager` が解決できずに起動に失敗する。`TaskRunner` が Web サーバーを立てているのと同じ理由。
   **帰結として、ワーカーにも Redis の接続情報と、ElastiCache への通信の許可が要る。** 8080 番は開くが ALB に登録しないので外から届かない
 - **Gradle のキャッシュは backend と worker で分ける(決定20 の要検証が確定)。** 共有すると `Timeout waiting to lock journal cache` で起動に失敗する。
-  `gradle-cache-worker` の volume と `--project-cache-dir` で分けた。`build/` は共有のままで問題は出ていない
+  `gradle-cache-worker` の volume と `--project-cache-dir` で分けた
+- **コンパイルは backend だけに任せる(決定20 を変更、2026-10-18)。** `build/` を共有したまま両方がコンパイルすると、
+  worker のフルコンパイル(プロジェクト側のキャッシュが `/tmp` にあり毎回空なので、`UP-TO-DATE` と判断できず出力先を空にしてから作り直す)の最中に
+  backend が起動して `ClassNotFoundException` で落ちることがあった。同じクラスファイルを役割で使い分けるだけなので、
+  worker は `bootRun -x compileJava -x processResources` で起動し、backend の healthcheck が通るまで待つ(`service_healthy`)。
+  再コンパイルは backend 側で行い、共有の `build/classes` が変わると worker の devtools も再起動する
 - **`stopTimeout` は 30 秒では足りない可能性がある(決定12 を変更)。** SDK の同期クライアントはソケットの読み取り中だと割り込みで抜けられないことがあり、
   ロングポーリング(最大 20 秒)の最中に止められると、応答が返るまで待つ。受信ループは最大 25 秒待つので、
   **ワーカーのタスク定義では `stopTimeout` を 60 秒にする**(Fargate の上限は 120 秒)

@@ -50,6 +50,7 @@
     - **ワーカーでも Web サーバーを立てる**(Web なしだと Spring Session が無く起動に失敗する)。そのため**ワーカーにも Redis が要る**
     - **ワーカーの `stopTimeout` は 60 秒にする**(ロングポーリング中は割り込みで抜けられないことがある)
     - Gradle のキャッシュは backend と worker で分ける(共有するとロックで起動に失敗する)
+    - コンパイルは backend だけが行い、worker は backend が healthy になってから、コンパイルせずに起動する(両方がコンパイルすると backend が `ClassNotFoundException` で落ちることがあった。2026-10-18 に修正)
   - **残り**: インフラ(`app.yml` / params / パイプライン / buildspec とタスク定義)→ stg で確認 → ドキュメント(`docs/infrastructure/`、`docs/slack/`)
 
 - **フェーズ20 を設計した(実装未着手)**(2026-10-11):

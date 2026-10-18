@@ -61,6 +61,7 @@ Dockerfile は `docker/` ディレクトリに置き(`docker/frontend/`、`docke
   - **Redis は AOF(`--appendonly yes`)で永続化している。** 本番の ElastiCache は逆にスナップショットを取らない設定なので、**ローカルのほうが手厚い**。開発中に毎回ログインし直さずに済むことを優先した(→ [ADR-0015](../adr/0015-session-store-on-redis.md))。「落ちたら消える」を体験したいときは `docker compose exec redis redis-cli FLUSHALL`
   - `redis-test` には volume を付けない(テストのデータは残さない)
   - **worker の Gradle キャッシュは backend と分けている。** 共有すると、別コンテナの Gradle がロックを持っているときに互いに調整できず、`Timeout waiting to lock journal cache` で起動に失敗する(実測)。プロジェクト側のキャッシュも `--project-cache-dir` で分けている
+  - **コンパイルは backend だけが行い、worker は backend の `build/classes` をそのまま使う。** worker は `bootRun -x compileJava -x processResources` で起動し、backend の healthcheck(`/api/actuator/health/liveness`)が通るまで待つ(`depends_on` の `service_healthy`)。両方にコンパイルさせると、worker のフルコンパイル(プロジェクト側のキャッシュが `/tmp` で毎回空なので、出力先を一度空にしてから作り直す)と backend の起動が重なり、backend が `ClassNotFoundException: com.example.app.Application` で落ちた(実測)
   - **elasticmq はキューの中身を永続化しない。** 再起動すると溜まっていたメッセージは消える
 - 環境変数は**リポジトリ直下の `.env` で一元管理**する(`.env` は gitignore、テンプレートの `.env.example` をコミット)。1枚のファイルを二役で使う:
   - **backend**: `env_file: .env` で全変数を丸ごと注入。**変数が増えても `.env` に追記するだけ**で compose の変更は不要
