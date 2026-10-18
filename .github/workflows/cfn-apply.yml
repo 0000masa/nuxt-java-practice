@@ -50,7 +50,9 @@ on:
       env:
         description: 対象環境
         type: choice
-        options: [stg]
+        # prod は今は建てないが、cfn-deploy.yml と選択肢を揃えておく。
+        # 実際に使うには GitHub の environment「prod」と、その Secrets(引き受けるロールなど)が要る
+        options: [stg, prod]
         default: stg
       dry_run:
         description: Change Set を作って差分を見るだけで実行しない

@@ -1,0 +1,94 @@
+# 認証メールのワーカーをデプロイする CodeBuild の定義(フェーズ20)。
+#
+# 方針 → docs/adr/0017-auth-mail-via-sqs-worker.md
+# 設計 → docs/superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md の決定15 と §5-3
+#
+# パイプラインの Deploy ステージで、Web の Deploy(CodeDeployToECS)より先に走る(RunOrder 1)。
+# 受け取る側を先に新しくして、「新しい形式のメッセージを古いワーカーが読む」状況を生みにくくするため。
+#
+# 【なぜ CodePipeline の ECS デプロイアクションを使わないのか】
+# あのアクション(Provider: ECS)は、サービスが**今使っている**タスク定義を元に、イメージだけを
+# imagedefinitions.json の値に差し替えたリビジョンを作る。別に register したリビジョンは無視される。
+# このリポジトリはタスク定義を Git(deploy/taskdef-*.json)で持つので、環境変数を足しても
+# あのアクションでは反映されない。そこで「Git のタスク定義を register → update-service」を自分で書く。
+#
+# 【このファイルがやること】
+#   1. ビルドの段で埋められた deploy/taskdef-worker.json を register する
+#   2. ワーカーのサービスをそのリビジョンに切り替える(ローリング更新)
+#   3. その更新が成功したか失敗したか(サーキットブレーカーでロールバックしたか)を見届ける
+#
+# 【入力はソースではなく BuildArtifact】
+# このファイルも taskdef-worker.json も、deploy/buildspec.yml の artifacts でここに渡ってくる。
+#
+# 【必要な環境変数(CodeBuild プロジェクト側で渡す)】
+#   PROJECT_NAME / ENV_NAME
+version: 0.2
+
+env:
+  # buildspec.yml と同じ理由(set -o pipefail を使う)
+  shell: bash
+
+phases:
+  build:
+    on-failure: ABORT
+    commands:
+      - |
+        set -euo pipefail
+
+        CLUSTER="${PROJECT_NAME}-${ENV_NAME}-cluster"
+        SERVICE="${PROJECT_NAME}-${ENV_NAME}-worker"
+
+        # 【初回構築でスタックが無かったビルドの成果物を承認してしまった場合】
+        # ビルドの段はスタックが無いとプレースホルダを埋めずに抜ける(buildspec.yml の post_build)。
+        # そのまま register すると「__DB_HOST__ に繋げない」タスクが立ってしまうので、ここで止める。
+        if left=$(grep -ho '__[A-Z0-9_]*__' deploy/taskdef-worker.json | sort -u) && [ -n "$left" ]; then
+          echo "taskdef-worker.json に埋まっていないプレースホルダがあります(スタックが無い状態でビルドした成果物です):" >&2
+          echo "$left" >&2
+          exit 1
+        fi
+
+        rev=$(aws ecs register-task-definition \
+          --cli-input-json file://deploy/taskdef-worker.json \
+          --query 'taskDefinition.taskDefinitionArn' --output text)
+        echo "ワーカーのタスク定義を登録しました: $rev"
+
+        # update-service は「デプロイを始める」だけで、終わるのを待たない。
+        # 返ってきたサービスの PRIMARY のデプロイが、いま始めたもの
+        deployment=$(aws ecs update-service \
+          --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$rev" \
+          --query 'service.deployments[?status==`PRIMARY`].id | [0]' --output text)
+        echo "ローリング更新を始めました: $deployment"
+
+        # 【aws ecs wait services-stable では足りない】
+        # services-stable は「デプロイが 1 つに収束し、タスク数が希望数に揃った」で成功を返す。
+        # サーキットブレーカーが前のリビジョンに戻した場合も、戻った先で安定するので成功に見えてしまう。
+        # いま始めたデプロイの rolloutState を見て、COMPLETED / FAILED を区別する。
+        # 待つ上限は CodeBuild のタイムアウト(pipeline.yml の DeployWorkerProject)に任せる。
+        while true; do
+          state=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+            --query "services[0].deployments[?id=='${deployment}'].rolloutState | [0]" --output text)
+          echo "$(date -u +%H:%M:%S) rolloutState=${state}"
+          case "$state" in
+            COMPLETED)
+              echo "ワーカーの更新が完了しました"
+              exit 0
+              ;;
+            FAILED)
+              echo "ワーカーの更新に失敗しました。サーキットブレーカーが前のリビジョンに戻しています" >&2
+              # 原因の手掛かりはサービスのイベントに出る(起動に失敗したタスクの理由など)
+              aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                --query 'services[0].events[:10].[createdAt,message]' --output text >&2
+              exit 1
+              ;;
+            # describe-services が返すデプロイは、現役(PRIMARY)と移行中(ACTIVE)のものだけ。
+            # ロールバックや次のデプロイで置き換わり、この一覧から外れた場合に備える
+            # (FAILED のまま残るか外れるかは実機で確かめる → 設計書 §7)
+            None)
+              echo "デプロイ ${deployment} が見つかりません(ロールバックで置き換わった可能性があります)" >&2
+              aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" \
+                --query 'services[0].events[:10].[createdAt,message]' --output text >&2
+              exit 1
+              ;;
+          esac
+          sleep 15
+        done
