@@ -275,6 +275,40 @@ Parameters:
   WebMemoryScaleOutCooldown:
     Type: Number
     MinValue: 0
+  # --- 認証メールのワーカー(別の ECS サービス)--- → docs/adr/0017
+  # Web と同じイメージを APP_ROLE=worker で起動し、SQS から受け取ってメールを送る。
+  # ALB に繋がず、オートスケーリングも持たない(CPU 基準はワーカーに合わない → 設計書の決定16)。
+  WorkerCpu:
+    Type: String
+    AllowedValues: ["256", "512", "1024", "2048", "4096"]
+    Description: >-
+      Web と同じ Spring Boot を丸ごと起動するので、Web の最小構成(512 / 1024)を下回らせない。
+      仕事は軽いが、起動に必要な CPU とメモリは Web と変わらない
+  WorkerMemory:
+    Type: String
+    Description: MiB。WorkerCpu と組み合わせが決まっている
+  WorkerDesiredCount:
+    Type: Number
+    MinValue: 0
+    Description: >-
+      ワーカーのタスク数。stg・prod とも 1(→ 設計書の決定16)。1 台が落ちても、メッセージはキューに残るので
+      止まるのではなく遅れるだけ。構築の 1 段目(WebDesiredCount=0)の間は、この値に関係なく 0 になる
+  # 混合戦略の形は Web と同じ(→ WebOnDemandBase のコメント)。stg・prod とも Spot のみ。
+  # ワーカーは中断されても削除前のメッセージが再配信されるだけなので、Spot と特に相性が良い(→ 設計書の決定17)
+  WorkerOnDemandBase:
+    Type: Number
+    MinValue: 0
+    MaxValue: 10
+  WorkerOnDemandWeight:
+    Type: Number
+    MinValue: 0
+    MaxValue: 1000
+  # MinValue が 1 の理由は WebSpotWeight と同じ(3 つとも 0 にすると戦略が空になって作成に失敗する)
+  WorkerSpotWeight:
+    Type: Number
+    MinValue: 1
+    MaxValue: 1000
+
   ContainerInsights:
     Type: String
     # disabled を許していない。ECS タスク数不足のアラーム(EcsRunningLessThanDesiredAlarm)は
@@ -316,6 +350,32 @@ Parameters:
     Type: String
     AllowedPattern: ^[A-Za-z0-9]+$
     Description: ElastiCache の検知を流す Slack チャンネルの ID(#njp-alerts-redis)
+
+  SlackChannelIdSqs:
+    Type: String
+    AllowedPattern: ^[A-Za-z0-9]+$
+    Description: SQS(認証メールのキュー)の検知を流す Slack チャンネルの ID(#njp-alerts-sqs)
+
+  # --- SQS(認証メールのキュー)--- → docs/adr/0017、設計書の決定10
+  # 値はローカルの docker/elasticmq/elasticmq.conf と揃えている(向こうは本物ではないので、正はこちら)
+  AuthMailVisibilityTimeoutSeconds:
+    Type: Number
+    MinValue: 0
+    MaxValue: 43200
+    Description: >-
+      受け取ったメッセージが他から見えなくなる秒数。この間に削除されなければ再配信される(= リトライの間隔)。
+      1 件の処理(DB と SES)より十分長くする
+  AuthMailMaxReceiveCount:
+    Type: Number
+    MinValue: 1
+    MaxValue: 1000
+    Description: この回数受け取られても削除されなければ DLQ に移す
+  AuthMailQueueAgeThresholdSeconds:
+    Type: Number
+    MinValue: 60
+    Description: >-
+      メインキューで最も古いメッセージの経過秒数がこれを超えたら通知する。
+      「誰も処理していない / 追いついていない」の検知で、DLQ のアラームとは別の異常(→ 設計書の決定19)
 
   # 以下は AWS 公式の推奨アラーム(Best Practice Recommended Alarms)ベース。
   # インスタンスクラスに連動するので環境ごとに渡す。Writer と Reader は同じクラスなので値は共通。
@@ -392,6 +452,11 @@ Conditions:
   UseOnDemand: !Or
     - !Not [!Equals [!Ref WebOnDemandBase, 0]]
     - !Not [!Equals [!Ref WebOnDemandWeight, 0]]
+
+  # ワーカーの混合戦略。考え方は UseOnDemand と同じ(stg・prod とも Spot のみなので、今は両方偽)
+  WorkerUseOnDemand: !Or
+    - !Not [!Equals [!Ref WorkerOnDemandBase, 0]]
+    - !Not [!Equals [!Ref WorkerOnDemandWeight, 0]]
 
 Resources:
   # ===========================================================================
@@ -1326,10 +1391,82 @@ Resources:
       WebACLArn: !GetAtt WebAcl.Arn
 
   # ===========================================================================
+  # SQS(認証メールのキュー)
+  # ===========================================================================
+  # 方針 → docs/adr/0017-auth-mail-via-sqs-worker.md
+  # 設計 → docs/superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md
+  #
+  # Web がコミットの後に依頼を送り、ワーカー(WorkerService)が受け取ってメールを送る。
+  # メッセージは requestId / userId / purpose / requestedAt だけで、秘密(生のトークン)は載らない。
+  # それでも守る(決定14): 保存時の暗号化(SSE-SQS)・送る側と受ける側で権限を分ける(TaskRole / WorkerTaskRole)・
+  # HTTPS 以外の操作を拒否する(AuthMailQueuePolicy)。
+  #
+  # QueueName を固定しているのは、ロググループやアラームと同じく名前で中身が分かるようにするため。
+  # 名前を変えると作り直し(Replacement)になり、溜まっていたメッセージごと消える。
+
+  # 処理に 5 回失敗したメッセージの行き先。誰も処理しないので、アラーム(AuthMailDlqNotEmptyAlarm)で気づく
+  AuthMailDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${EnvName}-auth-mail-dlq
+      # 調べる時間を確保するため最長の 14 日。中身は userId と purpose だけなので、長く残しても秘密は漏れない
+      MessageRetentionPeriod: 1209600
+      # SQS が管理する鍵で暗号化する。新しく作るキューの既定でもあるが、既定に頼らず明示する。
+      # SSE-KMS にしないのは、守る中身(秘密)が無く、自分で作る鍵は削除に 7〜30 日待つので
+      # 作り捨てのスタックと噛み合わないため(→ 設計書の決定14)
+      SqsManagedSseEnabled: true
+      # このキューを DLQ として使ってよいのは AuthMailQueue だけ
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          - !Sub arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${ProjectName}-${EnvName}-auth-mail
+
+  AuthMailQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${EnvName}-auth-mail
+      VisibilityTimeout: !Ref AuthMailVisibilityTimeoutSeconds
+      # 1 日。メール確認のトークンは 24 時間、リセットは 1 時間で切れるので、それより長く残しても送る意味がない。
+      # 期限が切れたメッセージは DLQ に移らず、このキューから消える(DLQ に移すのは受信回数が maxReceiveCount を超えたときだけ)。
+      # ワーカーが止まって誰も受信しないと、受信回数は 0 のまま消えるので、DLQ のアラームでは気づけない → AuthMailQueueStaleAlarm
+      MessageRetentionPeriod: 86400
+      # キューの側でもロングポーリングを既定にしておく。アプリは受信のたびに 20 秒を指定しているので、
+      # これは AWS CLI などで手で受信したときに空振りを減らすためのもの
+      ReceiveMessageWaitTimeSeconds: 20
+      SqsManagedSseEnabled: true
+      # 削除されないまま maxReceiveCount 回受け取られたら DLQ に移す。リトライの回数を数えるのは SQS で、アプリではない
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AuthMailDeadLetterQueue.Arn
+        maxReceiveCount: !Ref AuthMailMaxReceiveCount
+
+  # HTTPS 以外(平文の HTTP)での操作を拒否する。AWS がよく推奨している設定(→ 設計書の決定14)。
+  # SDK も CLI も既定で HTTPS を使うので、普段は何も起きない。
+  # Deny は IAM の Allow より常に強いので、ロールに権限があっても平文では通らない。
+  AuthMailQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref AuthMailQueue
+        - !Ref AuthMailDeadLetterQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource:
+              - !GetAtt AuthMailQueue.Arn
+              - !GetAtt AuthMailDeadLetterQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  # ===========================================================================
   # IAM(ECS)
   # ===========================================================================
   # 実行ロール: ECR から pull し、ログを書き、secrets を読む。コンテナの中身は使わない。
-  # アプリと db-migrate が共有する。**RDS のマスターシークレットはここに入れない**
+  # アプリ・ワーカー・db-migrate が共有する。**RDS のマスターシークレットはここに入れない**
   # (共有ロールに入れると、アプリのタスク定義からもマスターの値を注入できてしまう)。
   # マスターを読むのは db-ops 専用の DbOpsExecutionRole だけ → docs/adr/0005
   TaskExecutionRole:
@@ -1358,7 +1495,7 @@ Resources:
                   - ssm:GetParameters
                 Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}*
 
-  # タスクロール: アプリ自身が使う権限。
+  # タスクロール: アプリ(Web)自身が使う権限。ワーカーは WorkerTaskRole を使う。
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1375,12 +1512,13 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              # メール送信。SMTP 認証を使わないので IAM ユーザーも長期クレデンシャルも要らない
-              - Sid: SendEmail
+              # 認証メールの依頼をキューに送る。**送るだけで、受け取れない**(受け取るのはワーカーの役割)。
+              # メール送信(ses:SendEmail)はワーカーに移ったので、Web はもう持たない(→ docs/adr/0017)
+              - Sid: SendAuthMailRequest
                 Effect: Allow
                 Action:
-                  - ses:SendEmail
-                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${EmailIdentity}
+                  - sqs:SendMessage
+                Resource: !GetAtt AuthMailQueue.Arn
               # 画像(フェーズ6)
               - Sid: ImageObjects
                 Effect: Allow
@@ -1395,6 +1533,53 @@ Resources:
                   - s3:ListBucket
                 Resource: !GetAtt ImageBucket.Arn
               # ECS Exec(コンテナに入って調査する)。ssmmessages はリソース単位に縛れない
+              - Sid: EcsExec
+                Effect: Allow
+                Action:
+                  - ssmmessages:CreateControlChannel
+                  - ssmmessages:CreateDataChannel
+                  - ssmmessages:OpenControlChannel
+                  - ssmmessages:OpenDataChannel
+                Resource: "*"
+
+  # ワーカーのタスクロール。Web の TaskRole とは分ける(→ 設計書の決定14)。
+  # Web は「送るだけ」、ワーカーは「受け取って消すだけ」で、互いに相手の操作はできない。
+  # 画像の S3 は触らないので持たせない。
+  WorkerTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-worker-task-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: WorkerPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # 受信ループ(backend の common/queue/SqsReceiveLoop)が呼ぶ 3 つ。
+              # ChangeMessageVisibility は、停止の指示と行き違いで受け取ったメッセージを
+              # すぐ他に回す(可視性タイムアウトを 0 にする)ときに使う。
+              # sqs:SendMessage は持たない(依頼を作るのは Web だけ)。DLQ にも触らない
+              # (DLQ への移動は SQS 自身が行うので、ワーカーの権限は要らない)
+              - Sid: ReceiveAuthMailRequest
+                Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                Resource: !GetAtt AuthMailQueue.Arn
+              # メール送信。SMTP 認証を使わないので IAM ユーザーも長期クレデンシャルも要らない
+              - Sid: SendEmail
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${EmailIdentity}
+              # ECS Exec(コンテナに入って調査する)。Web の TaskRole と同じ
               - Sid: EcsExec
                 Effect: Allow
                 Action:
@@ -1545,6 +1730,10 @@ Resources:
             # TransitEncryptionEnabled: true に対応する。開発の redis コンテナは平文なので false
             - Name: REDIS_SSL
               Value: "true"
+            # 認証メールの依頼の送り先(→ docs/adr/0017)。!Ref は SQS ではキューの URL を返す。
+            # SQS_ENDPOINT は渡さない(空なら SDK がリージョンから本物の SQS に繋ぐ。開発だけ ElasticMQ に向ける)
+            - Name: SQS_AUTH_MAIL_QUEUE_URL
+              Value: !Ref AuthMailQueue
           Secrets:
             # DB_USER は app なので、パスワードも app ユーザーのもの(SSM の SecureString)。
             # RDS のマスターパスワードはこのタスクには渡らない(→ docs/adr/0005)
@@ -1745,6 +1934,88 @@ Resources:
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: db-ops
 
+  # 認証メールのワーカーのタスク定義。同じイメージを APP_ROLE=worker で起動する(→ docs/adr/0017)。
+  #
+  # 【この定義も初回構築でだけ使われる】
+  # 2 代目以降は deploy/taskdef-worker.json が正で、パイプラインの Deploy ステージ(DeployWorker)が
+  # register してサービスを更新する。**環境変数・Secrets・CPU/メモリを変えるときは taskdef-worker.json も揃えること。**
+  # AppTaskDefinition と同じ注意(片方だけ直すと、構築直後の初回起動だけ古い定義で立ち上がる)。
+  #
+  # 【Web との違い】
+  #   - ポートを公開しない。Web サーバーは立つ(Spring Session の都合 → backend の auth/AuthMailQueueConfig)が、
+  #     ALB に登録しないので外からは届かない
+  #   - Google の資格情報を渡さない。HTTP を受けないので、application.yml のダミー既定値で起動できる
+  #   - 接続プールは Writer の 2 本だけ(受信スレッドが 1 本なので → 設計書の決定18)。
+  #     Reader のプールは作られるが、読み取り専用のトランザクションを使わないので一度も開かれない(ローカルで確認)
+  #   - StopTimeout が 60 秒(下のコメント)
+  WorkerTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${ProjectName}-${EnvName}-worker
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: !Ref WorkerCpu
+      Memory: !Ref WorkerMemory
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt WorkerTaskRole.Arn
+      ContainerDefinitions:
+        - Name: worker
+          Image: !Sub ${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${EcrRepositoryName}:${ImageTag}
+          Essential: true
+          # 【SIGTERM から SIGKILL までの猶予。既定の 30 秒から延ばしている】
+          # 受信ループは SIGTERM を受けると新しい受信をやめ、処理中の 1 件を終えてから止まる(決定12)。
+          # ただしロングポーリング(最大 20 秒)の最中だと、SDK がソケットの読み取りから割り込みで抜けられず、
+          # SQS の応答を待つことがある。受信ループは最大 25 秒待つので、30 秒では Spring の終了処理の分が足りない。
+          # Fargate の上限は 120 秒。→ 設計書 §5-3
+          StopTimeout: 60
+          Environment:
+            - Name: APP_ROLE
+              Value: worker
+            # クラスタエンドポイント = 常に Writer。ワーカーの処理は読み書きのトランザクション 1 つで、
+            # レプリカの遅延で新規ユーザーが見えない事故を避けるため Reader を使わない(決定9)
+            - Name: DB_HOST
+              Value: !GetAtt DbCluster.Endpoint.Address
+            - Name: DB_PORT
+              Value: !GetAtt DbCluster.Endpoint.Port
+            - Name: DB_NAME
+              Value: !Ref DbName
+            - Name: DB_USER
+              Value: !Ref DbAppUsername
+            - Name: DB_WRITER_POOL_SIZE
+              Value: "2"
+            - Name: FLYWAY_ENABLED
+              Value: "false"
+            # メール本文のリンクの組み立てに使う(リンク先はフロントのページ)
+            - Name: APP_BASE_URL
+              Value: !Sub https://${EnvName}.${AppSubdomain}.${DomainName}
+            - Name: MAIL_TRANSPORT
+              Value: ses
+            - Name: MAIL_FROM
+              Value: !Sub no-reply@${EnvName}.${AppSubdomain}.${DomainName}
+            - Name: SQS_AUTH_MAIL_QUEUE_URL
+              Value: !Ref AuthMailQueue
+            # 【ワーカーにも Redis が要る】
+            # Web サーバーを立てる以上 Spring Session が初期化され、repository-type: indexed は
+            # 起動時にキースペース通知を購読しに行く(MigrateTaskDefinition のコメントと同じ理由)。
+            # 渡し忘れるとワーカーが起動できず、メールが 1 通も送られないままキューに溜まっていく
+            - Name: REDIS_HOST
+              Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Address
+            - Name: REDIS_PORT
+              Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
+            - Name: REDIS_SSL
+              Value: "true"
+          Secrets:
+            - Name: DB_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}app_db_password
+            - Name: REDIS_PASSWORD
+              ValueFrom: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPath}redis_auth_token
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref EcsLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: worker
+
   Service:
     Type: AWS::ECS::Service
     # TaskDefinition を !Ref から family 名の固定文字列に変えた結果、CloudFormation が
@@ -1882,6 +2153,67 @@ Resources:
         ScaleInCooldown: !Ref WebMemoryScaleInCooldown
         ScaleOutCooldown: !Ref WebMemoryScaleOutCooldown
 
+  # 認証メールのワーカーのサービス(→ docs/adr/0017、設計書の決定15〜17)。
+  #
+  # 【デプロイコントローラーは ECS(ローリング更新)】
+  # ALB を持たないので CodeDeploy の Blue/Green は使えない。そもそも切り替えるべき
+  # 「入ってくるトラフィック」が無い(ワーカーは自分から SQS に取りに行く側)。
+  # 新旧のタスクは、起動した瞬間から同じキューを取り合う。メッセージの形式を「項目の追加だけ」で
+  # 変えていき、パイプラインでワーカーを Web より先に更新するのはそのため(決定4・15)。
+  #
+  # 【TaskDefinition はリビジョンを指定しない(Web の Service と同じ形)】
+  # 2 代目以降のリビジョンはパイプラインが deploy/taskdef-worker.json から register して、
+  # update-service で切り替える(→ deploy/buildspec-deploy-worker.yml)。
+  # ここを !Ref WorkerTaskDefinition にすると、スタックを更新するたびに CloudFormation が
+  # 初代(ImageTag の古いイメージ)へ戻そうとする。family 名だけを書けば、テンプレート上の値が不変になる。
+  # 作成時は family の最新 ACTIVE(= 初代)が使われる。
+  #
+  # 【DesiredCount は Web の 2 段階デプロイに連動させる】
+  # ワーカーも DB の app ユーザーで接続するので、DB ユーザーの作成より前に起動すると落ちる。
+  # 1 段目(WebDesiredCount=0)の間は 0 にし、4 段目で WorkerDesiredCount に上げる。
+  # cfn-deploy.yml を変えずに済ませるため、専用の入力を足さずに ServiceEnabled で切り替えている
+  WorkerService:
+    Type: AWS::ECS::Service
+    # Service と同じ理由(TaskDefinition が固定文字列で、参照からの暗黙の依存が無い)
+    DependsOn: WorkerTaskDefinition
+    Properties:
+      ServiceName: !Sub ${ProjectName}-${EnvName}-worker
+      Cluster: !Ref Cluster
+      TaskDefinition: !Sub ${ProjectName}-${EnvName}-worker
+      DeploymentController:
+        Type: ECS
+      DesiredCount: !If [ServiceEnabled, !Ref WorkerDesiredCount, 0]
+      EnableExecuteCommand: true
+      CapacityProviderStrategy:
+        - !If
+          - WorkerUseOnDemand
+          - CapacityProvider: FARGATE
+            Base: !Ref WorkerOnDemandBase
+            Weight: !Ref WorkerOnDemandWeight
+          - !Ref AWS::NoValue
+        - CapacityProvider: FARGATE_SPOT
+          Weight: !Ref WorkerSpotWeight
+      DeploymentConfiguration:
+        # 新しいタスクが起動してから古いタスクを止める。ワーカーが 0 台になる時間を作らない
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+        # 新しいタスクが起動に失敗し続けたら、前のタスク定義に戻す。
+        # ALB のヘルスチェックが無いので、検知できるのは「起動直後に落ちる」失敗だけ。
+        # 「起動したが処理できない」は DLQ と滞留のアラームで気づく(決定15・19)
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetC
+          # Web と同じ SG。RDS と ElastiCache への通信はこの SG からだけ許されている。
+          # ALB からの 8080 も許されることになるが、ワーカーはターゲットグループに登録されないので届かない
+          SecurityGroups:
+            - !Ref EcsSecurityGroup
+          AssignPublicIp: DISABLED
+
   # ===========================================================================
   # CodeDeploy(アプリのデプロイ)
   # ===========================================================================
@@ -1995,7 +2327,7 @@ Resources:
   # 【前提】これは「常時稼働する stg」を前提に書かれた検知層を、作り捨ての環境に
   # そのまま移植したもの。生じる不整合は構成を歪めて解決せず、運用で吸収する。
   # 受け入れている帰結は 3 つ。詳細は ADR-0010。
-  #   1. 建てるたびに「OK になりました」通知がアラームの数だけ(14 通)届く
+  #   1. 建てるたびに「OK になりました」通知がアラームの数だけ(17 通)届く
   #      (新規アラームは INSUFFICIENT_DATA -> OK も状態遷移なので OKActions が発火する)
   #   2. ログアーカイブは撤収のたびに全部消える。保全機能としては動いていない
   #   3. スロークエリのアラームはフェーズ8・10 の実験中に鳴り続ける
@@ -2033,6 +2365,15 @@ Resources:
     Properties:
       TopicName: !Sub ${ProjectName}-${EnvName}-redis-alerts
       DisplayName: !Sub ${ProjectName}-${EnvName} Redis
+
+  # SQS(認証メールのキュー)のアラーム 2 本をこの 1 本に集約する(→ 設計書の決定19)。
+  # ECS に相乗りさせないのは、見るべきものが違うため(ECS はタスク、こちらはメッセージ)。
+  # ワーカーのタスク数不足だけは ECS の異常なので、こちらではなく EcsTaskShortageTopic に流す
+  SqsAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvName}-sqs-alerts
+      DisplayName: !Sub ${ProjectName}-${EnvName} SQS
 
   # トピックポリシーは付けない。CloudWatch アラームと RDS イベント購読は
   # 同一アカウント内なら既定のトピックポリシーで publish できる。
@@ -2132,6 +2473,20 @@ Resources:
       UserRoleRequired: false
       LoggingLevel: ERROR
 
+  SqsAlertsSlackChannel:
+    Type: AWS::Chatbot::SlackChannelConfiguration
+    Properties:
+      ConfigurationName: !Sub ${ProjectName}-${EnvName}-sqs-alerts
+      SlackWorkspaceId: !Ref SlackWorkspaceId
+      SlackChannelId: !Ref SlackChannelIdSqs
+      SnsTopicArns:
+        - !Ref SqsAlertsTopic
+      IamRoleArn: !GetAtt ChatbotRole.Arn
+      GuardrailPolicies:
+        - arn:aws:iam::aws:policy/AWSDenyAll
+      UserRoleRequired: false
+      LoggingLevel: ERROR
+
   # --- D: ECS タスク数不足(Metric Math) ---------------------------------
   # RunningTaskCount < DesiredTaskCount なら 1、そうでなければ 0 を返す式を作り、
   # その式の結果だけを閾値 1 と比較する。
@@ -2189,6 +2544,114 @@ Resources:
           ReturnData: true
           Label: running < desired
           Expression: IF(m_running < m_desired, 1, 0)
+
+  # ワーカーのタスク数不足。式は EcsRunningLessThanDesiredAlarm と同じで、見るサービスだけが違う。
+  # ワーカーは ALB のヘルスチェックを持たないので、起動に失敗し続けるとここで気づく。
+  # 通知先は Web と同じ ECS 用(タスクの異常はまとめて ECS のチャンネルで見る → 設計書の決定19)
+  WorkerRunningLessThanDesiredAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-worker-running-less-than-desired
+      AlarmDescription: ECS worker service running tasks is less than desired tasks
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref EcsTaskShortageTopic
+      OKActions:
+        - !Ref EcsTaskShortageTopic
+      Metrics:
+        - Id: m_running
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ECS/ContainerInsights
+              MetricName: RunningTaskCount
+              Dimensions:
+                - Name: ClusterName
+                  Value: !Ref Cluster
+                - Name: ServiceName
+                  Value: !GetAtt WorkerService.Name
+            Period: 60
+            Stat: Minimum
+        - Id: m_desired
+          ReturnData: false
+          MetricStat:
+            Metric:
+              Namespace: ECS/ContainerInsights
+              MetricName: DesiredTaskCount
+              Dimensions:
+                - Name: ClusterName
+                  Value: !Ref Cluster
+                - Name: ServiceName
+                  Value: !GetAtt WorkerService.Name
+            Period: 60
+            Stat: Minimum
+        - Id: e_shortage
+          ReturnData: true
+          Label: running < desired
+          Expression: IF(m_running < m_desired, 1, 0)
+
+  # --- E: SQS(認証メールのキュー)2 本 --------------------------------------
+  # 「DLQ に入った(処理に失敗した)」と「誰も処理していない」は別の異常なので、両方置く(→ 設計書の決定19)。
+  # 受信スレッドだけが死んでプロセスが生きている状態では、受信回数が増えないので DLQ にも移らない。
+  # そのとき鳴るのは滞留のほうだけ。
+  #
+  # SQS のメトリクスは 1 分間隔で CloudWatch に送られる。ただし 6 時間アクセスが無く、メッセージも無いキューは
+  # 「非アクティブ」とされてメトリクスが出なくなる。作り捨ての環境ではそれが普通なので、欠損は正常として扱う
+  # (TreatMissingData: notBreaching)。
+
+  # DLQ にメッセージがある = 5 回処理に失敗したメッセージがあり、そのユーザーにはメールが届いていない。
+  # 1 件でも出たら知りたいので、しきい値はパラメータにしない。
+  # DLQ のメッセージは誰も処理しないので、調べて消すか戻す(redrive)まで鳴り続ける
+  AuthMailDlqNotEmptyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-auth-mail-dlq-not-empty
+      AlarmDescription: Auth mail DLQ has messages - some auth mails failed 5 times and were not sent
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuthMailDeadLetterQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: 1
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SqsAlertsTopic
+      OKActions:
+        - !Ref SqsAlertsTopic
+
+  # メインキューで最も古いメッセージが AuthMailQueueAgeThresholdSeconds を超えた
+  # = ワーカーが止まっている(受信スレッドだけが死んだゾンビを含む)か、処理が追いついていない。
+  # 失敗して再配信を待っているメッセージもここに数えられるので、DLQ に移る直前にも鳴りうる
+  AuthMailQueueStaleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${ProjectName}-${EnvName}-auth-mail-queue-stale
+      AlarmDescription: Oldest message in auth mail queue is too old - the worker may be stopped or falling behind
+      Namespace: AWS/SQS
+      MetricName: ApproximateAgeOfOldestMessage
+      Dimensions:
+        - Name: QueueName
+          Value: !GetAtt AuthMailQueue.QueueName
+      Statistic: Maximum
+      Period: 60
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Threshold: !Ref AuthMailQueueAgeThresholdSeconds
+      EvaluationPeriods: 1
+      DatapointsToAlarm: 1
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref SqsAlertsTopic
+      OKActions:
+        - !Ref SqsAlertsTopic
 
   # --- A: DB メトリクスアラーム 9 本(役割単位) -----------------------------
   # 評価は AWS 公式推奨どおり「60 秒 x 5 データポイント連続」。一過性のスパイクで鳴らさない。
@@ -2811,6 +3274,10 @@ Outputs:
   ServiceName:
     Value: !GetAtt Service.Name
 
+  # deploy/buildspec-deploy-worker.yml が update-service するサービス
+  WorkerServiceName:
+    Value: !GetAtt WorkerService.Name
+
   PrivateSubnetIds:
     Description: run-task の networkConfiguration に渡す
     Value: !Sub ${PrivateSubnetA},${PrivateSubnetC}
@@ -2861,6 +3328,16 @@ Outputs:
     Description: taskdef のプレースホルダに差し込む ElastiCache のポート
     Value: !GetAtt RedisReplicationGroup.PrimaryEndPoint.Port
 
+  # buildspec.yml が taskdef.json / taskdef-worker.json の SQS_AUTH_MAIL_QUEUE_URL に差し込む
+  AuthMailQueueUrl:
+    Description: taskdef のプレースホルダに差し込む認証メールのキューの URL
+    Value: !Ref AuthMailQueue
+
+  # DLQ の中身を手で見る・メインキューに戻す(redrive)ときに使う
+  AuthMailDeadLetterQueueUrl:
+    Description: 認証メールの DLQ の URL(aws sqs receive-message --queue-url に渡す)
+    Value: !Ref AuthMailDeadLetterQueue
+
   DbMasterSecretArn:
     Description: RDS が作ったマスターパスワードのシークレット(手元から DB に入るときに読む)
     Value: !GetAtt DbCluster.MasterUserSecret.SecretArn
@@ -2895,3 +3372,7 @@ Outputs:
   RdsAlertsSlackChannelArn:
     Description: RDS 用の Chatbot チャンネル設定
     Value: !Ref RdsAlertsSlackChannel
+
+  SqsAlertsTopicArn:
+    Description: SQS の検知の通知先(DLQ / 滞留)。#njp-alerts-sqs に流れる
+    Value: !Ref SqsAlertsTopic
