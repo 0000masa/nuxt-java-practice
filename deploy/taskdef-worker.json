@@ -1,0 +1,45 @@
+{
+  "family": "__FAMILY_WORKER__",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "__WORKER_CPU__",
+  "memory": "__WORKER_MEMORY__",
+  "executionRoleArn": "__EXECUTION_ROLE_ARN__",
+  "taskRoleArn": "__WORKER_TASK_ROLE_ARN__",
+  "containerDefinitions": [
+    {
+      "name": "worker",
+      "image": "__IMAGE__",
+      "essential": true,
+      "stopTimeout": 60,
+      "environment": [
+        { "name": "APP_ROLE", "value": "worker" },
+        { "name": "DB_HOST", "value": "__DB_HOST__" },
+        { "name": "DB_PORT", "value": "__DB_PORT__" },
+        { "name": "DB_NAME", "value": "__DB_NAME__" },
+        { "name": "DB_USER", "value": "__DB_APP_USER__" },
+        { "name": "DB_WRITER_POOL_SIZE", "value": "2" },
+        { "name": "FLYWAY_ENABLED", "value": "false" },
+        { "name": "APP_BASE_URL", "value": "__APP_BASE_URL__" },
+        { "name": "MAIL_TRANSPORT", "value": "ses" },
+        { "name": "MAIL_FROM", "value": "__MAIL_FROM__" },
+        { "name": "SQS_AUTH_MAIL_QUEUE_URL", "value": "__SQS_AUTH_MAIL_QUEUE_URL__" },
+        { "name": "REDIS_HOST", "value": "__REDIS_HOST__" },
+        { "name": "REDIS_PORT", "value": "__REDIS_PORT__" },
+        { "name": "REDIS_SSL", "value": "true" }
+      ],
+      "secrets": [
+        { "name": "DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__app_db_password" },
+        { "name": "REDIS_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__redis_auth_token" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "__LOG_GROUP__",
+          "awslogs-region": "__AWS_REGION__",
+          "awslogs-stream-prefix": "worker"
+        }
+      }
+    }
+  ]
+}

@@ -33,7 +33,8 @@
         { "name": "IMAGE_CDN_DOMAIN", "value": "__IMAGE_CDN_DOMAIN__" },
         { "name": "REDIS_HOST", "value": "__REDIS_HOST__" },
         { "name": "REDIS_PORT", "value": "__REDIS_PORT__" },
-        { "name": "REDIS_SSL", "value": "true" }
+        { "name": "REDIS_SSL", "value": "true" },
+        { "name": "SQS_AUTH_MAIL_QUEUE_URL", "value": "__SQS_AUTH_MAIL_QUEUE_URL__" }
       ],
       "secrets": [
         { "name": "DB_PASSWORD", "valueFrom": "__SSM_ARN_PREFIX__app_db_password" },

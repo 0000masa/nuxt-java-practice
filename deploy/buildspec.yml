@@ -7,9 +7,15 @@
 #   1. イメージタグを決める(コミットの短縮 SHA)
 #   2. 既に ECR にあるなら、ビルドと push を飛ばす
 #   3. 無ければビルドして push する
-#   4. deploy/taskdef.json / deploy/taskdef-migrate.json のプレースホルダを、スタックの実際の値で埋める
+#   4. deploy/taskdef.json / deploy/taskdef-migrate.json / deploy/taskdef-worker.json のプレースホルダを、スタックの実際の値で埋める
 #   5. migrate 用のタスク定義だけ、ここで register する
-#   6. deploy/taskdef.json と deploy/appspec.yaml をアーティファクトとして出す(Deploy アクションが使う)
+#   6. deploy/taskdef.json と deploy/appspec.yaml(Deploy アクションが使う)、
+#      deploy/taskdef-worker.json(DeployWorker アクションが使う)をアーティファクトとして出す
+#
+# 【ワーカーのタスク定義もここでは register しない】
+# register するのは承認の後の DeployWorker アクション(deploy/buildspec-deploy-worker.yml)。
+# ここで register すると、承認待ちの間に「承認していないリビジョン」が family の最新 ACTIVE になり、
+# その間にスタックを更新すると CloudFormation がそれを使ってしまう(→ app.yml の WorkerService のコメント)。
 #
 # 【アプリのタスク定義はここでは register しない】
 # CodePipeline の CodeDeployToECS アクションは TaskDefinitionTemplateArtifact を
@@ -162,10 +168,14 @@ phases:
           sed -i \
             -e "s|__FAMILY__|${PROJECT_NAME}-${ENV_NAME}-app|g" \
             -e "s|__FAMILY_MIGRATE__|${PROJECT_NAME}-${ENV_NAME}-db-migrate|g" \
+            -e "s|__FAMILY_WORKER__|${PROJECT_NAME}-${ENV_NAME}-worker|g" \
             -e "s|__CPU__|$(param WebCpu)|g" \
             -e "s|__MEMORY__|$(param WebMemory)|g" \
+            -e "s|__WORKER_CPU__|$(param WorkerCpu)|g" \
+            -e "s|__WORKER_MEMORY__|$(param WorkerMemory)|g" \
             -e "s|__EXECUTION_ROLE_ARN__|arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENV_NAME}-task-execution-role|g" \
             -e "s|__TASK_ROLE_ARN__|arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENV_NAME}-task-role|g" \
+            -e "s|__WORKER_TASK_ROLE_ARN__|arn:aws:iam::${ACCOUNT_ID}:role/${PROJECT_NAME}-${ENV_NAME}-worker-task-role|g" \
             -e "s|__IMAGE__|${IMAGE_URI}|g" \
             -e "s|__DB_HOST__|$(out DbEndpoint)|g" \
             -e "s|__DB_PORT__|$(out DbPort)|g" \
@@ -181,6 +191,7 @@ phases:
             -e "s|__IMAGE_CDN_DOMAIN__|$(out ImageCdnDomain)|g" \
             -e "s|__REDIS_HOST__|$(out RedisEndpoint)|g" \
             -e "s|__REDIS_PORT__|$(out RedisPort)|g" \
+            -e "s|__SQS_AUTH_MAIL_QUEUE_URL__|$(out AuthMailQueueUrl)|g" \
             -e "s|__SSM_ARN_PREFIX__|arn:aws:ssm:${AWS_DEFAULT_REGION}:${ACCOUNT_ID}:parameter${SSM_PATH}|g" \
             -e "s|__LOG_GROUP__|/ecs/${PROJECT_NAME}-${ENV_NAME}|g" \
             -e "s|__AWS_REGION__|${AWS_DEFAULT_REGION}|g" \
@@ -188,11 +199,12 @@ phases:
         }
         render deploy/taskdef.json
         render deploy/taskdef-migrate.json
+        render deploy/taskdef-worker.json
 
         # 埋め忘れたプレースホルダがあれば、ここで落とす。
         # 埋まっていないまま register すると「__DB_HOST__ に接続できない」という
         # 分かりにくいクラッシュになり、原因にたどり着くまで遠回りする。
-        if left=$(grep -ho '__[A-Z0-9_]*__' deploy/taskdef.json deploy/taskdef-migrate.json | sort -u) && [ -n "$left" ]; then
+        if left=$(grep -ho '__[A-Z0-9_]*__' deploy/taskdef.json deploy/taskdef-migrate.json deploy/taskdef-worker.json | sort -u) && [ -n "$left" ]; then
           echo "埋まっていないプレースホルダがあります:" >&2
           echo "$left" >&2
           exit 1
@@ -208,15 +220,20 @@ phases:
         echo "migrate 用タスク定義を登録しました: $rev"
 
         echo "アプリのタスク定義は register しません(Deploy アクションが taskdef.json から作ります)"
+        echo "ワーカーのタスク定義も register しません(承認の後に DeployWorker アクションが taskdef-worker.json から作ります)"
 
-# Deploy アクション(CodeDeployToECS)が読むファイル。
+# Deploy アクション(CodeDeployToECS)と DeployWorker アクション(CodeBuild)が読むファイル。
 #
 # 【ここに書いたパスがアーティファクトの中でもそのまま残る】
 # base-directory も discard-paths も付けていないので、deploy/ 付きで梱包される。
 # pipeline.yml の指定と字面がそのまま一致していなければならない。
 #   TaskDefinitionTemplatePath: deploy/taskdef.json
 #   AppSpecTemplatePath:        deploy/appspec.yaml
+# buildspec-deploy-worker.yml も、自分自身と taskdef-worker.json をこのアーティファクトから読む
+# (DeployWorker アクションの入力はこのアーティファクトだけで、ソースは見ない)。
 artifacts:
   files:
     - deploy/taskdef.json
     - deploy/appspec.yaml
+    - deploy/taskdef-worker.json
+    - deploy/buildspec-deploy-worker.yml
