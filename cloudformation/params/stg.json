@@ -47,6 +47,17 @@
   { "ParameterKey": "WebCpuScaleOutCooldown",          "ParameterValue": "60" },
   { "ParameterKey": "WebMemoryScaleInCooldown",        "ParameterValue": "180" },
   { "ParameterKey": "WebMemoryScaleOutCooldown",       "ParameterValue": "60" },
+  { "ParameterKey": "WorkerCpu",                       "ParameterValue": "512" },
+  { "ParameterKey": "WorkerMemory",                    "ParameterValue": "1024" },
+  { "ParameterKey": "WorkerDesiredCount",              "ParameterValue": "1" },
+  { "ParameterKey": "WorkerOnDemandBase",              "ParameterValue": "0" },
+  { "ParameterKey": "WorkerOnDemandWeight",            "ParameterValue": "0" },
+  { "ParameterKey": "WorkerSpotWeight",                "ParameterValue": "1" },
+
+  { "ParameterKey": "AuthMailVisibilityTimeoutSeconds", "ParameterValue": "60" },
+  { "ParameterKey": "AuthMailMaxReceiveCount",          "ParameterValue": "5" },
+  { "ParameterKey": "AuthMailQueueAgeThresholdSeconds", "ParameterValue": "300" },
+
   { "ParameterKey": "ContainerInsights",               "ParameterValue": "enhanced" },
 
   { "ParameterKey": "RdsCpuThresholdPercent",             "ParameterValue": "90" },
@@ -58,6 +69,7 @@
   { "ParameterKey": "SlackWorkspaceId",                "ParameterValue": "T0BT8V342DB" },
   { "ParameterKey": "SlackChannelIdEcs",               "ParameterValue": "C0BTLRRUHQ9" },
   { "ParameterKey": "SlackChannelIdRedis",             "ParameterValue": "C0C18N5QTNH" },
+  { "ParameterKey": "SlackChannelIdSqs",               "ParameterValue": "C0C9P9SQ8VD" },
   { "ParameterKey": "SlackChannelIdRds",               "ParameterValue": "C0BUD9W1Y3S" },
 
   { "ParameterKey": "LogRetentionDays",                "ParameterValue": "7" },

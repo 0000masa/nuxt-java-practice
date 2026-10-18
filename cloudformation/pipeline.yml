@@ -296,6 +296,106 @@ Resources:
           Status: ENABLED
           GroupName: !Ref BuildLogGroup
 
+  # --------------------------------------------------------------------------
+  # ワーカーのデプロイ(フェーズ20 → docs/adr/0017)
+  # --------------------------------------------------------------------------
+  # Deploy ステージで、Web の CodeDeployToECS より先に走る CodeBuild。
+  # Git のタスク定義(deploy/taskdef-worker.json)を register して、ワーカーのサービスを update-service する。
+  # CodePipeline の ECS デプロイアクション(Provider: ECS)を使わない理由 → deploy/buildspec-deploy-worker.yml の冒頭
+  #
+  # ビルド用の BuildProject と分けたのは、要る権限も環境もまるで違うから。
+  # こちらは Docker を使わない(PrivilegedMode 不要)、ECR に触らない、ECS のサービスを更新する。
+  DeployWorkerLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LogGroupName: !Sub /aws/codebuild/${ProjectName}-${EnvName}-deploy-worker
+      RetentionInDays: !Ref LogRetentionDays
+
+  DeployWorkerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvName}-deploy-worker-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: deploy-worker
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Logs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub ${DeployWorkerLogGroup.Arn}:*
+              # BuildArtifact(埋め済みの taskdef-worker.json とこのビルドの buildspec)を読むだけ。書かない
+              - Sid: ReadArtifacts
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource: !Sub ${ArtifactBucket.Arn}/*
+              # RegisterTaskDefinition はリソース指定ができない(BuildProject の migrate 用と同じ)
+              - Sid: RegisterWorkerTaskDefinition
+                Effect: Allow
+                Action: ecs:RegisterTaskDefinition
+                Resource: "*"
+              # taskdef-worker.json に書いた 2 本のロールを ECS に渡す。渡し先を ECS に限る理由は
+              # CodeBuildServiceRole の PassTaskExecutionRole と同じ(権限昇格の経路を塞ぐ)
+              - Sid: PassWorkerTaskRoles
+                Effect: Allow
+                Action: iam:PassRole
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${EnvName}-task-execution-role
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-${EnvName}-worker-task-role
+                Condition:
+                  StringEquals:
+                    iam:PassedToService:
+                      - ecs-tasks.amazonaws.com
+              # 触れるのはワーカーのサービスだけ。Web のサービスは CodeDeploy の担当で、
+              # そもそも CODE_DEPLOY 制御のサービスは update-service でタスク定義を変えられない
+              - Sid: UpdateWorkerService
+                Effect: Allow
+                Action:
+                  - ecs:UpdateService
+                  - ecs:DescribeServices
+                Resource: !Sub arn:aws:ecs:${AWS::Region}:${AWS::AccountId}:service/${ProjectName}-${EnvName}-cluster/${ProjectName}-${EnvName}-worker
+
+  DeployWorkerProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${ProjectName}-${EnvName}-deploy-worker
+      ServiceRole: !GetAtt DeployWorkerServiceRole.Arn
+      # ローリング更新は、新しいタスクの起動(Spring Boot で 30〜60 秒)と古いタスクの停止
+      # (StopTimeout 60 秒)を待つ。サーキットブレーカーが失敗と判断するまでにはもっとかかるので、余裕を取る
+      TimeoutInMinutes: 30
+      Source:
+        Type: CODEPIPELINE
+        # 入力アーティファクト(BuildArtifact)の中のパス。deploy/buildspec.yml の artifacts が入れている
+        BuildSpec: deploy/buildspec-deploy-worker.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: !Ref BuildImage
+        EnvironmentVariables:
+          - Name: PROJECT_NAME
+            Value: !Ref ProjectName
+          - Name: ENV_NAME
+            Value: !Ref EnvName
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref DeployWorkerLogGroup
+
   # ==========================================================================
   # CodePipeline
   # ==========================================================================
@@ -339,7 +439,9 @@ Resources:
                 Action:
                   - codebuild:StartBuild
                   - codebuild:BatchGetBuilds
-                Resource: !GetAtt BuildProject.Arn
+                Resource:
+                  - !GetAtt BuildProject.Arn
+                  - !GetAtt DeployWorkerProject.Arn
               # Deploy アクション(CodeDeployToECS)に必要な最小権限。
               # → CodePipeline のアクションリファレンスに載っている一覧
               - Sid: CodeDeployDeployment
@@ -507,11 +609,27 @@ Resources:
                 # exported-variables で決まる(片方でも欠けると解決されない)。
                 # イメージタグを出しておかないと「どのコミットを承認しようとしているのか」が
                 # 分からないまま押すことになる。→ docs/notes/aws-code-service/env-vars-and-logs.md §4-2
-                CustomData: !Sub "${ProjectName} (${EnvName}) をデプロイします。イメージ: #{BuildVariables.IMAGE_TAG} / push: #{BuildVariables.IMAGE_PUSHED}。承認するとこのイメージが本番のリスナーに切り替わります。"
+                CustomData: !Sub "${ProjectName} (${EnvName}) をデプロイします。イメージ: #{BuildVariables.IMAGE_TAG} / push: #{BuildVariables.IMAGE_PUSHED}。承認するとこのイメージでワーカーを更新し、続けて Web を本番のリスナーに切り替えます。"
               RunOrder: 1
 
+        # 【ワーカー → Web の順】
+        # 同じステージの中で RunOrder が小さいほうから走り、前が失敗すると後ろは走らない。
+        # 受け取る側(ワーカー)を先に新しくして、「新しい形式のメッセージを古いワーカーが読む」状況を
+        # 生みにくくする(→ 設計書の決定15)。ワーカーの更新に失敗したら Web も出さない
         - Name: Deploy
           Actions:
+            - Name: DeployWorker
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref DeployWorkerProject
+              InputArtifacts:
+                - Name: BuildArtifact
+              RunOrder: 1
+
             - Name: Deploy
               ActionTypeId:
                 Category: Deploy
@@ -538,7 +656,7 @@ Resources:
                 AppSpecTemplatePath: deploy/appspec.yaml
               InputArtifacts:
                 - Name: BuildArtifact
-              RunOrder: 1
+              RunOrder: 2
 
   # ==========================================================================
   # Slack への通知と、Slack からの承認
