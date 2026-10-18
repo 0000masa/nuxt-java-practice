@@ -690,7 +690,8 @@ aws route53 list-hosted-zones-by-name --dns-name mylabinfra.com \
 # /hostedzone/Z0123456789ABCDEFG のように返るので、末尾の Z... だけを使う
 ```
 
-**`SlackWorkspaceId` / `SlackChannelIdEcs` / `SlackChannelIdRds`**: Slack 側の手動作業で得る → **[docs/slack/README.md](../slack/README.md)**。
+**`SlackWorkspaceId` / `SlackChannelIdEcs` / `SlackChannelIdRds` / `SlackChannelIdRedis` / `SlackChannelIdSqs`**: Slack 側の手動作業で得る → **[docs/slack/README.md](../slack/README.md)**。
+**`SlackChannelIdSqs` はフェーズ20 で足した**(`#njp-alerts-sqs`。認証メールのキューの DLQ と滞留のアラーム)。`params/*.json` には `REPLACE_WITH_SQS_CHANNEL_ID` が入っているので、チャンネルを作って ID を書き写すまで構築は通らない。
 
 置き換え忘れると **Change Set の作成が `must match pattern` で落ちる**(テンプレート側に `AllowedPattern` を付けてある)。プレースホルダのまま構築が成功して通知が無音になるより、止まるほうがマシという判断。
 
@@ -799,7 +800,7 @@ create-db-users の失敗で多いのは **SSM に入れたパスワードに `'
 
 ```
 Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
-  inputs: env=stg / image_tag=(空) / dry_run=false / allow_destructive_changes=false
+  inputs: env=stg / dry_run=false / allow_destructive_changes=false
 
   1. 前提を確かめる       … スタックの存在 / 状態 / DesiredCount≠0
   2. テンプレートを S3 に置く
@@ -807,6 +808,8 @@ Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
   4. 差分をジョブサマリに出す + Replacement を判定
   5. Change Set を実行して完了を待つ
 ```
+
+`env` は `stg` と `prod` を選べる。prod は今は建てないが、`cfn-deploy.yml` と選択肢を揃えてある。実際に prod へ流すには、GitHub の environment「prod」とその Secrets(引き受けるロールなど → §5)を先に用意する必要がある。
 
 **アプリのイメージを更新するのはこのワークフローではない。** 通常のリリースは CodePipeline の仕事で(→ §12)、`cfn-apply.yml` の `workflow_dispatch` には `image_tag` を宣言していない。ECS サービスが `CODE_DEPLOY` 制御になり `Service.TaskDefinition` が family 名の固定文字列になったので、ここでタグを渡しても**新しいリビジョンが register されるだけでデプロイはされない**(→ [ADR-0013](../adr/0013-app-deploy-with-code-services.md))。渡せると「タグを変えたのに反映されない」という混乱を生むので、口ごと塞いである。
 
@@ -833,7 +836,7 @@ Actions → 「CloudFormation スタックを反映(更新のみ)」を実行
 
 `Service.TaskDefinition` が family 名の固定文字列になったので、CloudFormation はどのリビジョンが動いているかを知らないし、知る必要もない。巻き戻りは起きない。代わりに **`app.yml` の `AppTaskDefinition` は初回構築でだけ使われる定義**になり、2 代目以降の正は `taskdef.json` に移った。
 
-**環境変数・Secrets・CPU/メモリを変えるときは、`app.yml` と `taskdef.json` の両方を直すこと。** 片方だけだと「構築直後の初回起動だけ古い定義で立ち上がってクラッシュする」という気づきにくい壊れ方をする(スタックは緑、パイプラインも緑、最初のタスクだけ落ちる)。migrate 側も同様に `taskdef-migrate.json` と対になっている。
+**環境変数・Secrets・CPU/メモリを変えるときは、`app.yml` と `taskdef.json` の両方を直すこと。** 片方だけだと「構築直後の初回起動だけ古い定義で立ち上がってクラッシュする」という気づきにくい壊れ方をする(スタックは緑、パイプラインも緑、最初のタスクだけ落ちる)。migrate 側も同様に `taskdef-migrate.json` と対になっている。ワーカー(フェーズ20)も同じで、`app.yml` の `WorkerTaskDefinition` と `taskdef-worker.json` が対になっている。
 
 なお `aws ecs update-service` を手で叩くのは相変わらず避けること。CodeDeploy が管理しているタスクセットと食い違い、次のデプロイで何が起きるか読めなくなる。
 
@@ -859,21 +862,23 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 > 設計 → [フェーズ14 の設計書](../superpowers/specs/2026-08-28-phase14-monitoring-design.md) / [フェーズ15 の設計書](../superpowers/specs/2026-08-28-phase15-slack-notification-design.md)、方針 → [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md) / [ADR-0011](../adr/0011-slack-notification-with-chatbot.md)
 
-スタックはアラーム 7 本と SNS トピック 2 本を作り、**通知は Slack に流れる。**
+スタックはアラーム 17 本と SNS トピック 4 本を作り、**通知は Slack に流れる。**
 
 ### 11-1. 通知は Slack。毎回踏む手作業は無い
 
 | トピック | チャンネル | 何が飛んでくるか |
 |---|---|---|
-| `nuxt-java-practice-stg-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足 |
+| `nuxt-java-practice-stg-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足(Web とワーカー) |
 | `nuxt-java-practice-stg-rds-alerts` | `#njp-alerts-rds` | DB(Aurora)のログ / メトリクス / イベント |
+| `nuxt-java-practice-stg-redis-alerts` | `#njp-alerts-redis` | ElastiCache のメモリ / 追い出し |
+| `nuxt-java-practice-stg-sqs-alerts` | `#njp-alerts-sqs` | 認証メールのキュー(DLQ にメッセージがある / キューの滞留)→ §11-5 |
 
 **フェーズ14 まではメール通知で、建てるたびに SNS の購読確認メールを 2 通踏む必要があった。**踏むまで 1 通も届かないのにスタックは緑になり、片方だけ踏み忘れるとその系統だけ無音になる、という運用だった。Slack のチャンネル転送には購読確認の概念が無いので、**この手作業は丸ごと消えた**(→ [ADR-0011](../adr/0011-slack-notification-with-chatbot.md))。
 
 代わりに **Slack 側に 1 回きりの前提が 2 つある。**どちらもスタックを作り直しても消えないが、**欠けているとスタックは成功するのに通知だけ届かない。**
 
 1. AWS コンソールで Slack ワークスペースを認可してあること(CloudFormation では自動化できない)
-2. 2 つのチャンネルそれぞれで `/invite @Amazon Q` を実行してあること
+2. 4 つのチャンネルそれぞれで `/invite @Amazon Q` を実行してあること
 
 手順と ID の取り方 → **[docs/slack/README.md](../slack/README.md)**。配線の確認は Chatbot コンソールの **テストメッセージを送信** が早い。
 
@@ -881,7 +886,7 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 
 ### 11-2. 建てた直後に届く通知は異常ではない
 
-**「OK になりました」通知が 7 通届く。** CloudWatch アラームのアクションは状態遷移で発火し、新規作成されたアラームは `INSUFFICIENT_DATA` → `OK` を必ず通るため。異常が起きたわけではない。
+**「OK になりました」通知が 17 通届く。** CloudWatch アラームのアクションは状態遷移で発火し、新規作成されたアラームは `INSUFFICIENT_DATA` → `OK` を必ず通るため。異常が起きたわけではない。
 
 ### 11-3. フェーズ8・10 の実験中はスロークエリアラームが鳴り続ける
 
@@ -894,6 +899,35 @@ Actions → 「CloudFormation スタックを削除」を実行(confirm に dest
 `nuxt-java-practice-stg-logs-archive` バケットはスタックの一部なので、**撤収するとアーカイブも全部消える。** ライフサイクル(30 日で Glacier IR / 365 日で削除)は一度も発火しない。**保全機能としては動いていない**(意図した割り切り → ADR-0010)。残したいログがあれば撤収前に自分で落とす。
 
 Firehose のバッファは最大 900 秒なので、**直近 15 分ぶんは S3 に着く前に消える**。配線が正しいかを確かめたいときは、建ててから 15 分ほど待って `aws s3 ls s3://nuxt-java-practice-stg-logs-archive/app-logs/ --recursive` を見る。オブジェクトが 1 つも無く原因を知りたいときは、ロググループ `/aws/kinesisfirehose/nuxt-java-practice-stg-logs-archive` の `S3Delivery` ストリームに配信エラーの理由が出る。
+
+### 11-5. 認証メールのキューのアラームが鳴ったとき
+
+> 方針 → [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md)、ローカルでの観察 → [docs/notes/sqs/local-observation.md](../notes/sqs/local-observation.md)
+
+**2 本は別の異常を指している。**
+
+| アラーム | 意味 | 最初に見るところ |
+|---|---|---|
+| `...-auth-mail-dlq-not-empty` | 5 回処理に失敗したメッセージがある。**そのユーザーにはメールが届いていない** | ワーカーのログ(`/ecs/nuxt-java-practice-<env>` の `worker/` ストリーム)の「処理に失敗しました」 |
+| `...-auth-mail-queue-stale` | 最も古いメッセージが 5 分以上待っている。**ワーカーが止まっているか、追いついていない** | `#njp-alerts-ecs` にワーカーのタスク数不足が出ていないか。出ていなければ、受信スレッドだけが死んでいないか(ログに「受信スレッドが止まりました」) |
+
+DLQ の中身を見る(見ただけで隠れないよう `--visibility-timeout 0` を付ける):
+
+```bash
+DLQ=$(aws cloudformation describe-stacks --stack-name nuxt-java-practice-stg \
+  --query "Stacks[0].Outputs[?OutputKey=='AuthMailDeadLetterQueueUrl'].OutputValue" --output text)
+aws sqs receive-message --queue-url "$DLQ" --visibility-timeout 0 --max-number-of-messages 10 \
+  --query 'Messages[].Body' --output text
+```
+
+原因を直してデプロイした後、**メインキューに戻して処理し直す**(redrive)。冪等キーがあるので、すでに処理済みの依頼が混ざっていても 2 通目は送られない。
+
+```bash
+aws sqs start-message-move-task --source-arn "$(aws sqs get-queue-attributes --queue-url "$DLQ" \
+  --attribute-names QueueArn --query Attributes.QueueArn --output text)"
+```
+
+`--destination-arn` を省くと、メッセージが元々いたキュー(`auth-mail`)に戻る。戻す価値が無い(トークンの期限が切れていて送る意味が無いなど)なら `aws sqs purge-queue --queue-url "$DLQ"` で消す。**ユーザーには確認メールの再送やリセットの再申請で救ってもらえる。**
 
 ---
 
@@ -974,8 +1008,13 @@ Actions → 「パイプラインのスタックを反映」を実行
 ### 12-4. 普段のデプロイ
 
 ```
-Source(GitHub)→ Build(CodeBuild)→ Approve(Slack)→ Deploy(CodeDeploy)
+Source(GitHub)→ Build(CodeBuild)→ Approve(Slack)→ Deploy(ワーカー: CodeBuild → Web: CodeDeploy)
 ```
+
+**Deploy ステージは 2 段。** 先にワーカー(`DeployWorker`)をローリング更新し、成功したら Web を CodeDeploy で切り替える。
+ワーカーの更新は、Git のタスク定義(`deploy/taskdef-worker.json`)を register して `update-service` する CodeBuild で行う
+(CodePipeline の ECS デプロイアクションを使わない理由 → `deploy/buildspec-deploy-worker.yml` の冒頭)。
+ワーカーの更新に失敗する(サーキットブレーカーが前のリビジョンに戻す)と、Web は出ない。ログは `/aws/codebuild/nuxt-java-practice-<env>-deploy-worker`。
 
 - **自動で走る条件**: `main` への push のうち、`backend/**` `frontend/**` `docker/**` `deploy/**` `.dockerignore` のいずれかが変わったとき(`deploy/` にビルド手順とタスク定義が入っている)
 - **手動で走らせる**: コンソールの「リリースの変更」、または `aws codepipeline start-pipeline-execution --name nuxt-java-practice-stg-app`

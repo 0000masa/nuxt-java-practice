@@ -1,7 +1,7 @@
 # フェーズ20: 認証メールを SQS 経由でワーカーサービスに送らせる
 
 日付: 2026-10-11
-ステータス: アプリ実装済み(ローカルで確認 2026-10-11)・インフラ未着手
+ステータス: アプリ実装済み(ローカルで確認 2026-10-11)・インフラ実装済み(cfn-lint のみ 2026-10-18)・AWS 未検証
 
 方針 → [ADR-0017](../../adr/0017-auth-mail-via-sqs-worker.md)。
 フェーズ3 の[設計の決定7](./2026-08-05-phase3-auth-design.md)(メールはコミット後に同じスレッドで同期送信する)を置き換える。
@@ -73,9 +73,12 @@ CodeDeploy の Blue/Green はロードバランサーが必須で、ECS ネイ�
 分からないのは「**プロセスは生きているが仕事をしていない**」状態(受信スレッドだけが死んだ、固まった)。
 この状態では受信回数が増えないので、**DLQ にも移らない**。
 
-### 3-9. ECS の標準デプロイのアクションは、サービスの今のタスク定義を元にイメージだけ差し替える(要検証)
+### 3-9. ECS の標準デプロイのアクションは、サービスの今のタスク定義を元にイメージだけ差し替える(確認済み)
 
 そうだとすると、`deploy/taskdef-*.json` で環境変数を Git 管理している今の方式と噛み合わない。決定15 の実装方法に影響する。
+
+**CodePipeline のアクションリファレンスで確認した(2026-10-18)。** このアクションは「サービスが今使っているリビジョン」を元に新しいリビジョンを作り、
+別に register したリビジョンは無視する。Git のタスク定義を反映する手段にはならないので、決定15 は CodeBuild で実装した(§5-3)。
 
 ### 3-10. Spring Cloud AWS の Spring Boot 4 対応は未確認
 
@@ -375,6 +378,27 @@ ADR-0017 で、フェーズ3 の設計の決定7 を置き換えたことを明�
 - **確認したこと**: テスト 62 本がすべて成功(追加 13 本: `AuthMailWorkerTest` 7、`AuthMailEnqueuerTest` 2、`SqsReceiveLoopTest` 4)/
   §7 のローカルの項目のうち、溜まる → 流れる、重複で 1 通、DLQ への移動、レスポンスが SMTP を待たない(約 0.1 秒)を観察した(→ [local-observation.md](../../notes/sqs/local-observation.md))
 
+### インフラ(§6 の 3)で確定したこと
+
+- **ワーカーのデプロイは CodePipeline の ECS アクションではなく CodeBuild で行う(決定15 の実装)。** 3-9 のとおり、ECS アクションは Git のタスク定義を反映できない。
+  Deploy ステージに `DeployWorker`(CodeBuild、`deploy/buildspec-deploy-worker.yml`)を `RunOrder: 1` で置き、Web の CodeDeploy を `RunOrder: 2` にした。
+  中身は「`taskdef-worker.json` を register → `update-service` → いま始めたデプロイの `rolloutState` が `COMPLETED` か `FAILED` かを見届ける」
+  - **`aws ecs wait services-stable` を使わない。** サーキットブレーカーが前のリビジョンに戻した場合も、戻った先で安定するので成功に見えてしまう
+  - **ワーカーのタスク定義は承認の後に register する**(ビルドの段ではしない)。承認待ちの間に未承認のリビジョンが family の最新 ACTIVE になると、
+    その間のスタック更新で CloudFormation がそれを使いうるため
+  - ビルド用の `BuildProject` とは別の CodeBuild プロジェクト(`DeployWorkerProject`)にした。Docker も ECR も要らず、ECS のサービスを更新する権限が要るので、ロールごと分けた
+- **`WorkerService.TaskDefinition` は family 名の固定文字列(Web の `Service` と同じ形)。** `!Ref WorkerTaskDefinition` にすると、スタックを更新するたびに初代(古いイメージ)へ戻そうとする
+- **ワーカーの `DesiredCount` は `!If [ServiceEnabled, WorkerDesiredCount, 0]`。** Web の 2 段階デプロイ(`WebDesiredCount` 0 → N)に連動させ、`cfn-deploy.yml` を変えずに済ませた
+- **Web のタスクロールから `ses:SendEmail` を外した。** メールを送るのはワーカーだけになったため。Web が持つのは `sqs:SendMessage` だけ、ワーカーは `ReceiveMessage` / `DeleteMessage` / `ChangeMessageVisibility` と `ses:SendEmail`
+- **SQS のアラームは `Period: 60`。** SQS のメトリクスは 1 分間隔で CloudWatch に送られる(当初「5 分間隔」と書いたのは誤りで、実装中に直した)。
+  6 時間アクセスもメッセージも無いキューはメトリクスが止まるので、欠損は正常扱い(`TreatMissingData: notBreaching`)
+- **DLQ に `RedriveAllowPolicy` を付けた**(DLQ として使えるのはメインキューだけ)。メインキューには `ReceiveMessageWaitTimeSeconds: 20` も付けた(CLI で手で受信したときの空振り対策)
+- **ワーカーの CPU / メモリは stg・prod とも 512 / 1024。** 仕事は軽いが、Web と同じ Spring Boot を丸ごと起動するので Web の最小構成を下回らせない
+- **migrate のタスク定義には SQS の設定を足していない。** 起動時に SQS へ繋がない(`SqsConfig` の Bean は最初の送受信まで通信しない)ため
+- **確認したこと**: cfn-lint 1.57.2 で `app.yml` の指摘ゼロ、`pipeline.yml` は既存の 2 件(Lambda の `package` 前提の W3002)だけ /
+  params 2 つとテンプレートの Parameters が過不足なく対応(`ImageTag` と `BasicAuthCredential` はワークフローが渡す)/
+  buildspec のプレースホルダと taskdef 3 つが一致 / buildspec 2 つのシェルが構文として通る
+
 ## 6. 実装順序
 
 1. **アプリ(ローカルで完結)** — マイグレーション、Web の送信、ワーカーの処理本体と受信ループ、`app.role`、ElasticMQ と `worker` コンテナ、テスト
@@ -401,7 +425,14 @@ ADR-0017 で、フェーズ3 の設計の決定7 を置き換えたことを明�
 - HTTP(TLS なし)での操作が拒否される
 - DLQ と滞留のアラームが `#njp-alerts-sqs` に届く
 - パイプラインでワーカー → Web の順に更新される。ワーカーがローリング更新で 0 台にならない
-- 要検証: 3-9(標準デプロイのアクションとタスク定義の関係)
+- ワーカーが SIGTERM で「受信を停止しました」のログを出して止まる(ローリング更新と、Spot の中断で)。`stopTimeout` 60 秒で足りるか
+- **わざと起動に失敗するワーカーを出し、サーキットブレーカーが前のリビジョンに戻すこと、`DeployWorker` が失敗し Web が出ないこと**。
+  あわせて、失敗したデプロイが `describe-services` の一覧に `FAILED` のまま残るか(buildspec-deploy-worker.yml は外れる場合にも備えている)
+- **スタックの更新で Service を触ったとき(`WorkerDesiredCount` を変えるなど)、CloudFormation が family の最新 ACTIVE に切り替えるか。**
+  最新 ACTIVE はパイプラインが最後に register したもののはずなので、それで問題ないことを確かめる
+- DLQ への redrive(`aws sqs start-message-move-task`)で、処理済みの依頼が混ざっていても 2 通目が送られない
+- 既存のスタックに反映する場合: スタックの `ImageTag` がフェーズ20 より前のイメージだと、作られたワーカーは受信ループを持たない(役割の切り替えが無い)まま起動する。
+  反映した後にパイプラインを 1 回回すこと(新しく建てるなら、フェーズ20 以降のイメージのタグを cfn-deploy.yml に渡すだけでよい)
 
 ## 8. やらなかったこと
 
