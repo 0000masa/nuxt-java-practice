@@ -27,6 +27,42 @@ sqs get-queue-attributes --queue-url $Q \
 
 ElasticMQ の `elasticmq-native` イメージには**画面が無い**(9325 番は応答しなかった)。中身は CLI で見る。
 
+### AWS CLI が無いときは curl でも見られる
+
+SQS の API は、URL の `Action=...` で操作を指定する HTTP の呼び出し。ElasticMQ もこの形を受け付けるので、curl だけで叩ける。
+
+```bash
+# 件数を見る
+curl "http://localhost:9324/000000000000/auth-mail?Action=GetQueueAttributes&AttributeName.1=ApproximateNumberOfMessages&AttributeName.2=ApproximateNumberOfMessagesNotVisible"
+
+# DLQ の中身を見る(VisibilityTimeout=0 で、見ただけで隠れることがない)
+curl "http://localhost:9324/000000000000/auth-mail-dlq?Action=ReceiveMessage&VisibilityTimeout=0"
+```
+
+応答は XML で、値は `<Value>` や `<Body>` の中から探すことになる。
+
+```xml
+<GetQueueAttributesResponse xmlns="http://queue.amazonaws.com/doc/2012-11-05/">
+  <GetQueueAttributesResult>
+    <Attribute>
+      <Name>ApproximateNumberOfMessages</Name>
+      <Value>0</Value>
+    </Attribute>
+    ...
+```
+
+**ふだんは AWS CLI のほうが楽。** curl には次の不便がある。
+
+| | AWS CLI | curl |
+| --- | --- | --- |
+| 出力 | JSON・表・テキストを選べ、`--query` で値だけ抜き出せる | XML がそのまま返る |
+| メッセージの送信 | `--message-body '{"a":1}'` と書くだけ | 本文を URL エンコードして URL に入れる(`{` や `"` を変換する) |
+| 受け取った後の削除 | `ReceiptHandle` を次のコマンドにそのまま渡せる | 長い `ReceiptHandle` を XML から探し、エンコードして渡す |
+| 本物の SQS | `--endpoint-url` を外せば同じコマンドが使える | **使えない**(本物は署名を要求する) |
+
+curl で見られるのは **ElasticMQ が署名を検証しないから**で、ローカル専用の手。
+CLI が無い環境で件数だけ見たい、というときに使う。stg で本物の SQS を確かめるときは AWS CLI を使う。
+
 ## 1. ワーカーを止めると溜まり、戻すと流れる
 
 ```bash
