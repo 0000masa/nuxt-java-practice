@@ -11,14 +11,14 @@ CloudFormation スタックが作る CloudWatch アラームと RDS イベント
 
 ```
 [アラート]  app.yml(作り捨て)
-CloudWatch アラーム 7 本 ─┐
-RDS イベント購読 ─────────┤
-                          ↓
-              SNS トピック 2 本
-                          ↓
+CloudWatch アラーム 17 本 ─┐
+RDS イベント購読 ──────────┤
+                           ↓
+              SNS トピック 4 本
+                           ↓
    Amazon Q Developer(旧 AWS Chatbot)      ← AWS 製アプリ。コードを書かない
-                          ↓
-              #njp-alerts-ecs / #njp-alerts-rds
+                           ↓
+   #njp-alerts-ecs / #njp-alerts-rds / #njp-alerts-redis / #njp-alerts-sqs
 
 [デプロイ承認]  pipeline.yml(常駐)
 CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook ─→ #njp-deploy
@@ -30,13 +30,15 @@ CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook �
 
 | 経路 | Slack チャンネル | 流れてくるもの | Slack からの操作 |
 |---|---|---|---|
-| SNS `...-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足(D) | できない(`AWSDenyAll`) |
+| SNS `...-ecs-task-shortage` | `#njp-alerts-ecs` | ECS のタスク数不足(D。Web とワーカーの 2 本) | できない(`AWSDenyAll`) |
 | SNS `...-rds-alerts` | `#njp-alerts-rds` | RDS のメトリクス(A)・ログ由来(B)・イベント購読(C) | できない(`AWSDenyAll`) |
+| SNS `...-redis-alerts` | `#njp-alerts-redis` | ElastiCache のメモリ・追い出し | できない(`AWSDenyAll`) |
+| SNS `...-sqs-alerts` | `#njp-alerts-sqs` | 認証メールのキュー(E。DLQ にメッセージがある・キューの滞留) | できない(`AWSDenyAll`) |
 | CodeStarNotifications → SNS → Lambda | `#njp-deploy` | デプロイの承認待ち・成否 | **承認・却下できる** |
 
 **Slack に入れるアプリが 2 つになる。** AWS 製の Amazon Q Developer(アラート用)と、自分で作る App(承認用)。無料プランのアプリ枠 10 個のうち 2 つを使う。
 
-**`#njp-deploy` の仕組みだけ別スタックにある。** アラート用 2 本は `app.yml`(作り捨て)、承認用は `pipeline.yml`(常駐)。**アラート側を Lambda に寄せなかったのは、作り捨てスタックに Lambda を置くと環境を建て直すたびに作り直しになるから**(→ ADR-0014)。
+**`#njp-deploy` の仕組みだけ別スタックにある。** アラート用 4 本は `app.yml`(作り捨て)、承認用は `pipeline.yml`(常駐)。**アラート側を Lambda に寄せなかったのは、作り捨てスタックに Lambda を置くと環境を建て直すたびに作り直しになるから**(→ ADR-0014)。
 
 **チャンネルの分割単位は SNS トピックの分割単位。** Chatbot 側にフィルタ機能は無く、「どのアラームがどのチャンネルに出るか」はテンプレートで各アラームの `AlarmActions` にどちらのトピックを指定しているかで決まる。チャンネルを増やしたければ、まずトピックを増やすことになる。
 
@@ -58,18 +60,22 @@ CodeStarNotifications ─→ SNS ─→ Lambda(notify) ─→ Incoming Webhook �
 
 **承認は Slack から AWS を操作する双方向の経路**で、そこが Chatbot では成立しなかった。承認トークンが通知変数に無く 1 クリックで完結せず、押しても `AccessDenied` になる既製ボタンが消せず、カスタムアクションは全通知に付いてしまう。**承認者はインフラ担当ではなくアプリ開発担当**なので、「押していいものが一目で分かる」ことを優先して自作に切り替えた。踏んだ内容の記録 → [chatbot-approval-attempt.md](../notes/aws-code-service/chatbot-approval-attempt.md)。
 
-## 2. Slack にチャンネルを 4 つ作る
+## 2. Slack にチャンネルを 5 つ作る
 
-ワークスペース「自分用」に **public チャンネル**を 4 つ作る。
+ワークスペース「自分用」に **public チャンネル**を 5 つ作る。
 
 - `njp-alerts-ecs`
 - `njp-alerts-rds`
 - `njp-alerts-redis` — ElastiCache(セッションストア)の検知(フェーズ18 で追加)
+- `njp-alerts-sqs` — 認証メールのキューの検知(フェーズ20 で追加)
 - `njp-deploy` — デプロイの承認と通知(フェーズ16 で追加)
 
 **RDS に相乗りさせず Redis を別チャンネルにした理由。** 鳴ったときに見る場所と打つ手が違うため。
 RDS はクエリとストレージ、Redis はセッション数とメモリで、
 同じ「データストアが苦しい」でも対処が重ならない(→ [ADR-0015](../adr/0015-session-store-on-redis.md))。
+
+**SQS も ECS に相乗りさせず別チャンネルにした。** 理由は同じで、ECS はタスク、SQS はメッセージを見る。
+ただしワーカーの**タスク数不足**だけは ECS の異常なので `#njp-alerts-ecs` に出る(→ [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md))。
 
 **private でも動くが public にしている。** 1 人のワークスペースで private にする実利が無く、private にすると「アプリを招待し忘れて無音」という経路が 1 つ増えるため。
 
@@ -92,7 +98,7 @@ RDS はクエリとストレージ、Redis はセッション数とメモリで�
 
 ## 4. 各チャンネルにアプリを招待する
 
-**アラート用の 3 つ(`#njp-alerts-ecs` / `#njp-alerts-rds` / `#njp-alerts-redis`)で**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
+**アラート用の 4 つ(`#njp-alerts-ecs` / `#njp-alerts-rds` / `#njp-alerts-redis` / `#njp-alerts-sqs`)で**アプリを追加する。メッセージ入力欄に `/invite` と打つと候補が出るので、**「エージェントとアプリをこのチャンネルに追加する」**を選び、一覧から **Amazon Q Developer** を選ぶ。
 
 `/invite @Amazon Q` とテキストで打ち切る形は勧めない。アプリ名に空白が入るうえ、メンションが候補から確定されていないと**ただの人の招待コマンドとして解釈されて弾かれる**。上の UI から選ぶほうが確実。
 
@@ -100,7 +106,7 @@ RDS はクエリとストレージ、Redis はセッション数とメモリで�
 
 **`#njp-deploy` には Amazon Q Developer は要らない。** 承認は自作 App が担う(→ §6-2)。フェーズ16 で招待していたなら退出させてよい(残っていても害はない)。
 
-## 5. チャンネル ID を 4 つ控える
+## 5. チャンネル ID を 5 つ控える
 
 Slack の左ペインでチャンネル名を右クリック → **リンクをコピー**。URL の末尾がチャンネル ID。
 
@@ -120,11 +126,12 @@ https://自分用.slack.com/archives/C0123ABCDEF
 { "ParameterKey": "SlackChannelIdEcs",   "ParameterValue": "C0123ABCDEF" },
 { "ParameterKey": "SlackChannelIdRds",   "ParameterValue": "C0456GHIJKL" },
 { "ParameterKey": "SlackChannelIdRedis", "ParameterValue": "C0789MNOPQR" },
+{ "ParameterKey": "SlackChannelIdSqs",   "ParameterValue": "C0ABCSTUVWX" },
 ```
 
-**`SlackChannelIdRedis` は `__REDIS_CHANNEL__` というプレースホルダのままコミットしてある。**
+**`SlackChannelIdSqs` は `REPLACE_WITH_SQS_CHANNEL_ID` というプレースホルダのままコミットしてある**(フェーズ20)。
 チャンネルを作るまで本物の ID が存在しないため。埋めずに構築すると次節のとおり
-`AllowedPattern` で止まる(意図的)。
+`AllowedPattern` で止まる(意図的。フェーズ18 の `SlackChannelIdRedis` も同じ形で足した)。
 
 **`pipeline-stg.json` に Slack の ID は書かない。** 承認用の Lambda は webhook URL に投稿するだけで、ワークスペースもチャンネルも知らない。控えた `#njp-deploy` のチャンネル ID は §6-2 の Slack App 側で使う。
 
@@ -212,7 +219,7 @@ nuxt-java-practice-stg-app のデプロイ承認をお願いします。
 2. **テストメッセージを送信(Send test message)**
 3. Slack にカードが届けば配線は通っている
 
-**建てた直後は「OK になりました」通知が 7 通届く。異常ではない。** 新規作成されたアラームは `INSUFFICIENT_DATA` から始まり、正常と判定されると `OK` に遷移するので、異常が一度も起きていなくても `OKActions` が発火する(→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md))。
+**建てた直後は「OK になりました」通知が 17 通届く。異常ではない。** 新規作成されたアラームは `INSUFFICIENT_DATA` から始まり、正常と判定されると `OK` に遷移するので、異常が一度も起きていなくても `OKActions` が発火する(→ [ADR-0010](../adr/0010-monitoring-in-ephemeral-stack.md))。
 
 ## 8. 撤収と再構築で何が起きるか
 
