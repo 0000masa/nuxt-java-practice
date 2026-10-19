@@ -41,6 +41,17 @@
 
 ## 完了メモ
 
+- **フェーズ20 のインフラを実装した(cfn-lint のみ・AWS 未検証)**(2026-10-18):
+  - **作ったもの**: `app.yml` に SQS のキューと DLQ・キューポリシー(HTTPS 以外を拒否)・ワーカーのタスクロール / タスク定義 / サービス・
+    SQS 用の SNS トピックと Slack チャンネル設定・アラーム 3 本(DLQ / 滞留 / ワーカーのタスク数不足)/
+    `pipeline.yml` に `DeployWorker`(CodeBuild)を Web の Deploy の前に / `deploy/taskdef-worker.json` と `deploy/buildspec-deploy-worker.yml`
+  - **設計から動いた点**(詳細 → [設計書 §5-3](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)):
+    - **ワーカーのデプロイは CodePipeline の ECS アクションではなく CodeBuild**(ECS アクションは Git のタスク定義を反映できないことを公式で確認した)
+    - Web のタスクロールから `ses:SendEmail` を外した(送るのはワーカーだけ)
+  - **残っている手作業**: Slack に `#njp-alerts-sqs` を作って `/invite` し、ID を `params/*.json` の `SlackChannelIdSqs`(いまは `REPLACE_WITH_SQS_CHANNEL_ID`)に書き写す。
+    やるまで構築は `AllowedPattern` で止まる。手順 → [docs/slack/README.md](../slack/README.md)
+  - **反映の順序**: `pipeline-apply`(パイプラインの更新)→ フェーズ20 以降のコミットでパイプラインを回してイメージを作る → `cfn-deploy` でそのタグを渡して建てる → stg で[設計書 §7](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md) を潰す
+
 - **フェーズ20 のアプリ側を実装した(ローカル確認済み・インフラ未着手)**(2026-10-11):
   - **作ったもの**: マイグレーション V5(`processed_messages`、`users.password_changed_at`)/ 受信ループ `common/queue/SqsReceiveLoop` /
     Web 側の送信 `AuthMailEnqueuer` / ワーカーの処理本体 `AuthMailWorker` / ワーカーとしての起動 `AuthMailQueueConfig`(`app.role=worker`)/
