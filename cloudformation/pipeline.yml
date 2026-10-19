@@ -600,7 +600,7 @@ Resources:
                 Provider: Manual
                 Version: "1"
               Configuration:
-                # 通知は NotificationRule 経由で Chatbot に届くので、
+                # 通知は NotificationRule → SNS → Lambda(notify)経由で Slack に届くので、
                 # ここに NotificationArn(SNS)は指定しない
                 #
                 # 【#{...} は CodePipeline の変数、${...} は !Sub】

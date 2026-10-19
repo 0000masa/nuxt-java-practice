@@ -28,7 +28,7 @@
 | 17 | Slack 承認の自作 App 化 | デプロイ承認を Chatbot から自作 Slack App + Lambda に載せ替える。**設計 → [2026-09-06-phase17-slack-approval-design.md](../superpowers/specs/2026-09-06-phase17-slack-approval-design.md)**、方針 → [ADR-0014](../adr/0014-slack-approval-with-lambda.md) | 完了 |
 | 18 | セッションを Redis へ | セッションストアを MySQL から Redis(ElastiCache)に移す。`spring-boot-starter-session-data-redis` へ差し替え、ローカルは redis + redisinsight + redis-test の 3 コンテナ、本番は ElastiCache(ReplicationGroup ノード1台・暗号化・AUTH)。**設計 → [2026-09-12-phase18-redis-session-design.md](../superpowers/specs/2026-09-12-phase18-redis-session-design.md)**、方針 → [ADR-0015](../adr/0015-session-store-on-redis.md)、解説 → [docs/notes/redis/](../notes/redis/) | 完了 |
 | 19 | DB を Aurora へ | RDS for MySQL を Aurora MySQL 8.4(プロビジョンド。stg: Writer 1 + Reader 1 / prod: Writer 1 + Reader 2)に置き換え、`@Transactional(readOnly = true)` を Reader に送る読み書き分離を入れる(認証の読み取りだけ Writer に固定)。あわせて Hikari のプールの大きさを明示、アラームを役割単位に組み直し、`cfn-apply.yml` のガードに `Remove` を追加(`allow_replacement` → `allow_destructive_changes`)。**設計 → [2026-09-13-phase19-aurora-design.md](../superpowers/specs/2026-09-13-phase19-aurora-design.md)**、方針 → [ADR-0016](../adr/0016-aurora-provisioned-with-read-write-split.md) | 完了 |
-| 20 | 認証メールを SQS 経由に | 認証メールの送信を、SQS 経由で別の ECS サービス(ワーカー。同じイメージを `app.role=worker` で起動)に移す。トークンの発行もワーカーで行い、メッセージに秘密を載せない。冪等キー(`processed_messages`)、DLQ と滞留のアラーム、ローカルは ElasticMQ + `worker` コンテナ。**設計 → [2026-10-11-phase20-sqs-auth-mail-design.md](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)**、方針 → [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) | 作業中 |
+| 20 | 認証メールを SQS 経由に | 認証メールの送信を、SQS 経由で別の ECS サービス(ワーカー。同じイメージを `app.role=worker` で起動)に移す。トークンの発行もワーカーで行い、メッセージに秘密を載せない。冪等キー(`processed_messages`)、DLQ と滞留のアラーム、ローカルは ElasticMQ + `worker` コンテナ。**設計 → [2026-10-11-phase20-sqs-auth-mail-design.md](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md)**、方針 → [ADR-0017](../adr/0017-auth-mail-via-sqs-worker.md) | 完了 |
 
 ## 実装方針(全フェーズ共通)
 
@@ -40,6 +40,18 @@
 - backend の Java を編集したら `docker compose exec backend sh ./gradlew classes` で反映(CLAUDE.md 参照)
 
 ## 完了メモ
+
+- **フェーズ20 を完了にした**(2026-10-20):
+  - **確認できたこと**(stg、2026-10-19): `cfn-deploy.yml` の 2 段階デプロイでワーカーが起動し、SES から認証メールが届いた /
+    パイプラインの Deploy ステージでワーカー → Web の順に更新され、ワーカーがローリング更新で 0 台にならなかった
+  - **AWS で踏んだ罠**: SQS のキューポリシーは 1 ステートメントに Resource を 1 つしか書けない。
+    メインキューと DLQ を 1 つのポリシーにまとめていたため作成に失敗し、スタック全体がロールバックした。
+    **cfn-lint は通っていた。** キューごとにポリシーを分けて解決(→ [設計書 §5-3](../superpowers/specs/2026-10-11-phase20-sqs-auth-mail-design.md))
+  - **「完了」の範囲**: 設計書 §7 の AWS の項目を全部潰したわけではない。**確認の記録が無いまま残っているもの**:
+    権限の分離(Web は受信できない / ワーカーは送信できない)/ HTTP での操作の拒否 / DLQ と滞留のアラームが `#njp-alerts-sqs` に届くこと /
+    SIGTERM での止まり方と `stopTimeout` 60 秒で足りるか / わざと起動に失敗させたときのサーキットブレーカーと `DeployWorker` の失敗 /
+    スタック更新で Service を触ったときのタスク定義の切り替わり方 / DLQ からの redrive で 2 通目が送られないこと
+  - 設計書のステータス行を「完了」に更新した
 
 - **フェーズ20 のインフラを実装した(cfn-lint のみ・AWS 未検証)**(2026-10-18):
   - **作ったもの**: `app.yml` に SQS のキューと DLQ・キューポリシー(HTTPS 以外を拒否)・ワーカーのタスクロール / タスク定義 / サービス・

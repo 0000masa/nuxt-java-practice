@@ -1,7 +1,7 @@
 # フェーズ20: 認証メールを SQS 経由でワーカーサービスに送らせる
 
 日付: 2026-10-11
-ステータス: アプリ実装済み(ローカルで確認 2026-10-11)・インフラ実装済み(cfn-lint のみ 2026-10-18)・AWS 未検証
+ステータス: 完了(ローカル 2026-10-11 / AWS 2026-10-19 に実機確認。§7 の AWS の項目は一部だけ確認)
 
 方針 → [ADR-0017](../../adr/0017-auth-mail-via-sqs-worker.md)。
 フェーズ3 の[設計の決定7](./2026-08-05-phase3-auth-design.md)(メールはコミット後に同じスレッドで同期送信する)を置き換える。
@@ -395,6 +395,11 @@ ADR-0017 で、フェーズ3 の設計の決定7 を置き換えたことを明�
 - **DLQ に `RedriveAllowPolicy` を付けた**(DLQ として使えるのはメインキューだけ)。メインキューには `ReceiveMessageWaitTimeSeconds: 20` も付けた(CLI で手で受信したときの空振り対策)
 - **ワーカーの CPU / メモリは stg・prod とも 512 / 1024。** 仕事は軽いが、Web と同じ Spring Boot を丸ごと起動するので Web の最小構成を下回らせない
 - **migrate のタスク定義には SQS の設定を足していない。** 起動時に SQS へ繋がない(`SqsConfig` の Bean は最初の送受信まで通信しない)ため
+- **キューポリシーはキューごとに分けた(AWS で踏んだ)。** 当初は 1 つの `AWS::SQS::QueuePolicy` の `Queues` にメインキューと DLQ を並べ、
+  `Resource` に 2 つの ARN を書いていた。SQS のキューポリシーは「1 ステートメントに Resource は 1 つ」しか受け付けず
+  (`Each statement in the policy should have exactly one resource`)、作成に失敗してスタック全体がロールバックした。
+  **cfn-lint は通っていた**ので、ローカルの検査では気づけない(フェーズ18 の ElastiCache の `CONFIG` と同じ種類の罠)。
+  `AuthMailQueuePolicy` と `AuthMailDeadLetterQueuePolicy` に分けた。効果は変わらない
 - **確認したこと**: cfn-lint 1.57.2 で `app.yml` の指摘ゼロ、`pipeline.yml` は既存の 2 件(Lambda の `package` 前提の W3002)だけ /
   params 2 つとテンプレートの Parameters が過不足なく対応(`ImageTag` と `BasicAuthCredential` はワークフローが渡す)/
   buildspec のプレースホルダと taskdef 3 つが一致 / buildspec 2 つのシェルが構文として通る
@@ -420,11 +425,13 @@ ADR-0017 で、フェーズ3 の設計の決定7 を置き換えたことを明�
 
 ### AWS(stg)
 
-- ワーカーのサービスが 2 段階デプロイで起動し、SES からメールが届く
+**2026-10-19 に確認したのは ✅ の 2 項目だけ。** 残りは記録が無く、AWS では未検証のまま残っている。
+
+- ✅ ワーカーのサービスが 2 段階デプロイで起動し、SES からメールが届く
 - Web のタスクロールで受信できない / ワーカーのタスクロールで送信できない(権限の分離)
 - HTTP(TLS なし)での操作が拒否される
 - DLQ と滞留のアラームが `#njp-alerts-sqs` に届く
-- パイプラインでワーカー → Web の順に更新される。ワーカーがローリング更新で 0 台にならない
+- ✅ パイプラインでワーカー → Web の順に更新される。ワーカーがローリング更新で 0 台にならない
 - ワーカーが SIGTERM で「受信を停止しました」のログを出して止まる(ローリング更新と、Spot の中断で)。`stopTimeout` 60 秒で足りるか
 - **わざと起動に失敗するワーカーを出し、サーキットブレーカーが前のリビジョンに戻すこと、`DeployWorker` が失敗し Web が出ないこと**。
   あわせて、失敗したデプロイが `describe-services` の一覧に `FAILED` のまま残るか(buildspec-deploy-worker.yml は外れる場合にも備えている)
