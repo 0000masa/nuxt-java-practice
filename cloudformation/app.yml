@@ -1399,7 +1399,7 @@ Resources:
   # Web がコミットの後に依頼を送り、ワーカー(WorkerService)が受け取ってメールを送る。
   # メッセージは requestId / userId / purpose / requestedAt だけで、秘密(生のトークン)は載らない。
   # それでも守る(決定14): 保存時の暗号化(SSE-SQS)・送る側と受ける側で権限を分ける(TaskRole / WorkerTaskRole)・
-  # HTTPS 以外の操作を拒否する(AuthMailQueuePolicy)。
+  # HTTPS 以外の操作を拒否する(AuthMailQueuePolicy / AuthMailDeadLetterQueuePolicy)。
   #
   # QueueName を固定しているのは、ロググループやアラームと同じく名前で中身が分かるようにするため。
   # 名前を変えると作り直し(Replacement)になり、溜まっていたメッセージごと消える。
@@ -1442,11 +1442,32 @@ Resources:
   # HTTPS 以外(平文の HTTP)での操作を拒否する。AWS がよく推奨している設定(→ 設計書の決定14)。
   # SDK も CLI も既定で HTTPS を使うので、普段は何も起きない。
   # Deny は IAM の Allow より常に強いので、ロールに権限があっても平文では通らない。
+  #
+  # キューごとに分けているのは、SQS のキューポリシーが「1 ステートメントに Resource は 1 つ」
+  # しか受け付けないため。Queues: に 2 つ並べると同じ文書が両方に貼られ、
+  # Resource に 2 つの ARN が入ったままになって作成が失敗する(Each statement in the policy
+  # should have exactly one resource)。
   AuthMailQueuePolicy:
     Type: AWS::SQS::QueuePolicy
     Properties:
       Queues:
         - !Ref AuthMailQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: sqs:*
+            Resource: !GetAtt AuthMailQueue.Arn
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+  AuthMailDeadLetterQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
         - !Ref AuthMailDeadLetterQueue
       PolicyDocument:
         Version: "2012-10-17"
@@ -1455,9 +1476,7 @@ Resources:
             Effect: Deny
             Principal: "*"
             Action: sqs:*
-            Resource:
-              - !GetAtt AuthMailQueue.Arn
-              - !GetAtt AuthMailDeadLetterQueue.Arn
+            Resource: !GetAtt AuthMailDeadLetterQueue.Arn
             Condition:
               Bool:
                 aws:SecureTransport: "false"
