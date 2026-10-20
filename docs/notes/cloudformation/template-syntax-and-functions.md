@@ -282,7 +282,13 @@ Resources:
 Description: Verification environment for the posting app (ALB + ECS Fargate + RDS MySQL)
 ```
 
-**これは実際に踏んだ**(コミット `51e30b7`「日本語だと弾かれる Description を英語に直す」)。**未検証:** 化けるのか弾かれるのかはコミットメッセージと現行コメントで表現が違う。いずれにせよ日本語を入れない、が結論。
+**これは実際に踏んだ**(コミット `51e30b7`「日本語だと弾かれる Description を英語に直す」)。コミットメッセージは「弾かれる」と書いているが、**正しくは「化ける」**。`pipeline.yml` に日本語の `Description` を書いたままスタックを更新したら、`UPDATE_COMPLETE` で成功し、コンソールの表示だけが `???` になった(2026-10-20)。
+
+- **化けるのはトップレベルの `Description` と、Outputs の `Description`。** どちらも確認済み
+- **CLI 側で化けているのではない。** `aws cloudformation package` の出力と、`deploy --s3-bucket` が S3 に上げる本体は、どちらも UTF-8 のまま届く(偽のエンドポイントで受けて確認した)。化けるのは CloudFormation が保存するとき
+- **Parameters の `Description` は未確認。** `app.yml` / `pipeline.yml` とも日本語のまま
+
+結論は変わらない。日本語の説明はコメントに書き、`Description` は英語で書く。
 
 **`Description` はトップレベルに 1 つだけ。** リソースごとの説明はコメントで書き、パラメータの説明は各パラメータの `Description` を使う。
 

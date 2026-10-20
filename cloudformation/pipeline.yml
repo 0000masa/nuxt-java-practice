@@ -1,6 +1,9 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: >-
-  アプリのデプロイパイプライン(CodePipeline / CodeBuild)。常駐スタック。
+# アプリのデプロイパイプライン(CodePipeline / CodeBuild)。常駐スタック。
+# Description と Outputs の Description はマルチバイト文字を保持せず、コンソール上で ? に化ける
+# (app.yml と同じ。→ docs/notes/cloudformation/template-syntax-and-functions.md §2-3)。
+# 日本語の説明はコメントに置き、ここは英語で書く。
+Description: App deploy pipeline (CodePipeline / CodeBuild). Long-lived stack
 
 # ============================================================================
 # 常駐スタック。app.yml(作り捨て)とは別に建てて、別に消す。
@@ -983,20 +986,22 @@ Outputs:
   PipelineName:
     Value: !Ref Pipeline
 
+  # 承認や実行状況を見る画面
   PipelineConsoleUrl:
-    Description: 承認や実行状況を見る画面
+    Description: Console page for approvals and execution status
     Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codepipeline/pipelines/${Pipeline}/view?region=${AWS::Region}
 
   BuildProjectName:
     Value: !Ref BuildProject
 
+  # pipeline-destroy.yml が空にするバケット
   ArtifactBucketName:
-    Description: pipeline-destroy.yml が空にするバケット
+    Description: Bucket emptied by pipeline-destroy.yml
     Value: !Ref ArtifactBucket
 
   # 【この URL を Slack App の Interactivity に登録する】
   # スタックを作るまで URL は決まらないので、手順は
   # 「Slack App を作る → デプロイ → URL を登録」の 3 段になる(→ docs/slack/README.md §6-3)
   SlackInteractionUrl:
-    Description: Slack App の Interactivity Request URL に設定する値
+    Description: Value to set as the Slack App Interactivity Request URL
     Value: !GetAtt InteractionFunctionUrl.FunctionUrl
